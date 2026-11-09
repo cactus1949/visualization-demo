@@ -1,0 +1,858 @@
+{
+  "schema_version": 1,
+  "case": "tianjin_18km",
+  "source_file": "data/lowair_atmos.nc",
+  "created_utc": "2026-11-09T07:26:01.830369+00:00",
+  "global_attrs": {
+    "case": "tianjin_18km",
+    "solver": "steady neutral ABL, Arakawa-C FVM, transported k-epsilon (torch)",
+    "backend": "abl3d",
+    "ztop_m": 1000.0,
+    "dx_m": 60.0,
+    "dz_m": 25.0
+  },
+  "grid": {
+    "nx": 300,
+    "ny": 300,
+    "nz": 40,
+    "lon_min": 117.09612370490512,
+    "lon_max": 117.30387629509488,
+    "lat_min": 39.04887785555375,
+    "lat_max": 39.21112214444626,
+    "dx_m": 60.0,
+    "dy_m": 60.0,
+    "levels_m": [
+      12.5,
+      37.5,
+      62.5,
+      87.5,
+      112.5,
+      137.5,
+      162.5,
+      187.5,
+      212.5,
+      237.5,
+      262.5,
+      287.5,
+      312.5,
+      337.5,
+      362.5,
+      387.5,
+      412.5,
+      437.5,
+      462.5,
+      487.5,
+      512.5,
+      537.5,
+      562.5,
+      587.5,
+      612.5,
+      637.5,
+      662.5,
+      687.5,
+      712.5,
+      737.5,
+      762.5,
+      787.5,
+      812.5,
+      837.5,
+      862.5,
+      887.5,
+      912.5,
+      937.5,
+      962.5,
+      987.5
+    ],
+    "level_interfaces_m": [
+      0.0,
+      25.0,
+      50.0,
+      75.0,
+      100.0,
+      125.0,
+      150.0,
+      175.0,
+      200.0,
+      225.0,
+      250.0,
+      275.0,
+      300.0,
+      325.0,
+      350.0,
+      375.0,
+      400.0,
+      425.0,
+      450.0,
+      475.0,
+      500.0,
+      525.0,
+      550.0,
+      575.0,
+      600.0,
+      625.0,
+      650.0,
+      675.0,
+      700.0,
+      725.0,
+      750.0,
+      775.0,
+      800.0,
+      825.0,
+      850.0,
+      875.0,
+      900.0,
+      925.0,
+      950.0,
+      975.0,
+      1000.0
+    ],
+    "order": "C (z,lat,lon)",
+    "lat_ascending": true
+  },
+  "variables": {
+    "u": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.1568627450980392,
+      "offset": -20.0,
+      "transform": null,
+      "range": [
+        -20.0,
+        20.0
+      ],
+      "units": "m s-1",
+      "long_name": "eastward wind",
+      "label_zh": "东向风速",
+      "colormap": "rdbu",
+      "file": "u.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 73347,
+      "data_min": -11.920494079589844,
+      "data_max": -2.0758187770843506,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "v": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.1568627450980392,
+      "offset": -20.0,
+      "transform": null,
+      "range": [
+        -20.0,
+        20.0
+      ],
+      "units": "m s-1",
+      "long_name": "northward wind",
+      "label_zh": "北向风速",
+      "colormap": "rdbu",
+      "file": "v.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 79757,
+      "data_min": 2.2893431186676025,
+      "data_max": 11.920631408691406,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "w": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.00784313725490196,
+      "offset": -1.0,
+      "transform": null,
+      "range": [
+        -1.0,
+        1.0
+      ],
+      "units": "m s-1",
+      "long_name": "vertical wind (interface), continuity/pressure solve",
+      "label_zh": "垂直风速",
+      "colormap": "rdbu",
+      "file": "w.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 312572,
+      "data_min": -0.1650369018316269,
+      "data_max": 0.18414822220802307,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0,
+      "staggered_from": "zf -> z layer centres (mean adjacent interfaces)"
+    },
+    "u_gust": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.11764705882352941,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        30.0
+      ],
+      "units": "m s-1",
+      "long_name": "instantaneous gust speed |U_h| + 2*sigma_u",
+      "label_zh": "阵风",
+      "colormap": "turbo",
+      "file": "u_gust.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 443101,
+      "data_min": 10.415481567382812,
+      "data_max": 21.166797637939453,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "tke": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.058823529411764705,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        15.0
+      ],
+      "units": "m2 s-2",
+      "long_name": "turbulent kinetic energy (transported k)",
+      "label_zh": "湍动能",
+      "colormap": "viridis",
+      "file": "tke.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 272769,
+      "data_min": 2.353102207183838,
+      "data_max": 12.673748016357422,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "sigma_u": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.0196078431372549,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        5.0
+      ],
+      "units": "m s-1",
+      "long_name": "longitudinal (along-wind) std 2.4 u* (1-z/ztop)^(1/3)",
+      "label_zh": "东向脉动",
+      "colormap": "magma",
+      "file": "sigma_u.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 873342,
+      "data_min": 0.49257320165634155,
+      "data_max": 3.7132155895233154,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "sigma_v": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.0196078431372549,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        5.0
+      ],
+      "units": "m s-1",
+      "long_name": "lateral (cross-wind) std 1.8 u* (1-z/ztop)^(1/3)",
+      "label_zh": "北向脉动",
+      "colormap": "magma",
+      "file": "sigma_v.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 743401,
+      "data_min": 0.36942988634109497,
+      "data_max": 2.784911632537842,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "sigma_w": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.0196078431372549,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        5.0
+      ],
+      "units": "m s-1",
+      "long_name": "vertical std 1.2 u* (1-z/ztop)^(1/3)",
+      "label_zh": "垂直脉动",
+      "colormap": "magma",
+      "file": "sigma_w.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 578324,
+      "data_min": 0.24628660082817078,
+      "data_max": 1.8566077947616577,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "wind_shear": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.000980392156862745,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        0.25
+      ],
+      "units": "s-1",
+      "long_name": "magnitude of 3D wind vector shear",
+      "label_zh": "风切变",
+      "colormap": "magma",
+      "file": "wind_shear.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 151293,
+      "data_min": 4.6436947741312906e-05,
+      "data_max": 0.20082612335681915,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "dirdz": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.00392156862745098,
+      "offset": -0.5,
+      "transform": null,
+      "range": [
+        -0.5,
+        0.5
+      ],
+      "units": "deg/m",
+      "long_name": "wind direction vertical shear",
+      "label_zh": "风向垂直切变",
+      "colormap": "rdbu",
+      "file": "dirdz.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 115435,
+      "data_min": -0.3592870831489563,
+      "data_max": 0.32523488998413086,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "icing_index": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.00392156862745098,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        1.0
+      ],
+      "units": "0-1",
+      "long_name": "icing risk index = supercooled_fraction(T) x normalized cll",
+      "label_zh": "结冰指数",
+      "colormap": "magma",
+      "file": "icing_index.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 163341,
+      "data_min": 0.0,
+      "data_max": 0.8435039520263672,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "icing_accum": {
+      "dims": [
+        "z",
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        40,
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 2.3529411764705883,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        600.0
+      ],
+      "units": "mm",
+      "long_name": "accumulated ice accretion thickness = E*LWC*U/rho_ice x dt",
+      "label_zh": "累积覆冰",
+      "colormap": "blues",
+      "file": "icing_accum.bin.br",
+      "bytes_raw": 3600000,
+      "bytes_compressed": 228943,
+      "data_min": 0.0,
+      "data_max": 552.3240966796875,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "t2m": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.1568627450980392,
+      "offset": 260.0,
+      "transform": null,
+      "range": [
+        260.0,
+        300.0
+      ],
+      "units": "K",
+      "long_name": "2 m air temperature",
+      "label_zh": "2米气温",
+      "colormap": "turbo",
+      "file": "t2m.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 34278,
+      "data_min": 271.5857849121094,
+      "data_max": 278.7222900390625,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "q2m": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 7.843137254901961e-05,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        0.02
+      ],
+      "units": "kg/kg",
+      "long_name": "2 m specific humidity",
+      "label_zh": "2米比湿",
+      "colormap": "viridis",
+      "file": "q2m.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 34866,
+      "data_min": 0.0015062843449413776,
+      "data_max": 0.006100212689489126,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "u10m": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.1568627450980392,
+      "offset": -20.0,
+      "transform": null,
+      "range": [
+        -20.0,
+        20.0
+      ],
+      "units": "m s-1",
+      "long_name": "eastward wind",
+      "label_zh": "10米东向风",
+      "colormap": "rdbu",
+      "file": "u10m.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 16712,
+      "data_min": -6.3969950675964355,
+      "data_max": -1.4960551261901855,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "v10m": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.1568627450980392,
+      "offset": -20.0,
+      "transform": null,
+      "range": [
+        -20.0,
+        20.0
+      ],
+      "units": "m s-1",
+      "long_name": "northward wind",
+      "label_zh": "10米北向风",
+      "colormap": "rdbu",
+      "file": "v10m.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 18713,
+      "data_min": 1.7372736930847168,
+      "data_max": 7.128871917724609,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "ustar": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.011764705882352941,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        3.0
+      ],
+      "units": "m s-1",
+      "long_name": "friction velocity Cmu^0.25*sqrt(k)",
+      "label_zh": "摩擦速度",
+      "colormap": "viridis",
+      "file": "ustar.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 21953,
+      "data_min": 0.8843476176261902,
+      "data_max": 1.5536738634109497,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "precip": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.0196078431372549,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        5.0
+      ],
+      "units": "mm/h",
+      "long_name": "precipitation rate (region-mean constrained, redistributed by 3D-wind moisture convergence)",
+      "label_zh": "降水率",
+      "colormap": "blues",
+      "file": "precip.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 37997,
+      "data_min": 0.3175560235977173,
+      "data_max": 2.03953218460083,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "cloud": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.39215686274509803,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        100.0
+      ],
+      "units": "%",
+      "long_name": "cloud (region-mean constrained, redistributed by 3D-wind vertical motion, z=0-8000m)",
+      "label_zh": "云量",
+      "colormap": "blues",
+      "file": "cloud.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 43469,
+      "data_min": 53.199195861816406,
+      "data_max": 100.0,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "cloud_low": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.39215686274509803,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        100.0
+      ],
+      "units": "%",
+      "long_name": "cloud_low (region-mean constrained, redistributed by 3D-wind vertical motion, z=0-2000m)",
+      "label_zh": "低云量",
+      "colormap": "blues",
+      "file": "cloud_low.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 43469,
+      "data_min": 53.199195861816406,
+      "data_max": 100.0,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "visibility": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.00980392156862745,
+      "offset": 2.0,
+      "transform": "log10",
+      "range": [
+        2.0,
+        4.5
+      ],
+      "units": "m",
+      "long_name": "surface visibility (RH/precip diagnostic)",
+      "label_zh": "能见度",
+      "colormap": "viridis",
+      "file": "visibility.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 50305,
+      "data_min": 243.61305236816406,
+      "data_max": 4650.5302734375,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "risk_level": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 0.01568627450980392,
+      "offset": 0.0,
+      "transform": null,
+      "range": [
+        0.0,
+        4.0
+      ],
+      "units": "level",
+      "long_name": "number of exceeded low-level hazard thresholds",
+      "label_zh": "风险等级",
+      "colormap": "magma",
+      "file": "risk_level.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 6882,
+      "data_min": 1.0,
+      "data_max": 3.0,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    },
+    "p": {
+      "dims": [
+        "lat",
+        "lon"
+      ],
+      "shape": [
+        300,
+        300
+      ],
+      "dtype": "uint8",
+      "bits": 8,
+      "scale": 78.43137254901961,
+      "offset": 90000.0,
+      "transform": null,
+      "range": [
+        90000.0,
+        110000.0
+      ],
+      "units": "Pa",
+      "long_name": "station surface pressure",
+      "label_zh": "地面气压",
+      "colormap": "viridis",
+      "file": "p.bin.br",
+      "bytes_raw": 90000,
+      "bytes_compressed": 13,
+      "data_min": 101325.0,
+      "data_max": 101325.0,
+      "clipped_low_frac": 0.0,
+      "clipped_high_frac": 0.0,
+      "nan_count": 0
+    }
+  },
+  "timing": {
+    "load_s": 0.09421782500066911,
+    "total_s": 3.8326041440013796,
+    "bytes_raw": 44190000,
+    "bytes_compressed": 4344282
+  }
+}
