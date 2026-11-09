@@ -1,12 +1,10 @@
+/// <reference types="vite/client" />
 export {};
 
 declare global {
   interface Window {
     __atmosReady?: boolean;
-    __atmosStatus?: {
-      backend: string;
-      particlePath: string;
-      particleSample?: number[];
-    };
+    __atmosStatus?: Record<string, unknown> & { fps?: number; buildings?: number };
+    __atmosApi?: Record<string, (...args: any[]) => unknown>;
   }
 }

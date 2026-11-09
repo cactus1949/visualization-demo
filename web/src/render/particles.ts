@@ -1,276 +1,553 @@
 import * as THREE from "three";
-import { SpriteNodeMaterial } from "three/webgpu";
-import {
-  Fn,
-  If,
-  float,
-  hash,
-  instanceIndex,
-  instancedArray,
-  length,
-  texture,
-  texture3D,
-  uniform,
-  vec2,
-  vec3,
-} from "three/tsl";
-import type { Manifest } from "../data/manifest";
-import { worldSize } from "./coords";
-import { colorTexture } from "./colormaps";
-
-export type ParticlePath = "gpu-compute-webgpu" | "gpu-compute-webgl2" | "cpu";
-
-export const PARTICLE_PATH_LABEL: Record<ParticlePath, string> = {
-  "gpu-compute-webgpu": "粒子: GPU 计算 (WebGPU compute shader)",
-  "gpu-compute-webgl2": "粒子: GPU 计算 (WebGL2 变换反馈模拟)",
-  cpu: "粒子: CPU (降级)",
-};
-
-export interface ParticleHandle {
-  object: THREE.Object3D;
-  path: ParticlePath;
-  label: string;
-  count: number;
-  /** multiplier on real wind speed (1 = 120x real time) */
-  speed: { value: number };
-  step: (deltaSeconds: number) => void;
-  /** first particle position, read back from the GPU when needed */
-  sample: () => Promise<number[]>;
-  dispose: () => void;
-}
-
-/** u, v, w packed into RGB of one RGBA8 3D texture (alpha unused). */
-export function packWindTexture(
-  manifest: Manifest,
-  u: Uint8Array,
-  v: Uint8Array,
-  w: Uint8Array,
-): THREE.Data3DTexture {
-  const packed = new Uint8Array(u.length * 4);
-  for (let index = 0; index < u.length; index += 1) {
-    packed[index * 4] = u[index];
-    packed[index * 4 + 1] = v[index];
-    packed[index * 4 + 2] = w[index];
-    packed[index * 4 + 3] = 255;
-  }
-  const texture3d = new THREE.Data3DTexture(
-    packed,
-    manifest.grid.nx,
-    manifest.grid.ny,
-    manifest.grid.nz,
-  );
-  texture3d.format = THREE.RGBAFormat;
-  texture3d.type = THREE.UnsignedByteType;
-  texture3d.minFilter = THREE.LinearFilter;
-  texture3d.magFilter = THREE.LinearFilter;
-  texture3d.unpackAlignment = 1;
-  texture3d.needsUpdate = true;
-  return texture3d;
-}
-
-// Simulated seconds per real second. 10 m/s wind crosses the 18 km box in ~15 s.
-const TIME_SCALE = 120;
-const SPEED_COLOR_MAX = 15;
-
-function randomPositions(count: number, size: { x: number; y: number; z: number }) {
-  const positions = new Float32Array(count * 3);
-  const life = new Float32Array(count);
-  for (let i = 0; i < count; i += 1) {
-    positions[i * 3] = (Math.random() - 0.5) * size.x;
-    positions[i * 3 + 1] = Math.random() * size.y;
-    positions[i * 3 + 2] = (Math.random() - 0.5) * size.z;
-    life[i] = Math.random() * 8;
-  }
-  return { positions, life };
-}
+import { FullScreenQuad } from "three/addons/postprocessing/Pass.js";
+import { colormapTexture } from "./colormaps";
+import type { Domain } from "./fields";
 
 /**
- * GPGPU particle advection.
+ * GPGPU wind particles with persistent trails (WebGL2).
  *
- * Positions/lifetimes/speeds live in GPU storage buffers (instancedArray). A TSL compute
- * kernel samples the packed u/v/w texture, converts the quantized texel back to m/s,
- * moves the particle, and respawns it at a hashed random location when it leaves the box
- * or its lifetime ends. The same kernel runs as a WebGPU compute shader or, on the
- * WebGL2 backend, through three.js's transform-feedback emulation. Rendering reads the
- * same buffer directly (no CPU copy). The CPU path is only used if building the GPU
- * path throws.
+ * State  : two RGBA32F render targets (ping-pong), one texel per particle.
+ *          xyz = position in grid space (gx, gy in 0..1, height in km), w = age in steps.
+ * Advect : a full-screen fragment pass samples the packed RGBA8 wind 3D texture with
+ *          hardware trilinear filtering and integrates with RK2 (midpoint).
+ * History: an RGBA32F WebGLArrayRenderTarget with N layers is a per-particle ring buffer;
+ *          every step the new state is copied into layer `head`.
+ * Trails : one instanced draw. Each instance is a ribbon of N nodes; the vertex shader
+ *          fetches node k from layer (head − k) mod N, projects it and extrudes it in screen
+ *          space to the requested pixel width. Trails are real 3D geometry, so they stay
+ *          correct while the camera moves (no screen-space fading).
+ * No CPU work per particle, no readbacks in the frame loop.
  */
-export function makeParticles(
-  renderer: any,
-  manifest: Manifest,
-  windTexture: THREE.Data3DTexture,
-  exaggeration: number,
-  count = 50_000,
-  windData?: { u: Uint8Array; v: Uint8Array; w: Uint8Array },
-): ParticleHandle {
-  const n = Math.min(200_000, Math.max(1_000, Math.round(count)));
-  const size = worldSize(manifest, exaggeration);
-  const { u: uMeta, v: vMeta, w: wMeta } = manifest.variables;
-  const { positions, life } = randomPositions(n, size);
-  const speed = uniform(1.0);
-  const colormap = colorTexture("turbo");
-  const isWebGPU = renderer.backend?.isWebGPUBackend === true;
 
-  try {
-    const positionBuffer = instancedArray(positions, "vec3");
-    const lifeBuffer = instancedArray(life, "float");
-    const speedBuffer = instancedArray(n, "float");
-    const dt = uniform(0.016);
-    const seed = uniform(0);
-    const span = vec3(uMeta.scale * 255, vMeta.scale * 255, wMeta.scale * 255);
-    const base = vec3(uMeta.offset, vMeta.offset, wMeta.offset);
+export type ColorMode = "speed" | "w" | "height" | "single";
 
-    const update = Fn(() => {
-      const position = positionBuffer.element(instanceIndex);
-      const age = lifeBuffer.element(instanceIndex);
-      const uvw = vec3(
-        position.x.div(size.x).add(0.5),
-        position.z.div(size.z).negate().add(0.5),
-        position.y.div(size.y),
-      );
-      const wind = texture3D(windTexture, uvw, 0).xyz.mul(span).add(base); // m/s
-      // world units: x,z are km, y is km * exaggeration; north is -z
-      const velocity = vec3(
-        wind.x.div(1000),
-        wind.z.mul(size.y).div(1000),
-        wind.y.negate().div(1000),
-      ).mul(TIME_SCALE);
-      position.addAssign(velocity.mul(dt).mul(speed));
-      age.subAssign(dt);
-      speedBuffer.element(instanceIndex).assign(length(wind));
+export interface ParticleParams {
+  count: number;
+  trailLength: number;
+  speed: number;
+  lineWidth: number;
+  lifetime: number; // seconds at 60 steps/s
+  opacity: number;
+  colorMode: ColorMode;
+  colormap: string;
+  color: string;
+  heightMin: number; // m
+  heightMax: number; // m
+  wExaggeration: number;
+  timeScale: number;
+  additive: boolean;
+  paused: boolean;
+  taper: boolean;
+}
 
-      const outside = position.x
-        .abs()
-        .greaterThan(size.x / 2)
-        .or(position.z.abs().greaterThan(size.z / 2))
-        .or(position.y.lessThan(0))
-        .or(position.y.greaterThan(size.y));
-      If(age.lessThan(0).or(outside), () => {
-        const key = instanceIndex.toFloat().add(seed);
-        position.assign(
-          vec3(
-            hash(key).sub(0.5).mul(size.x),
-            hash(key.add(1013.0)).mul(size.y),
-            hash(key.add(2027.0)).sub(0.5).mul(size.z),
-          ),
-        );
-        age.assign(hash(key.add(3041.0)).mul(6).add(2));
-      });
-    })().compute(n);
+export const DEFAULT_PARTICLES: ParticleParams = {
+  count: 32000,
+  trailLength: 48,
+  speed: 1,
+  lineWidth: 1.3,
+  lifetime: 8,
+  opacity: 0.55,
+  colorMode: "speed",
+  colormap: "glacier",
+  color: "#8fe9ff",
+  heightMin: 20,
+  heightMax: 300,
+  wExaggeration: 1,
+  timeScale: 150,
+  additive: false,
+  paused: false,
+  taper: true,
+};
 
-    const material = new SpriteNodeMaterial({
+export interface WindBinding {
+  texture: THREE.Data3DTexture;
+  /** per channel: m/s = byte * scale + offset */
+  scale: THREE.Vector3;
+  offset: THREE.Vector3;
+  /** alpha channel = speed byte / 255 * maxSpeed */
+  maxSpeed: number;
+  speedRange: [number, number];
+  wRange: number;
+}
+
+const GLSL_HASH = /* glsl */ `
+uint pcg(uint v) {
+  uint state = v * 747796405u + 2891336453u;
+  uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+float hash1(uint v) { return float(pcg(v)) / 4294967295.0; }
+`;
+
+const GLSL_WIND = /* glsl */ `
+uniform highp sampler3D uWind;
+uniform vec3 uWindScale;
+uniform vec3 uWindOffset;
+uniform vec3 uDomain; // sx, sz, top (km)
+uniform vec3 uGridN;
+vec3 gridToTex(vec3 g) {
+  return vec3((g.xy * (uGridN.xy - 1.0) + 0.5) / uGridN.xy, g.z / uDomain.z);
+}
+vec4 windRaw(vec3 g) { return textureLod(uWind, gridToTex(g), 0.0); }
+vec3 windMs(vec4 raw) { return raw.rgb * 255.0 * uWindScale + uWindOffset; }
+`;
+
+const simFragment = /* glsl */ `
+precision highp float;
+precision highp int;
+${GLSL_HASH}
+${GLSL_WIND}
+uniform sampler2D uState;
+uniform float uDt;          // simulated seconds for this step
+uniform float uWExag;
+uniform float uLifeSteps;
+uniform uint uSeed;
+uniform vec2 uHeight;       // km
+uniform float uReset;
+uniform int uSize;
+out vec4 outState;
+
+// grid-space velocity: gx, gy per second and km per second for height
+vec3 velocity(vec3 g) {
+  vec3 w = windMs(windRaw(g));
+  return vec3(w.x / (uDomain.x * 1000.0), w.y / (uDomain.y * 1000.0), w.z * uWExag / 1000.0);
+}
+
+vec4 spawn(uint id, bool initial, float life) {
+  uint s = id * 9781u + uSeed * 6271u;
+  float h = mix(uHeight.x, uHeight.y, hash1(s + 3u));
+  // stagger ages on first spawn so particles do not respawn in lock-step
+  float age = initial ? floor(hash1(s + 4u) * life) : 0.0;
+  return vec4(hash1(s + 1u), hash1(s + 2u), h, age);
+}
+
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  uint id = uint(p.y * uSize + p.x);
+  vec4 s = texelFetch(uState, p, 0);
+  float life = uLifeSteps * (0.5 + hash1(id * 7919u + 17u));
+  if (uReset > 0.5) { outState = spawn(id, true, life); return; }
+  if (s.w > life) { outState = spawn(id, false, life); return; }
+  // RK2 midpoint
+  vec3 k1 = velocity(s.xyz);
+  vec3 k2 = velocity(s.xyz + 0.5 * uDt * k1);
+  vec3 next = s.xyz + uDt * k2;
+  bool outside = next.x < 0.0 || next.x > 1.0 || next.y < 0.0 || next.y > 1.0 ||
+                 next.z < uHeight.x - 0.02 || next.z > uHeight.y + 0.02 ||
+                 next.z < 0.003 || next.z > uDomain.z;
+  outState = outside ? spawn(id, false, life) : vec4(next, s.w + 1.0);
+}
+`;
+
+const copyFragment = /* glsl */ `
+precision highp float;
+uniform sampler2D uState;
+out vec4 outColor;
+void main() { outColor = texelFetch(uState, ivec2(gl_FragCoord.xy), 0); }
+`;
+
+const fillFragment = copyFragment;
+
+const quadVertex = /* glsl */ `
+out vec2 vUv;
+void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+`;
+
+const trailVertex = /* glsl */ `
+precision highp float;
+precision highp int;
+precision highp sampler2DArray;
+${GLSL_WIND}
+uniform sampler2DArray uHistory;
+uniform sampler2D uState;
+uniform sampler2D uColormap;
+uniform int uHead;
+uniform int uLayers;
+uniform int uTrail;
+uniform vec2 uResolution;
+uniform float uWidth;
+uniform float uTaper;
+uniform int uColorMode;
+uniform vec3 uColorRange; // speed: (maxSpeed, lo, hi) m/s; w: (range, 0, 0)
+in float aNode;
+in float aSide;
+in vec2 aTexel;
+out float vAlpha;
+out float vSide;
+out vec3 vColor;
+
+vec3 node(ivec2 texel, int k) {
+  int layer = (uHead - k + uLayers) % uLayers;
+  return texelFetch(uHistory, ivec3(texel, layer), 0).xyz;
+}
+vec3 toLocal(vec3 g) {
+  return vec3((g.x - 0.5) * uDomain.x, g.z, (0.5 - g.y) * uDomain.y);
+}
+vec4 toClip(vec3 g) {
+  return projectionMatrix * modelViewMatrix * vec4(toLocal(g), 1.0);
+}
+
+void main() {
+  ivec2 texel = ivec2(aTexel);
+  float age = texelFetch(uState, texel, 0).w;
+  int maxK = min(uTrail - 1, int(age));
+  int k = int(aNode);
+  int kc = min(k, maxK);
+  vec3 g = node(texel, kc);
+  vec3 gPrev = node(texel, max(kc - 1, 0));
+  vec3 gNext = node(texel, min(kc + 1, maxK));
+  vec4 clip = toClip(g);
+  vec4 clipPrev = toClip(gPrev);
+  vec4 clipNext = toClip(gNext);
+  vec2 a = clipPrev.xy / max(clipPrev.w, 1e-4) * uResolution;
+  vec2 b = clipNext.xy / max(clipNext.w, 1e-4) * uResolution;
+  vec2 dir = b - a;
+  float len = length(dir);
+  dir = len > 1e-4 ? dir / len : vec2(1.0, 0.0);
+  vec2 normal = vec2(-dir.y, dir.x);
+  float f = maxK > 0 ? float(kc) / float(maxK) : 1.0;
+  float width = len > 1e-3 ? uWidth * mix(1.0, 0.25, f * uTaper) : 0.0;
+  // offset in NDC: pixels * 2 / resolution, times w to undo the perspective divide
+  clip.xy += normal * aSide * width / uResolution * clip.w;
+  gl_Position = clip;
+  vSide = aSide;
+  bool visible = k <= maxK && maxK > 0 && len > 1e-3 && clip.w > 0.0;
+  vAlpha = visible ? pow(1.0 - float(kc) / float(uTrail), 1.2) : 0.0;
+
+  vec4 raw = windRaw(g);
+  float t;
+  if (uColorMode == 0) {
+    float speed = raw.a * uColorRange.x;
+    t = (speed - uColorRange.y) / max(uColorRange.z - uColorRange.y, 1e-3);
+  } else if (uColorMode == 1) {
+    t = 0.5 + 0.5 * windMs(raw).z / uColorRange.x;
+  } else {
+    t = g.z / uDomain.z;
+  }
+  vColor = textureLod(uColormap, vec2(clamp(t, 0.0, 1.0), 0.5), 0.0).rgb;
+}
+`;
+
+const trailFragment = /* glsl */ `
+precision highp float;
+uniform float uOpacity;
+uniform int uColorMode;
+uniform vec3 uSingle;
+in float vAlpha;
+in float vSide;
+in vec3 vColor;
+out vec4 outColor;
+void main() {
+  // soft edge across the ribbon for cheap anti-aliasing
+  float edge = 1.0 - smoothstep(0.55, 1.0, abs(vSide));
+  float alpha = vAlpha * edge * uOpacity;
+  if (alpha < 0.004) discard;
+  vec3 color = uColorMode == 3 ? uSingle : vColor;
+  outColor = vec4(color, alpha);
+}
+`;
+
+function floatTarget(size: number): THREE.WebGLRenderTarget {
+  return new THREE.WebGLRenderTarget(size, size, {
+    type: THREE.FloatType,
+    format: THREE.RGBAFormat,
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+    depthBuffer: false,
+    generateMipmaps: false,
+  });
+}
+
+function trailGeometry(nodes: number, count: number, size: number): THREE.InstancedBufferGeometry {
+  const geometry = new THREE.InstancedBufferGeometry();
+  const node = new Float32Array(nodes * 2);
+  const side = new Float32Array(nodes * 2);
+  const index: number[] = [];
+  for (let k = 0; k < nodes; k += 1) {
+    node[k * 2] = k;
+    node[k * 2 + 1] = k;
+    side[k * 2] = -1;
+    side[k * 2 + 1] = 1;
+    if (k < nodes - 1) {
+      const a = k * 2;
+      index.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+  }
+  // three needs a position attribute to compute the draw count; it is unused by the shader.
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(nodes * 6), 3));
+  geometry.setAttribute("aNode", new THREE.BufferAttribute(node, 1));
+  geometry.setAttribute("aSide", new THREE.BufferAttribute(side, 1));
+  geometry.setIndex(index);
+  const texel = new Float32Array(count * 2);
+  for (let i = 0; i < count; i += 1) {
+    texel[i * 2] = i % size;
+    texel[i * 2 + 1] = Math.floor(i / size);
+  }
+  geometry.setAttribute("aTexel", new THREE.InstancedBufferAttribute(texel, 2));
+  geometry.instanceCount = count;
+  return geometry;
+}
+
+export class WindParticles {
+  readonly object: THREE.Mesh;
+  readonly label = "粒子: WebGL2 GPGPU（浮点纹理 ping-pong + 历史环形缓冲）";
+  params: ParticleParams;
+  count = 0;
+  private size = 0;
+  private layers = 0;
+  private head = 0;
+  private seed = 1;
+  private needsReset = true;
+  private state: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget] | null = null;
+  private history: THREE.WebGLArrayRenderTarget | null = null;
+  private readonly simQuad: FullScreenQuad;
+  private readonly copyQuad: FullScreenQuad;
+  private readonly simMaterial: THREE.ShaderMaterial;
+  private readonly copyMaterial: THREE.ShaderMaterial;
+  private readonly trailMaterial: THREE.ShaderMaterial;
+  private readonly resolution = new THREE.Vector2(1, 1);
+
+  constructor(
+    private readonly renderer: THREE.WebGLRenderer,
+    private readonly domain: Domain,
+    private readonly wind: WindBinding,
+    params: Partial<ParticleParams> = {},
+  ) {
+    this.params = { ...DEFAULT_PARTICLES, ...params };
+    const windUniforms = () => ({
+      uWind: { value: wind.texture },
+      uWindScale: { value: wind.scale },
+      uWindOffset: { value: wind.offset },
+      uDomain: { value: new THREE.Vector3(domain.sx, domain.sz, domain.top) },
+      uGridN: { value: new THREE.Vector3(domain.nx, domain.ny, domain.nz) },
+    });
+    this.simMaterial = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: quadVertex,
+      fragmentShader: simFragment,
+      uniforms: {
+        ...windUniforms(),
+        uState: { value: null },
+        uDt: { value: 0 },
+        uWExag: { value: 1 },
+        uLifeSteps: { value: 360 },
+        uSeed: { value: 1 },
+        uHeight: { value: new THREE.Vector2(0.02, 0.6) },
+        uReset: { value: 1 },
+        uSize: { value: 1 },
+      },
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.copyMaterial = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: quadVertex,
+      fragmentShader: fillFragment,
+      uniforms: { uState: { value: null } },
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.simQuad = new FullScreenQuad(this.simMaterial);
+    this.copyQuad = new FullScreenQuad(this.copyMaterial);
+    this.trailMaterial = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: trailVertex,
+      fragmentShader: trailFragment,
+      uniforms: {
+        ...windUniforms(),
+        uHistory: { value: null },
+        uState: { value: null },
+        uColormap: { value: colormapTexture("turbo") },
+        uHead: { value: 0 },
+        uLayers: { value: 1 },
+        uTrail: { value: 2 },
+        uResolution: { value: this.resolution },
+        uWidth: { value: 1.5 },
+        uTaper: { value: 1 },
+        uColorMode: { value: 0 },
+        uColorRange: { value: new THREE.Vector3(1, 0, 1) },
+        uOpacity: { value: 0.85 },
+        uSingle: { value: new THREE.Color() },
+      },
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      depthTest: true,
+      side: THREE.DoubleSide, // ribbon winding depends on the screen-space direction
     });
-    material.positionNode = positionBuffer.toAttribute();
-    const s = speedBuffer.toAttribute().div(SPEED_COLOR_MAX).clamp(0, 1);
-    material.colorNode = texture(colormap, vec2(s, 0.5)).rgb;
-    material.opacityNode = float(0.6);
-    material.scaleNode = float(0.022);
-    const sprite = new THREE.Sprite(material);
-    (sprite as any).count = n;
-    sprite.frustumCulled = false;
-    sprite.renderOrder = 3;
-
-    const path: ParticlePath = isWebGPU ? "gpu-compute-webgpu" : "gpu-compute-webgl2";
-    let frame = 0;
-    return {
-      object: sprite,
-      path,
-      label: PARTICLE_PATH_LABEL[path],
-      count: n,
-      speed,
-      step(deltaSeconds: number) {
-        dt.value = deltaSeconds;
-        seed.value = (frame++ * 7919) % 1_000_003;
-        renderer.compute(update);
-      },
-      async sample() {
-        try {
-          const buffer: ArrayBuffer = await renderer.getArrayBufferAsync(positionBuffer.value);
-          return Array.from(new Float32Array(buffer, 0, 3));
-        } catch {
-          return [];
-        }
-      },
-      dispose() {
-        material.dispose();
-        colormap.dispose();
-      },
-    };
-  } catch (error) {
-    console.warn("GPU particle path unavailable, using CPU fallback", error);
+    this.object = new THREE.Mesh(new THREE.InstancedBufferGeometry(), this.trailMaterial);
+    this.object.frustumCulled = false;
+    this.object.renderOrder = 10;
+    this.object.name = "wind-particles";
+    this.allocate();
+    this.apply();
   }
 
-  // ---- CPU fallback: same physics on the main thread (nearest-neighbour sampling) ----
-  const geometry = new THREE.BufferGeometry();
-  const colors = new Float32Array(n * 3);
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  const material = new THREE.PointsMaterial({
-    size: 2,
-    vertexColors: true,
-    sizeAttenuation: false,
-    transparent: true,
-    depthWrite: false,
-  });
-  const points = new THREE.Points(geometry, material);
-  points.frustumCulled = false;
-  points.renderOrder = 3;
-  const { nx, ny, nz } = manifest.grid;
-  const color = new THREE.Color();
-  const decode = (bytes: Uint8Array | undefined, index: number, meta: typeof uMeta) =>
-    bytes ? bytes[index] * meta.scale + meta.offset : 0;
-  return {
-    object: points,
-    path: "cpu",
-    label: PARTICLE_PATH_LABEL.cpu,
-    count: n,
-    speed,
-    step(deltaSeconds: number) {
-      for (let i = 0; i < n; i += 1) {
-        const o = i * 3;
-        const ix = Math.round((positions[o] / size.x + 0.5) * (nx - 1));
-        const iy = Math.round((0.5 - positions[o + 2] / size.z) * (ny - 1));
-        const iz = Math.min(nz - 1, Math.max(0, Math.floor((positions[o + 1] / size.y) * nz)));
-        const index = iz * nx * ny + iy * nx + ix;
-        const wu = decode(windData?.u, index, uMeta);
-        const wv = decode(windData?.v, index, vMeta);
-        const ww = decode(windData?.w, index, wMeta);
-        const k = (TIME_SCALE * deltaSeconds * speed.value) / 1000;
-        positions[o] += wu * k;
-        positions[o + 1] += ww * size.y * k;
-        positions[o + 2] -= wv * k;
-        life[i] -= deltaSeconds;
-        if (
-          life[i] < 0 ||
-          Math.abs(positions[o]) > size.x / 2 ||
-          Math.abs(positions[o + 2]) > size.z / 2 ||
-          positions[o + 1] < 0 ||
-          positions[o + 1] > size.y
-        ) {
-          positions[o] = (Math.random() - 0.5) * size.x;
-          positions[o + 1] = Math.random() * size.y;
-          positions[o + 2] = (Math.random() - 0.5) * size.z;
-          life[i] = 2 + Math.random() * 6;
+  /** (Re)allocate GPU state when the particle count changes. */
+  private allocate(): void {
+    const count = Math.max(1024, Math.min(262144, Math.round(this.params.count)));
+    const size = Math.ceil(Math.sqrt(count));
+    // ring buffer depth: 64 steps up to 65k particles, 32 beyond (VRAM: size² × N × 16 B)
+    const layers = count > 70000 ? 32 : 64;
+    if (size === this.size && layers === this.layers && count === this.count) return;
+    this.disposeTargets();
+    this.size = size;
+    this.layers = layers;
+    this.count = count;
+    this.state = [floatTarget(size), floatTarget(size)];
+    this.history = new THREE.WebGLArrayRenderTarget(size, size, layers, {
+      type: THREE.FloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: false,
+      generateMipmaps: false,
+    });
+    this.object.geometry.dispose();
+    this.object.geometry = trailGeometry(layers, count, size);
+    this.needsReset = true;
+  }
+
+  /** Apply parameter changes; cheap (uniforms only) except when the count changes. */
+  setParams(params: Partial<ParticleParams>): void {
+    const before = this.params;
+    this.params = { ...this.params, ...params };
+    if (this.params.count !== before.count) this.allocate();
+    if (this.params.heightMin !== before.heightMin || this.params.heightMax !== before.heightMax) {
+      this.needsReset = true;
+    }
+    this.apply();
+  }
+
+  private apply(): void {
+    const p = this.params;
+    const sim = this.simMaterial.uniforms;
+    sim.uWExag.value = p.wExaggeration;
+    sim.uLifeSteps.value = Math.max(10, p.lifetime * 60);
+    const lo = Math.min(p.heightMin, p.heightMax - 25) / 1000;
+    const hi = Math.max(p.heightMax, p.heightMin + 25) / 1000;
+    sim.uHeight.value.set(Math.max(0.005, lo), Math.min(this.domain.top - 0.005, hi));
+    sim.uSize.value = this.size;
+    const trail = this.trailMaterial.uniforms;
+    const trailLength = Math.max(2, Math.min(this.layers, Math.round(p.trailLength)));
+    trail.uTrail.value = trailLength;
+    trail.uLayers.value = this.layers;
+    trail.uWidth.value = p.lineWidth;
+    trail.uTaper.value = p.taper ? 1 : 0;
+    trail.uOpacity.value = p.opacity;
+    trail.uColormap.value = colormapTexture(p.colormap);
+    const modes: Record<ColorMode, number> = { speed: 0, w: 1, height: 2, single: 3 };
+    trail.uColorMode.value = modes[p.colorMode];
+    if (p.colorMode === "speed") {
+      const [lo, hi] = this.wind.speedRange;
+      trail.uColorRange.value.set(this.wind.maxSpeed, lo, hi);
+    } else if (p.colorMode === "w") {
+      trail.uColorRange.value.set(this.wind.wRange, 0, 0);
+    }
+    (trail.uSingle.value as THREE.Color).set(p.color);
+    this.trailMaterial.blending = p.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+    // only draw the segments that are inside the requested trail length
+    this.object.geometry.setDrawRange(0, (trailLength - 1) * 6);
+  }
+
+  /** Advance the simulation by one step (call once per frame before rendering). */
+  step(frameSeconds: number): void {
+    if (!this.state || !this.history) return;
+    const renderer = this.renderer;
+    const previousTarget = renderer.getRenderTarget();
+    const previousAutoClear = renderer.autoClear;
+    renderer.autoClear = false;
+    const sim = this.simMaterial.uniforms;
+    const reset = this.needsReset;
+    if (!this.params.paused || reset) {
+      sim.uState.value = this.state[0].texture;
+      sim.uReset.value = reset ? 1 : 0;
+      sim.uSeed.value = this.seed++ >>> 0;
+      sim.uDt.value = reset
+        ? 0
+        : Math.min(frameSeconds, 1 / 20) * this.params.timeScale * this.params.speed;
+      renderer.setRenderTarget(this.state[1]);
+      this.simQuad.render(renderer);
+      this.state.reverse();
+      this.copyMaterial.uniforms.uState.value = this.state[0].texture;
+      if (reset) {
+        // fill every history layer with the spawn position: trails start collapsed
+        for (let layer = 0; layer < this.layers; layer += 1) {
+          renderer.setRenderTarget(this.history, layer);
+          this.copyQuad.render(renderer);
         }
-        const t = Math.min(1, Math.hypot(wu, wv, ww) / SPEED_COLOR_MAX);
-        color.setHSL(0.66 - 0.66 * t, 1, 0.55);
-        colors[o] = color.r;
-        colors[o + 1] = color.g;
-        colors[o + 2] = color.b;
+        this.needsReset = false;
+      } else {
+        this.head = (this.head + 1) % this.layers;
+        renderer.setRenderTarget(this.history, this.head);
+        this.copyQuad.render(renderer);
       }
-      geometry.attributes.position.needsUpdate = true;
-      geometry.attributes.color.needsUpdate = true;
-    },
-    async sample() {
-      return [positions[0], positions[1], positions[2]];
-    },
-    dispose() {
-      geometry.dispose();
-      material.dispose();
-      colormap.dispose();
-    },
-  };
+    }
+    renderer.setRenderTarget(previousTarget);
+    renderer.autoClear = previousAutoClear;
+    const trail = this.trailMaterial.uniforms;
+    trail.uHistory.value = this.history.texture;
+    trail.uState.value = this.state[0].texture;
+    trail.uHead.value = this.head;
+    renderer.getDrawingBufferSize(this.resolution);
+  }
+
+  /** Debug readback of particle 0 (grid space). Never call this in the frame loop. */
+  sample(): number[] {
+    if (!this.state) return [];
+    const out = new Float32Array(4);
+    this.renderer.readRenderTargetPixels(this.state[0], 0, 0, 1, 1, out);
+    return Array.from(out);
+  }
+
+  /** Debug: particle 0 position in every history layer, newest first (slow readback). */
+  sampleHistory(): number[][] {
+    if (!this.history) return [];
+    const target = floatTarget(1);
+    const material = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: quadVertex,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        precision highp sampler2DArray;
+        uniform sampler2DArray uHistory;
+        uniform int uLayer;
+        out vec4 outColor;
+        void main() { outColor = texelFetch(uHistory, ivec3(0, 0, uLayer), 0); }
+      `,
+      uniforms: { uHistory: { value: this.history.texture }, uLayer: { value: 0 } },
+    });
+    const quad = new FullScreenQuad(material);
+    const out: number[][] = [];
+    const previous = this.renderer.getRenderTarget();
+    for (let k = 0; k < this.layers; k += 1) {
+      material.uniforms.uLayer.value = (this.head - k + this.layers) % this.layers;
+      this.renderer.setRenderTarget(target);
+      quad.render(this.renderer);
+      const px = new Float32Array(4);
+      this.renderer.readRenderTargetPixels(target, 0, 0, 1, 1, px);
+      out.push(Array.from(px));
+    }
+    this.renderer.setRenderTarget(previous);
+    quad.dispose();
+    material.dispose();
+    target.dispose();
+    return out;
+  }
+
+  private disposeTargets(): void {
+    this.state?.forEach((t) => t.dispose());
+    this.history?.dispose();
+    this.state = null;
+    this.history = null;
+  }
+
+  dispose(): void {
+    this.disposeTargets();
+    this.object.geometry.dispose();
+    this.simMaterial.dispose();
+    this.copyMaterial.dispose();
+    this.trailMaterial.dispose();
+    this.simQuad.dispose();
+    this.copyQuad.dispose();
+  }
 }
