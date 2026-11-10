@@ -340,6 +340,7 @@ function updateVolume(): void {
   if (!volume || !manifest.value) return;
   volume.mesh.visible = layers.volume;
   if (!layers.volume) {
+    syncVolumeSlices();
     if (window.__atmosStatus) window.__atmosStatus.volume = null;
     return;
   }
@@ -347,6 +348,7 @@ function updateVolume(): void {
   if (!b) {
     volume.mesh.visible = false;
     request(layers.volumeVar);
+    syncVolumeSlices();
     return;
   }
   if (layers.volumeVar === SPEED && volumeFilterNeedsSpeedRange.value && fields.speedBytes) {
@@ -361,9 +363,52 @@ function updateVolume(): void {
   volume.material.uniforms.uOpacity.value = layers.volumeOpacity;
   volume.material.uniforms.uThreshold.value = layers.volumeThreshold;
   updateVolumeFilter();
+  syncVolumeSlices();
   if (window.__atmosStatus) {
     window.__atmosStatus.volume = volume.mesh.visible ? layers.volumeVar : null;
   }
+}
+
+function syncVolumeSlices(): void {
+  if (!volume) return;
+  const compositing = Boolean(layers.volume && volume.mesh.visible);
+  const filterMin = layers.volumeFilterMin;
+  const filterMax = layers.volumeFilterMax;
+  const hb = slice.enabled ? binding(slice.variable) : null;
+  const vb = section.enabled ? binding(section.variable) : null;
+  volume.setHorizontalSlice({
+    enabled: compositing && Boolean(hslice?.group.visible),
+    field: hb,
+    min: slice.min,
+    max: slice.max,
+    opacity: slice.opacity,
+    colormap: slice.colormap,
+    filterMin,
+    filterMax,
+    filterEnable: layers.filterSlices,
+    contours: slice.contours,
+    height: slice.heightM / 1000,
+  });
+  volume.setVerticalSlice({
+    enabled: compositing && Boolean(vsection?.group.visible),
+    field: vb,
+    min: section.min,
+    max: section.max,
+    opacity: section.opacity,
+    colormap: section.colormap,
+    filterMin,
+    filterMax,
+    filterEnable: layers.filterSlices,
+    contours: section.contours,
+    normal: vsection?.normal(),
+    offset: vsection?.offsetKm(),
+  });
+  hslice?.material.setVolumeComposited(
+    compositing && Boolean(hslice?.group.visible) && Boolean(hb),
+  );
+  vsection?.material.setVolumeComposited(
+    compositing && Boolean(vsection?.group.visible) && Boolean(vb),
+  );
 }
 
 function ensureParticles(): void {
@@ -399,12 +444,11 @@ function updateDepthOccluders(): void {
   depthOccluders.length = 0;
   if (particles) depthOccluders.push(particles.object);
   if (hslice) {
-    depthOccluders.push(hslice.outline);
-    if (hslice.group.visible && slice.opacity < 0.5) depthOccluders.push(hslice.mesh);
+    depthOccluders.push(hslice.mesh, hslice.outline);
   }
   if (vsection) {
     depthOccluders.push(vsection.outline, vsection.handle);
-    if (vsection.group.visible && section.opacity < 0.5) depthOccluders.push(vsection.mesh);
+    depthOccluders.push(vsection.mesh);
   }
 }
 
@@ -648,6 +692,7 @@ function frame(now: number): void {
   vsection?.setHandleScale(view.exaggeration);
   hslice?.material.setRoot(atmos.root);
   vsection?.material.setRoot(atmos.root);
+  syncVolumeSlices();
   if (particles) {
     particles.object.visible = layers.particles;
     if (layers.particles) particles.step(dt);

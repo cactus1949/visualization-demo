@@ -78,6 +78,7 @@ void main() {
 `;
 
 export class SliceMaterial extends THREE.ShaderMaterial {
+  private composited = false;
   constructor(domain: Domain) {
     super({
       glslVersion: THREE.GLSL3,
@@ -126,7 +127,14 @@ export class SliceMaterial extends THREE.ShaderMaterial {
     this.uniforms.uContours.value = style.contours;
     // Slices always write depth: particles behind a slice are hidden by it (drawn later),
     // opaque buildings are drawn earlier and stay visible through translucent slices.
-    this.depthWrite = true;
+    this.depthWrite = !this.composited;
+    this.colorWrite = !this.composited;
+  }
+
+  setVolumeComposited(on: boolean): void {
+    this.composited = on;
+    this.colorWrite = !on;
+    this.depthWrite = !on;
   }
 
   setFilter(min: number, max: number, enabled: boolean): void {
