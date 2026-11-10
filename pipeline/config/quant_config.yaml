@@ -12,7 +12,7 @@ derived:
   speed: {display_range: [0, 20]}
 u: {encoding: f16, range_scope: global, display_range: [-15, 15]}
 v: {encoding: f16, range_scope: global, display_range: [-15, 15]}
-w: {encoding: f16, range_scope: global, display_range: [-0.2, 0.2]}
+w: {encoding: u8_linear, range_scope: per_level, display_range: [-0.2, 0.2]}
 u_gust: {encoding: u8_linear, range_scope: per_level, display_range: [0, 25]}
 tke: {encoding: u8_linear, range_scope: per_level, display_range: [0, 13]}
 sigma_u: {encoding: u8_linear, range_scope: per_level, display_range: [0, 4]}

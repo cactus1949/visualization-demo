@@ -15,7 +15,7 @@
 | ------------------------ | ----------------------------------------------------- |
 | `pipeline/ncpipe/`       | NetCDF → 按变量配置量化 + Brotli + manifest，与渲染器无关 |
 | `pipeline/bldpipe/`      | 建筑白膜管线：裁剪、投影、拉伸、meshopt 压缩          |
-| `data/web/lowair_atmos/` | 23 个变量的 `.bin.br` 和 `manifest.json`（约 12.5 MB） |
+| `data/web/lowair_atmos/` | 23 个变量的 `.bin.br` 和 `manifest.json`（约 7.5 MB） |
 | `data/web/buildings/`    | `buildings.glb`（约 6.4 MB）和 `buildings.json`       |
 | `web/`                   | three.js 前端                                         |
 
@@ -30,7 +30,7 @@ PYTHONPATH=pipeline /workspace/.venv-nc/bin/python -m ncpipe build \
   --out data/web/lowair_atmos
 ```
 
-每个变量按 `pipeline/config/quant_config.yaml` 编码，再经 Brotli（quality 9）压缩。配置里可以写编码（`u8_linear`、`u16_linear`、`f16`、`u8_log10` 等）、区间范围（`global` 或 `per_level`），以及可选的分位数裁剪。本案例中 u、v、w 存成 float16（也测过逐层 u16，体积更大、更难压）；温度、湿度等窄区间的 2D 变量，以及多数脉动、结冰类 3D 变量，用 8 位线性；`visibility` 和跨数量级的 `wind_shear` 用 log10。`tke` 在这份数据里大约 2.4–12.7，没有跨数量级，所以仍用逐层 8 位线性。量化区间默认按数据的 min/max（或分位数）计算，只影响存储。色带和色例使用配置里的固定 `display_range`（物理单位），与量化范围无关，后一个时次也会用同一套颜色。`variables.yaml` 仍只保留中文名、色带和参考范围。`w` 仍从 41 个界面层平均到 40 个层中心。manifest 记录 encoding、dtype，以及全局或逐层的 scale/offset。
+每个变量按 `pipeline/config/quant_config.yaml` 编码，再经 Brotli（quality 9）压缩。配置里可以写编码（`u8_linear`、`u16_linear`、`f16`、`u8_log10` 等）、区间范围（`global` 或 `per_level`），以及可选的分位数裁剪。本案例中 u、v 存成 float16；w 用逐层 8 位线性（比 float16 小很多，首屏更快）；温度、湿度等窄区间的 2D 变量，以及多数脉动、结冰类 3D 变量，也用 8 位线性；`visibility` 和跨数量级的 `wind_shear` 用 log10。`tke` 在这份数据里大约 2.4–12.7，没有跨数量级，所以仍用逐层 8 位线性。量化区间默认按数据的 min/max（或分位数）计算，只影响存储。色带和色例使用配置里的固定 `display_range`（物理单位），与量化范围无关，后一个时次也会用同一套颜色。`variables.yaml` 仍只保留中文名、色带和参考范围。`w` 仍从 41 个界面层平均到 40 个层中心。manifest 记录 encoding、dtype，以及全局或逐层的 scale/offset。
 
 ### 建筑白膜
 
@@ -124,7 +124,7 @@ location /data/ {
 - 第三版去掉了 WebGPU/TSL 路径（第二版里 WebGPU 白屏，TSL 计算在 WebGL2 后端也跑不起来），现在只有 WebGL2 这一条路径。所有桌面浏览器都能运行，以后需要时可以再加 WebGPU compute 分支。
 - 无头截图环境只有 SwiftShader 软件渲染，大约 1 FPS，测不出真实帧率。丝不丝滑需要在带 GPU 的机器上实测，状态栏会显示 FPS 和 draw call 数。
 - 3D-GloBFP 的高度是模型估计值（论文报告 RMSE 1.9–14.6 m），没有 OSM 高度的超高层仍可能偏低。
-- 风场 u、v、w 存成 float16，精度大约 0.004 m/s（u/v）和 6×10⁻⁵ m/s（w）；探针读的是解码后的物理值。整包压缩体积从约 4.3 MB 增到约 12.5 MB，主要是 w 的 float16 几乎压不动（约 6.2 MB）。
+- 风场 u、v 存成 float16，精度大约 0.004 m/s；w 用逐层 8 位，这份数据里最大绝对误差大约 7×10⁻⁴ m/s。探针读的是解码后的物理值。整包压缩体积约 7.5 MB。
 - 粒子每帧走一步，所以尾迹的实际长度会随帧率变化。
 - 建筑开启透明（不透明度小于 1）时，合并网格内部的三角形不排序，可能出现轻微的穿插。
 - 建筑不透明度小于 1 时仍然写入深度；体光线会在墙面终止，所以不会透过半透明白膜看到墙后的体素。

@@ -30,8 +30,9 @@ def test_built_payload_error_bounds():
     assert err_u < 0.004, err_u
 
     rec_w = _load("w", manifest["variables"]["w"])
+    w_scales = np.asarray(manifest["variables"]["w"]["level_scale"])
     err_w = np.max(np.abs(w.astype(np.float64) - rec_w))
-    assert err_w < 8e-5, err_w
+    assert err_w <= w_scales.max() / 2 + 1e-6, (err_w, w_scales.max())
 
     rec_tke = _load("tke", manifest["variables"]["tke"])
     tke = ds.tke.values.astype(np.float64)

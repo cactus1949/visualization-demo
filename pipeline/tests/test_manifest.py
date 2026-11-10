@@ -25,11 +25,16 @@ def test_manifest_real():
     assert m.get("derived", {}).get("speed", {}).get("display_range")
 
 
-def test_wind_is_f16():
+def test_wind_encodings():
     p = Path("data/web/lowair_atmos/manifest.json")
     if not p.exists():
         return
     m = json.loads(p.read_text())
-    for name in ("u", "v", "w"):
+    for name in ("u", "v"):
         assert m["variables"][name]["encoding"] == "f16"
         assert m["variables"][name]["dtype"] == "float16"
+    w = m["variables"]["w"]
+    assert w["encoding"] == "u8_linear"
+    assert w["dtype"] == "uint8"
+    assert w["range_scope"] == "per_level"
+    assert len(w["level_scale"]) == 40
