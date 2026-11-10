@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { SliceMaterial } from "../slices";
 import type { Domain } from "../fields";
+import type { AnnotationLayer } from "../annotations";
 
 export interface BoxStackParams {
   x0: number; z0: number; x1: number; z1: number;
@@ -8,38 +9,34 @@ export interface BoxStackParams {
   stepLevels: number; stretch: number; spacingKm: number;
 }
 
-function labelSprite(text: string): THREE.Sprite {
-  const canvas = document.createElement("canvas");
-  canvas.width = 256; canvas.height = 64;
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "rgba(5,15,25,.8)"; ctx.fillRect(0, 0, 256, 64);
-  ctx.fillStyle = "#dff8ff"; ctx.font = "28px sans-serif"; ctx.fillText(text, 8, 42);
-  const tex = new THREE.CanvasTexture(canvas);
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
-  s.scale.set(1.3, 0.33, 1);
-  return s;
-}
+const LABEL_PREFIX = "box-label-";
 
 export class BoxStack {
   readonly group = new THREE.Group();
   readonly slabs = new THREE.Group();
-  readonly labels = new THREE.Group();
   readonly domain: Domain;
   readonly material: SliceMaterial;
   params: BoxStackParams;
+  private layer: AnnotationLayer | null = null;
+
   constructor(domain: Domain, levels: number[]) {
     this.domain = domain;
     this.material = new SliceMaterial(domain);
     this.params = { x0: -2, z0: -2, x1: 2, z1: 2, levels, heightMinM: 100, heightMaxM: 300, stepLevels: 5, stretch: 1, spacingKm: 0 };
-    this.group.add(this.slabs, this.labels);
+    this.group.add(this.slabs);
     this.group.name = "box-stack";
     this.update(this.params);
   }
+
+  setAnnotationLayer(layer: AnnotationLayer | null): void {
+    this.layer = layer;
+    this.syncLabels();
+  }
+
   update(p: BoxStackParams): void {
     this.params = { ...p, stepLevels: Math.max(1, Math.round(p.stepLevels || 1)) };
     this.slabs.traverse((o) => { if (o instanceof THREE.Mesh) o.geometry.dispose(); });
-    this.labels.traverse((o) => { if (o instanceof THREE.Sprite) { (o.material as THREE.SpriteMaterial).map?.dispose(); (o.material as THREE.Material).dispose(); } });
-    this.slabs.clear(); this.labels.clear();
+    this.slabs.clear();
     let count = 0;
     const inRange = this.params.levels.filter((h) => h >= this.params.heightMinM && h <= this.params.heightMaxM);
     for (let i = 0; i < inRange.length && count < 16; i += this.params.stepLevels) {
@@ -51,16 +48,45 @@ export class BoxStack {
       m.position.set((this.params.x0 + this.params.x1) / 2, y, (this.params.z0 + this.params.z1) / 2);
       m.userData.levelM = h; m.userData.pickable = "box-stack";
       this.slabs.add(m);
-      const s = labelSprite(`${h.toFixed(1)} m`);
-      s.position.set(this.params.x0, y + 0.08, this.params.z0);
-      this.labels.add(s); count += 1;
+      count += 1;
     }
     this.group.visible = count > 0;
+    this.syncLabels();
   }
-  updateLabels(camera: THREE.Camera): void { this.labels.traverse((o) => { if (o instanceof THREE.Sprite) o.quaternion.copy(camera.quaternion); }); }
+
+  syncAnnotations(): void {
+    this.syncLabels();
+  }
+
+  private syncLabels(): void {
+    if (!this.layer) return;
+    const visible = this.group.visible;
+    const cx = (this.params.x0 + this.params.x1) / 2;
+    const cz = (this.params.z0 + this.params.z1) / 2;
+    let count = 0;
+    const inRange = this.params.levels.filter((h) => h >= this.params.heightMinM && h <= this.params.heightMaxM);
+    const used = new Set<string>();
+    for (let i = 0; i < inRange.length && count < 16; i += this.params.stepLevels) {
+      const h = inRange[i];
+      const y = h / 1000 * this.params.stretch + count * this.params.spacingKm;
+      const id = `${LABEL_PREFIX}${count}`;
+      used.add(id);
+      this.layer.addLabel(id, {
+        anchor: { x: this.params.x0, y, z: this.params.z0 },
+        text: `${h.toFixed(1)} m`,
+        leader: true,
+        awayFrom: { x: cx, y, z: cz },
+        priority: h,
+        visible,
+      });
+      count += 1;
+    }
+    for (let i = count; i < 16; i += 1) this.layer.remove(`${LABEL_PREFIX}${i}`);
+  }
+
   dispose(): void {
     this.material.dispose();
     this.slabs.traverse((o) => { if (o instanceof THREE.Mesh) o.geometry.dispose(); });
-    this.labels.traverse((o) => { if (o instanceof THREE.Sprite) { (o.material as THREE.SpriteMaterial).map?.dispose(); (o.material as THREE.Material).dispose(); } });
+    this.layer?.removePrefixed(LABEL_PREFIX);
   }
 }

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { AnnotationLayer } from "./annotations";
 import { colormapTexture } from "./colormaps";
 import { GLSL_DOMAIN, domainUniforms, type Domain } from "./fields";
 
@@ -200,7 +201,8 @@ export class VerticalSection {
   private readonly positions: Float32Array;
   readonly outline: THREE.LineLoop;
   private readonly outlinePositions: Float32Array;
-  readonly handle: THREE.Mesh;
+  private layer: AnnotationLayer | null = null;
+  private readonly handleId = "section-handle";
 
   constructor(private readonly domain: Domain) {
     this.material = new SliceMaterial(domain);
@@ -217,13 +219,7 @@ export class VerticalSection {
     ring.setAttribute("position", new THREE.BufferAttribute(this.outlinePositions, 3));
     this.outline = new THREE.LineLoop(ring, outlineMaterial(0xc8f6ff));
     this.outline.frustumCulled = false;
-    // Drag handle: a small glowing bar on top of the wall.
-    this.handle = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.12, 0.12, 0.6, 16).rotateZ(Math.PI / 2),
-      new THREE.MeshBasicMaterial({ color: 0x7cf3ff, transparent: true, opacity: 0.85 }),
-    );
-    this.handle.userData.pickable = "section";
-    this.group.add(this.mesh, this.outline, this.handle);
+    this.group.add(this.mesh, this.outline);
     this.group.name = "vertical-section";
     this.update();
   }
@@ -289,6 +285,7 @@ export class VerticalSection {
     const top = this.domain.top;
     if (!chord) {
       this.group.visible = false;
+      this.layer?.setVisible(this.handleId, false);
       return;
     }
     const [a, b] = chord;
@@ -299,18 +296,35 @@ export class VerticalSection {
     geometry.attributes.position.needsUpdate = true;
     geometry.computeBoundingSphere();
     this.outline.geometry.attributes.position.needsUpdate = true;
-    this.handle.position.set((a.x + b.x) / 2, top, (a.y + b.y) / 2);
-    this.handle.rotation.y = -THREE.MathUtils.degToRad(this.azimuthDeg) + Math.PI / 2;
+    this.syncHandle((a.x + b.x) / 2, top, (a.y + b.y) / 2);
   }
 
-  /** Called every frame: keep the handle round although root is scaled in y. */
-  setHandleScale(exaggeration: number): void {
-    this.handle.scale.set(1, 1 / exaggeration, 1);
+  setAnnotationLayer(layer: AnnotationLayer | null): void {
+    this.layer = layer;
+    this.update();
   }
+
+  /** Screen-space handles ignore vertical exaggeration; kept as a no-op for callers. */
+  setHandleScale(_exaggeration: number): void {}
 
   setHighlight(on: boolean): void {
     this.material.uniforms.uHighlight.value = on ? 1 : 0;
-    (this.handle.material as THREE.MeshBasicMaterial).color.set(on ? 0xffffff : 0x7cf3ff);
+    if (this.layer) this.layer.setState(this.handleId, on ? "hover" : "idle");
+  }
+
+  syncAnnotations(): void {
+    this.layer?.setVisible(this.handleId, this.group.visible);
+  }
+
+  private syncHandle(x: number, y: number, z: number): void {
+    if (!this.layer) return;
+    this.layer.addHandle(this.handleId, {
+      anchor: { x, y, z },
+      role: "preview",
+      draggable: true,
+      visible: this.group.visible,
+      userData: { pickable: "section" },
+    });
   }
 
   dispose(): void {
@@ -318,7 +332,6 @@ export class VerticalSection {
     this.material.dispose();
     this.outline.geometry.dispose();
     (this.outline.material as THREE.Material).dispose();
-    this.handle.geometry.dispose();
-    (this.handle.material as THREE.Material).dispose();
+    this.layer?.remove(this.handleId);
   }
 }

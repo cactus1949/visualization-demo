@@ -10,6 +10,7 @@
 - **探针廓线**：打开“探针”后悬停只预览 3D 气象站位置（不改读数），单击（非拖动）固定并更新该点 40 层的风速、风向和所选变量廓线；可选“跟随鼠标”实时更新读数。
 - **体渲染切面**：体渲染面板提供 xcut / ycut / zcut 双端滑块（0–1），只改变体盒的根局部 AABB；“切面”打开时，新生成的盒面会和剖面走同一条 v4.2 光线内合成路径。
 - **四种剖面**：经度方向（x 常量）和纬度方向（z 常量）是可拖动的轴对齐竖墙；折线和框选进入绘制模式，左键在地面放点或拖框，右键旋转视角，Esc 退出。折线达到两个点立即显示折墙和左下展开图；框选按模型层生成水平板并显示高度标签。
+- **屏幕空间标注**：探针、剖面手柄、折线顶点和层高标签由 `web/src/render/annotations/` 统一绘制，样式见 `docs/annotation-style.md`。标记按 CSS 像素定尺寸，不受垂直夸张或框选拉伸影响。
 
 ## 目录结构
 
@@ -68,7 +69,8 @@ npx vite preview --port 4173 --strictPort
 
 - 左键拖动旋转视角，右键平移，滚轮缩放，相机带阻尼；折线和框选绘制模式下左键放点/拖框，右键旋转，Esc 退出。
 - 经度/纬度剖面上拖动可以平移墙面。折线和框选绘制模式下，左键放点或拖框，右键旋转视角，Esc 或再点同一模式退出绘制。
-- 打开右侧“探针”：悬停显示预览标记，单击（非拖动）固定位置并更新左侧廓线；“跟随鼠标”开启后悬停也会更新读数。
+- 打开右侧“探针”：悬停显示预览标记（青色细杆和地面圆环），单击（非拖动）固定位置并更新左侧廓线；“跟随鼠标”开启后悬停也会更新读数。
+- 三维标注（探针、剖面拖动手柄、折线顶点、框选层高）走统一的屏幕空间标注层，字号和点的大小不随缩放或垂直夸张变化。规则写在 `docs/annotation-style.md`。
 
 ### 控制面板参数
 
@@ -102,8 +104,9 @@ nc ─ ncpipe ─▶ data/web/*.bin.br ─ Worker 解压并解码为 Float32 ─
 - **切片**（`slices.ts`）：片元着色器把片元的 root 局部坐标换算成 3D 纹理坐标后采样（高度层在层中心，所以纹理 r 坐标正好是 h / 1000 m），查色带，等值线用 `fwidth` 做抗锯齿。开启“截面同步过滤”时，切片和剖面也会按体渲染的物理区间丢弃片元；这适合它们显示同一个变量或同单位变量。垂直剖面在 CPU 上按方位角和偏移把四个顶点裁剪到计算域内，每次拖动只更新 4 个顶点。
 - **体渲染**（`volume.ts`）：每帧先把体和粒子隐藏，在带深度纹理的目标中渲染地面和建筑；半透明切片、剖面、折墙、板层和切面在光线步进里按交点合成，背后的体可以透过并受不透明度减弱，不透明度约为 1 时仍挡住后面的体。体盒随 x/y/z cut 缩放，最多 16 个表面按距离排序后一次合成；体渲染关闭时这些网格仍正常绘制。
 - **建筑**（`buildings.ts`）：`MeshStandardMaterial`，开启 flatShading，并通过 `onBeforeCompile` 把墙脚约 28 m 压暗，模拟环境光遮蔽；配合方向光阴影（4096² 阴影贴图）。
-- **探针**：直接读内存中解码后的 Float32 数组（每次 40 个值），每帧最多做一次射线检测，只检测地面和切片，不检测 192 万个建筑三角形；固定点显示为贯穿场景高度的 3D 气象站标记。
-- `window.__atmosApi` 提供 `setView / setSection / setSlice / setParticles / setLayer / setVolume / setCamera / setProbeEnabled / setProbeFollowMouse / probeAt / probeHoverAt / advance / status`，供截图和录屏脚本调用（`web/scripts/screenshot.mjs`、`web/scripts/record.mjs`）。
+- **探针**：直接读内存中解码后的 Float32 数组（每次 40 个值），每帧最多做一次射线检测，只检测地面和切片，不检测 192 万个建筑三角形；固定点是贯穿场景高度的细杆加地面圆环，由标注层投影到屏幕。
+- **标注层**（`web/src/render/annotations/`）：功能模块只提供锚点，层负责按像素绘制 HTML/SVG 标记、标签和手柄，并做廉价的建筑高度场遮挡淡出。
+- `window.__atmosApi` 提供 `setView / setSection / setSlice / setParticles / setLayer / setVolume / setCamera / setExaggeration / setProbeEnabled / setProbeFollowMouse / probeAt / probeHoverAt / setPolyline / selectPolylineVertex / setBox / setCuts / advance / status`，供截图和录屏脚本调用（`web/scripts/screenshot.mjs`、`web/scripts/record.mjs`）。
 
 ## 生产部署
 
@@ -130,3 +133,4 @@ location /data/ {
 - 粒子每帧走一步，所以尾迹的实际长度会随帧率变化。
 - 建筑开启透明（不透明度小于 1）时，合并网格内部的三角形不排序，可能出现轻微的穿插。
 - 建筑不透明度小于 1 时仍然写入深度；体光线会在墙面终止，所以不会透过半透明白膜看到墙后的体素。
+- 标注被建筑挡住时用 128×128 的最大高度场做近似淡出（约 35% 透明度），不是逐三角形求交，密集街区边缘可能有轻微误差。

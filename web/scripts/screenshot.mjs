@@ -25,6 +25,13 @@ const VIEWS = [
   "v6-lat-1",
   "v6-polyline",
   "v6-boxstack",
+  "v6_1-probe-hover",
+  "v6_1-probe-fixed",
+  "v6_1-probe-near",
+  "v6_1-probe-far",
+  "v6_1-polyline",
+  "v6_1-boxstack",
+  "v6_1-lon",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -168,6 +175,47 @@ await page.evaluate((v) => {
     api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 100, heightMaxM: 350, stepLevels: 2, stretch: 2.2, spacingKm: 0.22 });
     api.setSection({ opacity: 0.75 });
     api.setCamera([-13, 5.8, 10], [0, 0.8, 0]);
+  } else if (v === "v6_1-probe-hover") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setProbeEnabled(true);
+    api.probeHoverAt(190, 120);
+  } else if (v === "v6_1-probe-fixed" || v === "v6_1-probe-near" || v === "v6_1-probe-far") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setProbeEnabled(true);
+    api.probeAt(140, 170);
+    if (v === "v6_1-probe-fixed") api.probeHoverAt(200, 110);
+    // cell (140,170) is about (-0.57, -1.23) km in root-local xz; stem goes to y=1 km * 3.
+    if (v === "v6_1-probe-near") api.setCamera([-2.6, 2.2, 1.4], [-0.57, 0.7, -1.23]);
+    if (v === "v6_1-probe-far") api.setCamera([-28, 18, 26], [0, 0.6, 0]);
+  } else if (v === "v6_1-polyline") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("polyline");
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSection({ variable: "speed", opacity: 0.85 });
+    api.selectPolylineVertex(1);
+    api.setCamera([-12, 7.2, 16], [-1.0, 0.5, -0.5]);
+  } else if (v === "v6_1-boxstack") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("box");
+    api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 100, heightMaxM: 350, stepLevels: 2, stretch: 2.2, spacingKm: 0.22 });
+    api.setSection({ opacity: 0.75 });
+    api.setCamera([-13, 5.8, 10], [0, 0.8, 0]);
+  } else if (v === "v6_1-lon") {
+    api.setLayer("particles", false);
+    api.setSectionMode("lon");
+    api.setSection({ variable: "speed", offsetKm: -1.0, opacity: 0.5 });
+    api.setVolume({ enabled: true, variable: "tke" });
+    api.setCamera([-14, 5.5, 2], [0.4, 0.7, -0.4]);
   } else {
     api.setView("overview");
   }
@@ -188,13 +236,14 @@ if (
     "v6-ycut",
     "v6-lon-05",
     "v6-lat-1",
+    "v6_1-lon",
   ].includes(view)
 ) {
   await page.waitForFunction(() => window.__atmosStatus?.volume === "tke", null, {
     timeout: 90_000,
   });
 }
-if (["v6-boxstack", "v6-polyline"].includes(view)) {
+if (["v6-boxstack", "v6-polyline", "v6_1-boxstack", "v6_1-polyline"].includes(view)) {
   await page.evaluate(() => {
     const details = [...document.querySelectorAll("details")].find((d) =>
       d.querySelector("summary")?.textContent?.includes("垂直剖面"),

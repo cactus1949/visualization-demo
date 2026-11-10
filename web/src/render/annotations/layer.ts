@@ -1,0 +1,502 @@
+import * as THREE from "three";
+import {
+  ANNOTATION_TOKENS as T,
+  type AnnotationKind,
+  type AnnotationRole,
+  type AnnotationState,
+} from "./tokens";
+import { HeightOccluder } from "./occlusion";
+import "./annotations.css";
+
+export type Vec3 = { x: number; y: number; z: number };
+
+export interface AnnotationDesc {
+  kind: AnnotationKind;
+  anchor: Vec3;
+  visible?: boolean;
+  state?: AnnotationState;
+  role?: AnnotationRole;
+  text?: string;
+  /** Second point of a vertical stem, in root-local km. */
+  stemTo?: Vec3;
+  /** Draw a ground ring under the anchor's (x, z) at y = 0. */
+  ring?: boolean;
+  /** Short leader in CSS px from the anchor to the label (labels only). */
+  leader?: boolean | number;
+  /** Screen-space direction the label is pushed, default away from `awayFrom`. */
+  awayFrom?: Vec3;
+  priority?: number;
+  draggable?: boolean;
+  userData?: unknown;
+}
+
+export interface AnnotationHit {
+  id: string;
+  kind: AnnotationKind;
+  userData: unknown;
+  draggable: boolean;
+}
+
+interface Item {
+  id: string;
+  desc: AnnotationDesc;
+  el: HTMLElement;
+  line: SVGLineElement | null;
+  ring: SVGPolygonElement | null;
+  sx: number;
+  sy: number;
+  lx: number;
+  ly: number;
+  occluded: boolean;
+  onScreen: boolean;
+  width: number;
+  height: number;
+}
+
+const tmpLocal = new THREE.Vector3();
+const tmpWorld = new THREE.Vector3();
+const tmpCam = new THREE.Vector3();
+const tmpAnchor = new THREE.Vector3();
+const tmpNdc = new THREE.Vector3();
+const tmpA = new THREE.Vector3();
+const tmpB = new THREE.Vector3();
+
+function fill(v: THREE.Vector3, p: Vec3): THREE.Vector3 {
+  return v.set(p.x, p.y, p.z);
+}
+
+function roleColor(role: AnnotationRole | undefined, state: AnnotationState): string {
+  if (state === "disabled") return T.colors.disabled;
+  if (role === "fixed" || state === "active") return T.colors.fixed;
+  if (role === "preview" || state === "hover") return T.colors.preview;
+  if (state === "dragging") return T.colors.active;
+  return T.colors.preview;
+}
+
+function scaleFor(state: AnnotationState): number {
+  if (state === "dragging") return T.sizes.draggingScale;
+  if (state === "hover" || state === "selected") return T.sizes.hoverScale;
+  return 1;
+}
+
+export class AnnotationLayer {
+  readonly element: HTMLDivElement;
+  private readonly svg: SVGSVGElement;
+  private readonly root: THREE.Object3D;
+  private readonly items = new Map<string, Item>();
+  private occluder: HeightOccluder | null = null;
+  private occluderEnabled = true;
+  private frame = 0;
+  private lastCam = new THREE.Vector3();
+  private readonly camLocal = new THREE.Vector3();
+
+  constructor(container: HTMLElement, root: THREE.Object3D) {
+    this.root = root;
+    this.element = document.createElement("div");
+    this.element.className = "anno-overlay";
+    this.element.setAttribute("aria-hidden", "true");
+    this.svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    this.element.appendChild(this.svg);
+    container.appendChild(this.element);
+  }
+
+  setOccluder(occluder: HeightOccluder | null, enabled = true): void {
+    this.occluder = occluder;
+    this.occluderEnabled = enabled;
+  }
+
+  setOcclusionEnabled(on: boolean): void {
+    this.occluderEnabled = on;
+  }
+
+  addMarker(id: string, desc: Omit<AnnotationDesc, "kind">): void {
+    this.upsert(id, { ...desc, kind: "marker" });
+  }
+
+  addLabel(id: string, desc: Omit<AnnotationDesc, "kind">): void {
+    this.upsert(id, { ...desc, kind: "label" });
+  }
+
+  addHandle(id: string, desc: Omit<AnnotationDesc, "kind">): void {
+    this.upsert(id, { ...desc, kind: "handle" });
+  }
+
+  set(id: string, patch: Partial<AnnotationDesc>): void {
+    const item = this.items.get(id);
+    if (!item) return;
+    Object.assign(item.desc, patch);
+    this.styleItem(item);
+    if (patch.text !== undefined && item.desc.kind === "label") {
+      if (item.el.textContent !== patch.text) item.el.textContent = patch.text;
+    }
+  }
+
+  setState(id: string, state: AnnotationState): void {
+    this.set(id, { state });
+  }
+
+  setVisible(id: string, visible: boolean): void {
+    this.set(id, { visible });
+  }
+
+  remove(id: string): void {
+    const item = this.items.get(id);
+    if (!item) return;
+    item.el.remove();
+    item.line?.remove();
+    item.ring?.remove();
+    this.items.delete(id);
+  }
+
+  removePrefixed(prefix: string): void {
+    for (const id of [...this.items.keys()]) {
+      if (id.startsWith(prefix)) this.remove(id);
+    }
+  }
+
+  dispose(): void {
+    for (const id of [...this.items.keys()]) this.remove(id);
+    this.element.remove();
+  }
+
+  pick(clientX: number, clientY: number): AnnotationHit | null {
+    const rect = this.element.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const r = T.sizes.hitTargetPx * 0.5;
+    let best: AnnotationHit | null = null;
+    let bestD = r;
+    for (const item of this.items.values()) {
+      if (item.desc.kind !== "handle") continue;
+      if (item.desc.visible === false || !item.onScreen) continue;
+      if (item.desc.state === "disabled") continue;
+      const d = Math.hypot(x - item.sx, y - item.sy);
+      if (d <= bestD) {
+        bestD = d;
+        best = {
+          id: item.id,
+          kind: item.desc.kind,
+          userData: item.desc.userData,
+          draggable: Boolean(item.desc.draggable),
+        };
+      }
+    }
+    return best;
+  }
+
+  update(camera: THREE.Camera): void {
+    this.frame += 1;
+    const rect = this.element.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    const checkOcc =
+      this.occluderEnabled &&
+      this.occluder !== null &&
+      (this.frame % 4 === 1 || camera.position.distanceToSquared(this.lastCam) > 1e-6);
+    if (checkOcc) {
+      this.lastCam.copy(camera.position);
+      this.camLocal.copy(camera.position);
+      this.root.worldToLocal(this.camLocal);
+    }
+
+    const labels: Item[] = [];
+    for (const item of this.items.values()) {
+      this.projectItem(item, camera, rect, checkOcc);
+      if (item.desc.kind === "label" && item.onScreen && item.desc.visible !== false) labels.push(item);
+    }
+    this.resolveOverlap(labels);
+  }
+
+  private upsert(id: string, desc: AnnotationDesc): void {
+    let item = this.items.get(id);
+    if (!item) {
+      const el = document.createElement("div");
+      const line = desc.stemTo || desc.leader || desc.kind === "label" ? this.makeLine() : null;
+      const ring = desc.ring ? this.makeRing() : null;
+      if (line) this.svg.appendChild(line);
+      if (ring) this.svg.appendChild(ring);
+      this.element.appendChild(el);
+      item = {
+        id,
+        desc: { ...desc },
+        el,
+        line,
+        ring,
+        sx: 0,
+        sy: 0,
+        lx: 0,
+        ly: 0,
+        occluded: false,
+        onScreen: false,
+        width: 0,
+        height: 0,
+      };
+      this.items.set(id, item);
+    } else {
+      const next = { ...item.desc, ...desc };
+      if ((next.stemTo || next.leader || next.kind === "label") && !item.line) {
+        item.line = this.makeLine();
+        this.svg.appendChild(item.line);
+      }
+      if (next.ring && !item.ring) {
+        item.ring = this.makeRing();
+        this.svg.appendChild(item.ring);
+      }
+      if (!next.ring && item.ring) {
+        item.ring.remove();
+        item.ring = null;
+      }
+      item.desc = next;
+    }
+    this.styleItem(item);
+    if (item.desc.kind === "label") item.el.textContent = item.desc.text ?? "";
+  }
+
+  private makeLine(): SVGLineElement {
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("stroke", T.colors.stem);
+    line.setAttribute("stroke-width", String(T.sizes.stemWidthPx));
+    line.setAttribute("stroke-linecap", "round");
+    line.setAttribute("fill", "none");
+    return line;
+  }
+
+  private makeRing(): SVGPolygonElement {
+    const ring = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+    ring.setAttribute("fill", "none");
+    ring.setAttribute("stroke-width", String(T.sizes.ringStrokePx));
+    return ring;
+  }
+
+  private styleItem(item: Item): void {
+    const { desc } = item;
+    const state = desc.state ?? "idle";
+    const color = roleColor(desc.role, state);
+    item.el.className =
+      (desc.kind === "label" ? "anno-label" : "anno-dot") +
+      (desc.kind === "handle" ? " is-handle" : "") +
+      (state === "selected" ? " is-selected" : "") +
+      (state === "disabled" ? " is-disabled" : "");
+    if (desc.kind !== "label") {
+      const d = desc.kind === "handle" ? T.sizes.handlePx : T.sizes.markerPx;
+      item.el.style.width = `${d}px`;
+      item.el.style.height = `${d}px`;
+      item.el.style.background = color;
+      item.width = d;
+      item.height = d;
+    } else {
+      item.el.style.background = T.colors.labelBackground;
+      item.el.style.color = T.colors.labelText;
+    }
+    if (item.ring) item.ring.setAttribute("stroke", color);
+  }
+
+  private projectToScreen(
+    local: THREE.Vector3,
+    camera: THREE.Camera,
+    rect: DOMRect,
+    out: THREE.Vector3,
+  ): boolean {
+    tmpWorld.copy(local);
+    this.root.localToWorld(tmpWorld);
+    tmpNdc.copy(tmpWorld).project(camera);
+    if (tmpNdc.z < -1 || tmpNdc.z > 1) return false;
+    out.set((tmpNdc.x * 0.5 + 0.5) * rect.width, (-tmpNdc.y * 0.5 + 0.5) * rect.height, tmpNdc.z);
+    return true;
+  }
+
+  private projectItem(item: Item, camera: THREE.Camera, rect: DOMRect, checkOcc: boolean): void {
+    const { desc } = item;
+    if (desc.visible === false) {
+      this.hide(item);
+      return;
+    }
+    fill(tmpLocal, desc.anchor);
+    if (!this.projectToScreen(tmpLocal, camera, rect, tmpA)) {
+      this.hide(item);
+      return;
+    }
+    const margin = 40;
+    const on = tmpA.x >= -margin && tmpA.x <= rect.width + margin && tmpA.y >= -margin && tmpA.y <= rect.height + margin;
+    if (!on) {
+      this.hide(item);
+      return;
+    }
+    item.onScreen = true;
+    item.sx = tmpA.x;
+    item.sy = tmpA.y;
+
+    if (checkOcc && this.occluder) {
+      // Handles are interaction affordances and stay fully visible.
+      if (desc.kind === "handle") {
+        item.occluded = false;
+      } else {
+        fill(tmpAnchor, desc.anchor);
+        // For a stem, test mid-height so a blocked ground point does not hide the mast.
+        if (desc.stemTo) {
+          tmpAnchor.y = (desc.anchor.y + desc.stemTo.y) * 0.35;
+        }
+        item.occluded = this.occluder.blocked(this.camLocal, tmpAnchor);
+      }
+    }
+
+    const state = desc.state ?? "idle";
+    let opacity: number = T.opacity.idle;
+    if (desc.role === "preview" && state === "idle") opacity = T.opacity.preview;
+    if (state === "disabled") opacity = T.opacity.disabled;
+    if (item.occluded) opacity *= T.opacity.occluded;
+    item.el.style.opacity = String(opacity);
+    item.el.classList.remove("anno-hidden");
+
+    let lx = item.sx;
+    let ly = item.sy;
+    if (desc.kind === "label") {
+      const lead = desc.leader === false ? 0 : typeof desc.leader === "number" ? desc.leader : T.sizes.leaderPx;
+      let dx = 10;
+      let dy = -10;
+      if (desc.awayFrom) {
+        fill(tmpLocal, desc.awayFrom);
+        if (this.projectToScreen(tmpLocal, camera, rect, tmpB)) {
+          dx = item.sx - tmpB.x;
+          dy = item.sy - tmpB.y;
+          const len = Math.hypot(dx, dy) || 1;
+          dx = (dx / len) * lead;
+          dy = (dy / len) * lead;
+        }
+      } else {
+        const len = Math.hypot(dx, dy);
+        dx = (dx / len) * lead;
+        dy = (dy / len) * lead;
+      }
+      lx = item.sx + dx;
+      ly = item.sy + dy;
+      item.width = item.el.offsetWidth || item.width || (desc.text ? desc.text.length * 6.6 + 12 : 48);
+      item.height = item.el.offsetHeight || item.height || 18;
+    }
+    item.lx = lx;
+    item.ly = ly;
+
+    const s = scaleFor(state);
+    const tx = desc.kind === "label" ? lx : item.sx;
+    const ty = desc.kind === "label" ? ly : item.sy;
+    item.el.style.transform = `translate(-50%, -50%) translate(${tx.toFixed(1)}px, ${ty.toFixed(1)}px) scale(${s})`;
+
+    if (item.line) {
+      if (desc.stemTo) {
+        fill(tmpLocal, desc.stemTo);
+        if (this.projectToScreen(tmpLocal, camera, rect, tmpB)) {
+          item.line.setAttribute("x1", item.sx.toFixed(1));
+          item.line.setAttribute("y1", item.sy.toFixed(1));
+          item.line.setAttribute("x2", tmpB.x.toFixed(1));
+          item.line.setAttribute("y2", tmpB.y.toFixed(1));
+          item.line.setAttribute("stroke", roleColor(desc.role, state));
+          item.line.setAttribute("stroke-opacity", String(Math.max(0.55, opacity)));
+          item.line.style.display = "";
+        } else {
+          item.line.style.display = "none";
+        }
+      } else if (desc.kind === "label") {
+        item.line.setAttribute("x1", item.sx.toFixed(1));
+        item.line.setAttribute("y1", item.sy.toFixed(1));
+        item.line.setAttribute("x2", lx.toFixed(1));
+        item.line.setAttribute("y2", ly.toFixed(1));
+        item.line.setAttribute("stroke-opacity", String(opacity));
+        item.line.style.display = "";
+      } else {
+        item.line.style.display = "none";
+      }
+    }
+
+    if (item.ring) this.updateRing(item, camera, rect, opacity);
+  }
+
+  private updateRing(item: Item, camera: THREE.Camera, rect: DOMRect, opacity: number): void {
+    const ring = item.ring!;
+    const a = item.desc.anchor;
+    fill(tmpLocal, { x: a.x, y: 0, z: a.z });
+    if (!this.projectToScreen(tmpLocal, camera, rect, tmpA)) {
+      ring.style.display = "none";
+      return;
+    }
+    const trial = 0.06;
+    fill(tmpLocal, { x: a.x + trial, y: 0, z: a.z });
+    this.projectToScreen(tmpLocal, camera, rect, tmpB);
+    const rx = Math.hypot(tmpB.x - tmpA.x, tmpB.y - tmpA.y);
+    fill(tmpLocal, { x: a.x, y: 0, z: a.z + trial });
+    this.projectToScreen(tmpLocal, camera, rect, tmpB);
+    const rz = Math.hypot(tmpB.x - tmpA.x, tmpB.y - tmpA.y);
+    const mean = 0.5 * (rx + rz) || 1e-6;
+    const worldR = trial * ((T.sizes.ringDiameterPx * 0.5) / mean);
+    const pts: string[] = [];
+    const n = 24;
+    for (let i = 0; i < n; i += 1) {
+      const ang = (i / n) * Math.PI * 2;
+      fill(tmpLocal, { x: a.x + Math.cos(ang) * worldR, y: 0, z: a.z + Math.sin(ang) * worldR });
+      if (!this.projectToScreen(tmpLocal, camera, rect, tmpB)) continue;
+      pts.push(`${tmpB.x.toFixed(1)},${tmpB.y.toFixed(1)}`);
+    }
+    if (pts.length < 8) {
+      ring.style.display = "none";
+      return;
+    }
+    ring.setAttribute("points", pts.join(" "));
+    ring.setAttribute("stroke-opacity", String(opacity));
+    ring.style.display = "";
+  }
+
+  private hide(item: Item): void {
+    item.onScreen = false;
+    item.el.classList.add("anno-hidden");
+    if (item.line) item.line.style.display = "none";
+    if (item.ring) item.ring.style.display = "none";
+  }
+
+  private resolveOverlap(labels: Item[]): void {
+    labels.sort((a, b) => (b.desc.priority ?? 0) - (a.desc.priority ?? 0));
+    const placed: Item[] = [];
+    for (const item of labels) {
+      let ox = 0;
+      let oy = 0;
+      const dx = item.lx - item.sx;
+      const dy = item.ly - item.sy;
+      const len = Math.hypot(dx, dy) || 1;
+      const ux = dx / len;
+      const uy = dy / len;
+      let hidden = false;
+      for (let step = 0; step < 6; step += 1) {
+        ox = ux * step * 8;
+        oy = uy * step * 8;
+        const cx = item.lx + ox;
+        const cy = item.ly + oy;
+        const hit = placed.some((p) => overlaps(cx, cy, item.width, item.height, p.lx, p.ly, p.width, p.height));
+        if (!hit) break;
+        if (step === 5) hidden = true;
+      }
+      if (hidden) {
+        this.hide(item);
+        continue;
+      }
+      item.lx += ox;
+      item.ly += oy;
+      const s = scaleFor(item.desc.state ?? "idle");
+      item.el.style.transform = `translate(-50%, -50%) translate(${item.lx.toFixed(1)}px, ${item.ly.toFixed(1)}px) scale(${s})`;
+      if (item.line) {
+        item.line.setAttribute("x2", item.lx.toFixed(1));
+        item.line.setAttribute("y2", item.ly.toFixed(1));
+      }
+      placed.push(item);
+    }
+  }
+}
+
+function overlaps(
+  ax: number,
+  ay: number,
+  aw: number,
+  ah: number,
+  bx: number,
+  by: number,
+  bw: number,
+  bh: number,
+): boolean {
+  return Math.abs(ax - bx) * 2 < aw + bw + 4 && Math.abs(ay - by) * 2 < ah + bh + 2;
+}

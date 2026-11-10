@@ -1,17 +1,20 @@
 import * as THREE from "three";
 import { SliceMaterial } from "../slices";
 import type { Domain } from "../fields";
+import type { AnnotationLayer } from "../annotations";
 
 export const MAX_POLYLINE_POINTS = 16;
+const HANDLE_PREFIX = "polyline-v-";
 
 export class PolylineSection {
   readonly group = new THREE.Group();
   readonly material: SliceMaterial;
   readonly mesh: THREE.Mesh;
-  readonly markers = new THREE.Group();
   points: { x: number; z: number }[] = [];
   private geometry = new THREE.BufferGeometry();
   private readonly domain: Domain;
+  private layer: AnnotationLayer | null = null;
+  private selected = -1;
 
   constructor(domain: Domain) {
     this.domain = domain;
@@ -20,8 +23,18 @@ export class PolylineSection {
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 3;
     this.mesh.userData.pickable = "polyline";
-    this.group.add(this.mesh, this.markers);
+    this.group.add(this.mesh);
     this.group.name = "polyline-section";
+  }
+
+  setAnnotationLayer(layer: AnnotationLayer | null): void {
+    this.layer = layer;
+    this.syncHandles();
+  }
+
+  setSelected(index: number): void {
+    this.selected = index;
+    this.syncHandleStates();
   }
 
   setPoints(points: { x: number; z: number }[]): void {
@@ -49,32 +62,42 @@ export class PolylineSection {
     this.geometry.setIndex(idx);
     this.mesh.geometry = this.geometry;
     this.group.visible = n >= 2;
-    this.markers.traverse((o) => {
-      if (o instanceof THREE.Mesh) {
-        o.geometry.dispose();
-        (o.material as THREE.Material).dispose();
-      }
+    this.syncHandles();
+  }
+
+  private syncHandles(): void {
+    if (!this.layer) return;
+    const visible = this.group.visible;
+    this.points.forEach((p, i) => {
+      const id = `${HANDLE_PREFIX}${i}`;
+      this.layer!.addHandle(id, {
+        anchor: { x: p.x, y: 0, z: p.z },
+        role: "preview",
+        draggable: true,
+        visible,
+        state: i === this.selected ? "selected" : "idle",
+        userData: { pickable: "polyline-vertex", index: i },
+      });
     });
-    this.markers.clear();
-    for (const p of this.points) {
-      const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(0.14, 12, 8),
-        new THREE.MeshBasicMaterial({ color: 0x7cf3ff, transparent: true, opacity: 0.95 }),
-      );
-      marker.position.set(p.x, 0.08, p.z);
-      marker.userData.pickable = "polyline-vertex";
-      this.markers.add(marker);
+    for (let i = this.points.length; i < MAX_POLYLINE_POINTS; i += 1) {
+      this.layer.remove(`${HANDLE_PREFIX}${i}`);
     }
+  }
+
+  syncAnnotations(): void {
+    this.syncHandles();
+  }
+
+  private syncHandleStates(): void {
+    if (!this.layer) return;
+    this.points.forEach((_, i) => {
+      this.layer!.setState(`${HANDLE_PREFIX}${i}`, i === this.selected ? "selected" : "idle");
+    });
   }
 
   dispose(): void {
     this.geometry.dispose();
     this.material.dispose();
-    this.markers.traverse((o) => {
-      if (o instanceof THREE.Mesh) {
-        o.geometry.dispose();
-        (o.material as THREE.Material).dispose();
-      }
-    });
+    this.layer?.removePrefixed(HANDLE_PREFIX);
   }
 }

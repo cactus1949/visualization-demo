@@ -16,6 +16,7 @@ import { buildCompositeSurfaces, type CompositeSurface } from "../render/section
 import { sampleUnfolded, type UnfoldedGrid } from "../render/sections/unfolded";
 import { Buildings } from "../render/buildings";
 import { ProbeMarker } from "../render/probeMarker";
+import { AnnotationLayer, HeightOccluder } from "../render/annotations";
 import {
   DEFAULT_PARTICLES,
   WindParticles,
@@ -253,6 +254,8 @@ let polyline: PolylineSection | null = null;
 let boxStack: BoxStack | null = null;
 let buildings: Buildings | null = null;
 let probeMarker: ProbeMarker | null = null;
+let annotations: AnnotationLayer | null = null;
+let heightOccluder: HeightOccluder | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let raf = 0;
 let disposed = false;
@@ -350,6 +353,12 @@ function updateSlice(): void {
   hslice.setHeightKm(slice.heightM / 1000);
 }
 
+function syncSectionAnnotations(): void {
+  vsection?.syncAnnotations();
+  polyline?.syncAnnotations();
+  boxStack?.syncAnnotations();
+}
+
 function updateSection(): void {
   if (!vsection || !polyline || !boxStack) return;
   vsection.group.visible = section.enabled && (section.kind === "lon" || section.kind === "lat");
@@ -359,11 +368,12 @@ function updateSection(): void {
   if (section.kind === "lat") { vsection.azimuthDeg = 90; vsection.setOffset(section.offsetKm); }
   if (section.kind === "polyline") { polyline.setPoints(section.points); updateUnfolded(); }
   if (section.kind === "box") boxStack.update({ ...section.box, levels: manifest.value?.grid.levels_m ?? domain.levels });
-  if (!section.enabled) { syncVolumeSlices(); return; }
+  if (!section.enabled) { syncVolumeSlices(); syncSectionAnnotations(); return; }
   const b = binding(section.variable);
   if (!b) {
     vsection.group.visible = false; polyline.group.visible = false; boxStack.group.visible = false;
     request(section.variable);
+    syncSectionAnnotations();
     return;
   }
   if (section.autoRange) [section.min, section.max] = autoRange(section.variable, section.colormap);
@@ -373,6 +383,7 @@ function updateSection(): void {
   boxStack.material.bind(b); boxStack.material.style(section);
   updateSliceFilter();
   updateComposite();
+  syncSectionAnnotations();
 }
 
 function updateUnfolded(): void {
@@ -550,12 +561,11 @@ function updateDepthOccluders(): void {
     depthOccluders.push(hslice.mesh, hslice.outline);
   }
   if (vsection) {
-    depthOccluders.push(vsection.outline, vsection.handle);
+    depthOccluders.push(vsection.outline);
     depthOccluders.push(vsection.mesh);
   }
   if (polyline) depthOccluders.push(polyline.group);
   if (boxStack) depthOccluders.push(boxStack.group);
-  if (probeMarker) depthOccluders.push(probeMarker.object);
 }
 
 function onData(name: string): void {
@@ -717,7 +727,7 @@ let vertexIndex = -1;
 function sectionHit(): THREE.Intersection | undefined {
   const targets: THREE.Object3D[] = [];
   if (vsection?.group.visible) targets.push(vsection.group);
-  if (polyline?.group.visible) targets.push(polyline.markers);
+  if (polyline?.group.visible) targets.push(polyline.mesh);
   if (boxStack?.group.visible) targets.push(boxStack.group);
   return raycaster.intersectObjects(targets, true)[0];
 }
@@ -740,17 +750,29 @@ function onPointerDown(event: PointerEvent): void {
   pointerDown.y = event.clientY;
   pointerDown.moved = false;
   pointerDown.active = true;
-  const hit = sectionHit();
-  if (section.drawMode && hit?.object.userData.pickable === "polyline-vertex") {
-    vertexIndex = polyline?.markers.children.indexOf(hit.object) ?? -1;
+  const picked = annotations?.pick(event.clientX, event.clientY);
+  const pickedKind = (picked?.userData as { pickable?: string; index?: number } | undefined)?.pickable;
+  if (section.drawMode && pickedKind === "polyline-vertex") {
+    vertexIndex = (picked?.userData as { index?: number }).index ?? -1;
+    if (picked) annotations?.setState(picked.id, "dragging");
     controls.enabled = false; canvas.value!.setPointerCapture(event.pointerId); event.preventDefault(); return;
   }
-  if (hit && vsection && (section.kind === "lon" || section.kind === "lat")) {
+  const hit = sectionHit();
+  const sectionHandle = pickedKind === "section";
+  if ((hit || sectionHandle) && vsection && (section.kind === "lon" || section.kind === "lat")) {
     drag.active = true;
     drag.rotate = false;
-    drag.plane.set(new THREE.Vector3(0, 1, 0), -hit.point.y);
-    drag.start.copy(hit.point);
+    if (hit) {
+      drag.plane.set(new THREE.Vector3(0, 1, 0), -hit.point.y);
+      drag.start.copy(hit.point);
+    } else {
+      tmp.set(0, domain.top, 0);
+      atmos.root.localToWorld(tmp);
+      drag.plane.set(new THREE.Vector3(0, 1, 0), -tmp.y);
+      if (!raycaster.ray.intersectPlane(drag.plane, drag.start)) drag.start.copy(tmp);
+    }
     drag.startOffset = vsection.offsetKm();
+    if (picked) annotations?.setState(picked.id, "dragging");
     controls.enabled = false;
     canvas.value!.setPointerCapture(event.pointerId);
     event.preventDefault();
@@ -800,9 +822,12 @@ function processPointer(): void {
     const p = groundPoint(); if (p) { section.box.x0 = drawStart.x; section.box.z0 = drawStart.z; section.box.x1 = p.x; section.box.z1 = p.z; updateSection(); }
     return;
   }
-  const hover = Boolean(sectionHit());
-  vsection?.setHighlight(hover);
-  canvas.value!.style.cursor = hover ? "grab" : "";
+  const picked = annotations?.pick(pointerEvent.clientX, pointerEvent.clientY);
+  const wall = Boolean(sectionHit()) && (section.kind === "lon" || section.kind === "lat");
+  const handle = Boolean(picked?.draggable);
+  vsection?.setHighlight(Boolean(wall || (picked && (picked.userData as { pickable?: string }).pickable === "section")));
+  if (drag.active || vertexIndex >= 0) canvas.value!.style.cursor = "grabbing";
+  else canvas.value!.style.cursor = handle || wall ? "grab" : "";
   if (layers.probe && !section.drawMode) probeFromPointer(false);
 }
 
@@ -811,9 +836,14 @@ function onPointerUp(event: PointerEvent): void {
   if (drag.active) {
     drag.active = false;
     controls.enabled = true;
+    vsection?.syncAnnotations();
     canvas.value!.releasePointerCapture(event.pointerId);
   }
-  if (vertexIndex >= 0 || boxDrawing) { vertexIndex = -1; boxDrawing = false; drawStart = null; controls.enabled = true; canvas.value!.releasePointerCapture(event.pointerId); pointerDown.active = false; return; }
+  if (vertexIndex >= 0 || boxDrawing) {
+    polyline?.syncAnnotations();
+    vsection?.syncAnnotations();
+    vertexIndex = -1; boxDrawing = false; drawStart = null; controls.enabled = true; canvas.value!.releasePointerCapture(event.pointerId); pointerDown.active = false; return;
+  }
   if (section.drawMode && section.kind === "polyline" && wasClick && drawStart) { section.points = [...section.points, { x: drawStart.x, z: drawStart.z }].slice(-16); drawStart = null; updateSection(); }
   pointerDown.active = false;
   if (wasClick && layers.probe) {
@@ -827,7 +857,10 @@ function onContextMenu(event: MouseEvent): void {
   event.preventDefault();
   if (section.kind !== "polyline") return;
   setPointer(event as unknown as PointerEvent);
-  const hit = sectionHit(); const i = hit ? polyline?.markers.children.indexOf(hit.object) ?? -1 : -1;
+  const picked = annotations?.pick(event.clientX, event.clientY);
+  const i = (picked?.userData as { pickable?: string; index?: number } | undefined)?.pickable === "polyline-vertex"
+    ? (picked!.userData as { index: number }).index
+    : -1;
   if (i >= 0 && section.points.length > 2) { section.points.splice(i, 1); updateSection(); }
 }
 
@@ -901,8 +934,7 @@ function frame(now: number): void {
   atmos.root.scale.y = view.exaggeration;
   atmos.root.updateMatrixWorld();
   camera.updateMatrixWorld();
-  vsection?.setHandleScale(view.exaggeration);
-  boxStack?.updateLabels(camera);
+  annotations?.update(camera);
   hslice?.material.setRoot(atmos.root);
   vsection?.material.setRoot(atmos.root);
   if (particles) {
@@ -984,6 +1016,13 @@ function exposeApi(): void {
       camera.position.set(...pos);
       controls.target.set(...target);
       controls.update();
+    },
+    setExaggeration: (n: number) => {
+      view.exaggeration = THREE.MathUtils.clamp(Number(n) || 1, 1, 10);
+      buildings?.setExaggeration(view.exaggeration);
+    },
+    selectPolylineVertex: (index: number) => {
+      polyline?.setSelected(index);
     },
     probeAt: (ix: number, iy: number) => {
       layers.probe = true;
@@ -1069,8 +1108,8 @@ async function start(): Promise<void> {
   }
 
   atmos = new AtmosScene(domain);
-  probeMarker = new ProbeMarker(domain.top);
-  atmos.root.add(probeMarker.object);
+  annotations = new AnnotationLayer(canvas.value!.parentElement ?? canvas.value!, atmos.root);
+  probeMarker = new ProbeMarker(annotations, domain.top);
   hslice = new HorizontalSlice(domain);
   vsection = new AxisSection(domain, "lon");
   polyline = new PolylineSection(domain);
@@ -1081,6 +1120,9 @@ async function start(): Promise<void> {
   volume.mesh.visible = false;
   polyline.group.visible = false;
   boxStack.group.visible = false;
+  vsection.setAnnotationLayer(annotations);
+  polyline.setAnnotationLayer(annotations);
+  boxStack.setAnnotationLayer(annotations);
   atmos.root.add(hslice.group, vsection.group, polyline.group, boxStack.group, volume.mesh);
   camera = new THREE.PerspectiveCamera(40, 1, 0.05, 200);
   controls = new OrbitControls(camera, canvas.value!);
@@ -1119,6 +1161,11 @@ async function start(): Promise<void> {
     ? `${buildings.meta!.count.toLocaleString()} 栋 · 最高 ${buildings.meta!.max_height_m.toFixed(0)} m`
     : "无建筑数据";
   if (window.__atmosStatus) window.__atmosStatus.buildings = buildings.meta?.count ?? 0;
+  if (ok && annotations) {
+    heightOccluder = new HeightOccluder(domain.sx, domain.sz);
+    heightOccluder.ingestObject(buildings.group, atmos.root);
+    annotations.setOccluder(heightOccluder, layers.buildings);
+  }
   applyBuildings();
 }
 
@@ -1185,6 +1232,10 @@ watch(
 watch(
   () => [layers.volumeFilterMin, layers.volumeFilterMax, layers.filterSlices],
   updateVolumeFilter,
+);
+watch(
+  () => layers.buildings,
+  (on) => annotations?.setOcclusionEnabled(Boolean(on)),
 );
 watch(
   () => [layers.buildings, layers.buildingOpacity, view.exaggeration, view.shadows],
@@ -1305,6 +1356,7 @@ onBeforeUnmount(() => {
   controls?.dispose();
   renderer?.dispose();
   probeMarker?.dispose();
+  annotations?.dispose();
 });
 </script>
 
@@ -1718,6 +1770,7 @@ onBeforeUnmount(() => {
 }
 .hud {
   position: absolute;
+  z-index: 5;
   left: 16px;
   top: 14px;
   display: flex;
@@ -1745,6 +1798,7 @@ onBeforeUnmount(() => {
 }
 .legends {
   position: absolute;
+  z-index: 5;
   left: 16px;
   bottom: 16px;
   display: flex;
@@ -1753,11 +1807,13 @@ onBeforeUnmount(() => {
 }
 .profile-box {
   position: absolute;
+  z-index: 5;
   left: 16px;
   top: 60px;
 }
 .hint {
   position: absolute;
+  z-index: 5;
   bottom: 14px;
   left: 50%;
   transform: translateX(-50%);
@@ -1771,6 +1827,7 @@ onBeforeUnmount(() => {
 }
 .panel {
   position: absolute;
+  z-index: 6;
   right: 14px;
   top: 14px;
   width: 300px;
