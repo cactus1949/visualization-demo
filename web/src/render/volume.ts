@@ -146,8 +146,7 @@ void main() {
     float tSample = t.x + (i + jitter) * dt;
     if (!hApplied && tH <= tSample && (tH <= tV || vApplied)) {
       vec3 p = uCameraLocal + dir * tH;
-      float raw = texture(uHField, localToTex(p)).r * 255.0 * uHScale + uHOffset;
-      float value = uHLog > 0.5 ? pow(10.0, raw) : raw;
+      float value = texture(uHField, localToTex(p)).r;
       if (uHFilterEnable < 0.5 || (value >= uHFilterMin - 1e-6 && value <= uHFilterMax + 1e-6)) {
         float n = clamp((value - uHMin) / max(uHMax - uHMin, 1e-9), 0.0, 1.0);
         vec3 c = texture(uHColormap, vec2(n, 0.5)).rgb;
@@ -159,8 +158,7 @@ void main() {
     }
     if (!vApplied && tV <= tSample && (tV <= tH || hApplied)) {
       vec3 p = uCameraLocal + dir * tV;
-      float raw = texture(uVField, localToTex(p)).r * 255.0 * uVScale + uVFieldOffset;
-      float value = uVLog > 0.5 ? pow(10.0, raw) : raw;
+      float value = texture(uVField, localToTex(p)).r;
       if (uVFilterEnable < 0.5 || (value >= uVFilterMin - 1e-6 && value <= uVFilterMax + 1e-6)) {
         float n = clamp((value - uVMin) / max(uVMax - uVMin, 1e-9), 0.0, 1.0);
         vec3 c = texture(uVColormap, vec2(n, 0.5)).rgb;
@@ -171,8 +169,7 @@ void main() {
       vApplied = true;
     }
     vec3 p = uCameraLocal + dir * tSample;
-    float raw = texture(uField, localToTex(p)).r * 255.0 * uScale + uOffset;
-    float value = uLog > 0.5 ? pow(10.0, raw) : raw;
+    float value = texture(uField, localToTex(p)).r;
     // The physical filter is independent from uMin/uMax, which remain the stable colour range.
     if (uFilterEnable > 0.5 && (value < uFilterMin - 1e-6 || value > uFilterMax + 1e-6)) continue;
     float n = clamp((value - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
@@ -190,8 +187,7 @@ void main() {
     bool doV = !vApplied && tV <= tEnd && (tV <= tH || hApplied);
     if (doH) {
       vec3 p = uCameraLocal + dir * tH;
-      float raw = texture(uHField, localToTex(p)).r * 255.0 * uHScale + uHOffset;
-      float value = uHLog > 0.5 ? pow(10.0, raw) : raw;
+      float value = texture(uHField, localToTex(p)).r;
       if (uHFilterEnable < 0.5 || (value >= uHFilterMin - 1e-6 && value <= uHFilterMax + 1e-6)) {
         float n = clamp((value - uHMin) / max(uHMax - uHMin, 1e-9), 0.0, 1.0);
         vec3 c = texture(uHColormap, vec2(n, 0.5)).rgb;
@@ -204,8 +200,7 @@ void main() {
       hApplied = true;
     } else if (doV) {
       vec3 p = uCameraLocal + dir * tV;
-      float raw = texture(uVField, localToTex(p)).r * 255.0 * uVScale + uVFieldOffset;
-      float value = uVLog > 0.5 ? pow(10.0, raw) : raw;
+      float value = texture(uVField, localToTex(p)).r;
       if (uVFilterEnable < 0.5 || (value >= uVFilterMin - 1e-6 && value <= uVFilterMax + 1e-6)) {
         float n = clamp((value - uVMin) / max(uVMax - uVMin, 1e-9), 0.0, 1.0);
         vec3 c = texture(uVColormap, vec2(n, 0.5)).rgb;
@@ -320,9 +315,9 @@ export class VolumeLayer {
   bind(field: ScalarBinding, colormap: string, min: number, max: number): void {
     const u = this.material.uniforms;
     u.uField.value = field.texture;
-    u.uScale.value = field.scale;
-    u.uOffset.value = field.offset;
-    u.uLog.value = field.log10 ? 1 : 0;
+    u.uScale.value = 1;
+    u.uOffset.value = 0;
+    u.uLog.value = 0;
     u.uColormap.value = colormapTexture(colormap);
     u.uMin.value = min;
     u.uMax.value = max;
@@ -347,9 +342,9 @@ export class VolumeLayer {
     u[`u${prefix}Enabled`].value = config?.enabled && config.field ? 1 : 0;
     if (!config?.field) return;
     u[`u${prefix}Field`].value = config.field.texture;
-    u[`u${prefix}Scale`].value = config.field.scale;
-    u[prefix === "H" ? "uHOffset" : "uVFieldOffset"].value = config.field.offset;
-    u[`u${prefix}Log`].value = config.field.log10 ? 1 : 0;
+    u[`u${prefix}Scale`].value = 1;
+    u[prefix === "H" ? "uHOffset" : "uVFieldOffset"].value = 0;
+    u[`u${prefix}Log`].value = 0;
     u[`u${prefix}Colormap`].value = colormapTexture(config.colormap);
     u[`u${prefix}Min`].value = config.min;
     u[`u${prefix}Max`].value = config.max;

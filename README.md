@@ -13,9 +13,9 @@
 
 | 路径                     | 内容                                                  |
 | ------------------------ | ----------------------------------------------------- |
-| `pipeline/ncpipe/`       | NetCDF → 8 位量化 + Brotli + manifest，与渲染器无关   |
+| `pipeline/ncpipe/`       | NetCDF → 按变量配置量化 + Brotli + manifest，与渲染器无关 |
 | `pipeline/bldpipe/`      | 建筑白膜管线：裁剪、投影、拉伸、meshopt 压缩          |
-| `data/web/lowair_atmos/` | 23 个变量的 `.bin.br` 和 `manifest.json`（约 4.3 MB） |
+| `data/web/lowair_atmos/` | 23 个变量的 `.bin.br` 和 `manifest.json`（约 12.5 MB） |
 | `data/web/buildings/`    | `buildings.glb`（约 6.4 MB）和 `buildings.json`       |
 | `web/`                   | three.js 前端                                         |
 
@@ -30,7 +30,7 @@ PYTHONPATH=pipeline /workspace/.venv-nc/bin/python -m ncpipe build \
   --out data/web/lowair_atmos
 ```
 
-每个变量按配置里的固定物理范围量化为 Uint8（`物理值 = 字节 × scale + offset`），`visibility` 先取 `log10`。`w` 从 41 个界面层平均到 40 个层中心。固定范围能保证不同时间步之间颜色含义一致。
+每个变量按 `pipeline/config/quant_config.yaml` 编码，再经 Brotli（quality 9）压缩。配置里可以写编码（`u8_linear`、`u16_linear`、`f16`、`u8_log10` 等）、区间范围（`global` 或 `per_level`），以及可选的分位数裁剪。本案例中 u、v、w 存成 float16（也测过逐层 u16，体积更大、更难压）；温度、湿度等窄区间的 2D 变量，以及多数脉动、结冰类 3D 变量，用 8 位线性；`visibility` 和跨数量级的 `wind_shear` 用 log10。`tke` 在这份数据里大约 2.4–12.7，没有跨数量级，所以仍用逐层 8 位线性。区间默认按数据的 min/max（或分位数）计算，不再使用 `variables.yaml` 里的固定范围；后者只保留中文名、色带和参考范围。`w` 仍从 41 个界面层平均到 40 个层中心。manifest 记录 encoding、dtype，以及全局或逐层的 scale/offset。
 
 ### 建筑白膜
 
@@ -83,9 +83,9 @@ npx vite preview --port 4173 --strictPort
 ## 架构
 
 ```
-nc ─ ncpipe ─▶ data/web/*.bin.br ─ Worker 解压 ─▶ Uint8 Data3DTexture（每个变量只上传一次）
-                                                 ├─ 切片 / 剖面：片元着色器 texture(sampler3D)
-                                                 ├─ 粒子：RGBA8 风场纹理（u, v, w, |V|）
+nc ─ ncpipe ─▶ data/web/*.bin.br ─ Worker 解压并解码为 Float32 ─▶ R16F Data3DTexture（每个变量只上传一次）
+                                                 ├─ 切片 / 剖面：片元着色器直接采样物理值
+                                                 ├─ 粒子：RGBA16F 风场纹理（u, v, w, |V|）
                                                  └─ 体渲染：光线步进
 3D-GloBFP + OSM ─ bldpipe ─▶ buildings.glb（meshopt）─ GLTFLoader ─▶ 一个合并网格
 ```
@@ -97,10 +97,10 @@ nc ─ ncpipe ─▶ data/web/*.bin.br ─ Worker 解压 ─▶ Uint8 Data3DText
   - 每一步把新状态写入 `WebGLArrayRenderTarget` 的一层，N 层（64 层，粒子超过 7 万时为 32 层）组成每个粒子的历史环形缓冲。
   - 拖尾用一次实例化绘制完成。每个实例是 N 个节点的带状网格，顶点着色器用 `texelFetch` 取第 (head − k) mod N 层的位置，投影到屏幕后按像素线宽外扩，从头到尾逐渐变细、变透明。颜色在顶点着色器里按该节点处的风速、w 或高度查色带。
   - 整个循环里没有逐粒子的 CPU 计算，也没有 GPU 回读。
-- **切片**（`slices.ts`）：片元着色器把片元的 root 局部坐标换算成 3D 纹理坐标后采样（高度层在层中心，所以纹理 r 坐标正好是 h / 1000 m），再反量化、查色带，等值线用 `fwidth` 做抗锯齿。开启“截面同步过滤”时，切片和剖面也会按体渲染的物理区间丢弃片元；这适合它们显示同一个变量或同单位变量。垂直剖面在 CPU 上按方位角和偏移把四个顶点裁剪到计算域内，每次拖动只更新 4 个顶点。
+- **切片**（`slices.ts`）：片元着色器把片元的 root 局部坐标换算成 3D 纹理坐标后采样（高度层在层中心，所以纹理 r 坐标正好是 h / 1000 m），查色带，等值线用 `fwidth` 做抗锯齿。开启“截面同步过滤”时，切片和剖面也会按体渲染的物理区间丢弃片元；这适合它们显示同一个变量或同单位变量。垂直剖面在 CPU 上按方位角和偏移把四个顶点裁剪到计算域内，每次拖动只更新 4 个顶点。
 - **体渲染**（`volume.ts`）：每帧先把体和粒子隐藏，在带深度纹理的目标中渲染地面和建筑；半透明切片/剖面在光线步进里按交点合成，背后的体可以透过并受不透明度减弱，不透明度约为 1 时仍挡住后面的体；体渲染关闭时切片仍走原来的网格绘制。体盒从地面 0 m 开始，第一层中心为 12.5 m，半层由纹理坐标处理，顶部为 1000 m；建筑和体渲染共用 `root.scale.y` 的垂直夸张。
 - **建筑**（`buildings.ts`）：`MeshStandardMaterial`，开启 flatShading，并通过 `onBeforeCompile` 把墙脚约 28 m 压暗，模拟环境光遮蔽；配合方向光阴影（4096² 阴影贴图）。
-- **探针**：直接读内存中的 8 位数组（每次 40 个值），每帧最多做一次射线检测，只检测地面和切片，不检测 192 万个建筑三角形。
+- **探针**：直接读内存中解码后的 Float32 数组（每次 40 个值），每帧最多做一次射线检测，只检测地面和切片，不检测 192 万个建筑三角形。
 - `window.__atmosApi` 提供 `setView / setSection / setSlice / setParticles / setLayer / setVolume / setCamera / probeAt / advance / status`，供截图和录屏脚本调用（`web/scripts/screenshot.mjs`、`web/scripts/record.mjs`）。
 
 ## 生产部署
@@ -124,7 +124,7 @@ location /data/ {
 - 第三版去掉了 WebGPU/TSL 路径（第二版里 WebGPU 白屏，TSL 计算在 WebGL2 后端也跑不起来），现在只有 WebGL2 这一条路径。所有桌面浏览器都能运行，以后需要时可以再加 WebGPU compute 分支。
 - 无头截图环境只有 SwiftShader 软件渲染，大约 1 FPS，测不出真实帧率。丝不丝滑需要在带 GPU 的机器上实测，状态栏会显示 FPS 和 draw call 数。
 - 3D-GloBFP 的高度是模型估计值（论文报告 RMSE 1.9–14.6 m），没有 OSM 高度的超高层仍可能偏低。
-- 风场是 8 位量化（u、v 的精度约 0.16 m/s），探针读的也是 8 位值。
+- 风场 u、v、w 存成 float16，精度大约 0.004 m/s（u/v）和 6×10⁻⁵ m/s（w）；探针读的是解码后的物理值。整包压缩体积从约 4.3 MB 增到约 12.5 MB，主要是 w 的 float16 几乎压不动（约 6.2 MB）。
 - 粒子每帧走一步，所以尾迹的实际长度会随帧率变化。
 - 建筑开启透明（不透明度小于 1）时，合并网格内部的三角形不排序，可能出现轻微的穿插。
 - 建筑不透明度小于 1 时仍然写入深度；体光线会在墙面终止，所以不会透过半透明白膜看到墙后的体素。

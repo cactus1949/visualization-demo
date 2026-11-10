@@ -58,16 +58,12 @@ export function domainUniforms(domain: Domain) {
   };
 }
 
-/** value = byte * scale + offset (then 10^value when transform == log10). */
-export function dequantize(meta: VariableMeta, byte: number): number {
-  const value = byte * meta.scale + meta.offset;
-  return meta.transform === "log10" ? Math.pow(10, value) : value;
-}
-
-function make3D(data: Uint8Array, d: Domain, format: THREE.AnyPixelFormat): THREE.Data3DTexture {
-  const texture = new THREE.Data3DTexture(data, d.nx, d.ny, d.nz);
+function make3D(data: Float32Array, d: Domain, format: THREE.AnyPixelFormat, channels = 1): THREE.Data3DTexture {
+  const half = new Uint16Array(data.length);
+  for (let i = 0; i < data.length; i += 1) half[i] = THREE.DataUtils.toHalfFloat(data[i]);
+  const texture = new THREE.Data3DTexture(half, d.nx, d.ny, d.nz);
   texture.format = format;
-  texture.type = THREE.UnsignedByteType;
+  texture.type = THREE.HalfFloatType;
   texture.minFilter = THREE.LinearFilter;
   texture.magFilter = THREE.LinearFilter;
   texture.wrapS = THREE.ClampToEdgeWrapping;
@@ -83,14 +79,14 @@ export class FieldTextures {
   private scalars = new Map<string, THREE.Data3DTexture>();
   private speedTexture: THREE.Data3DTexture | null = null;
   /** derived horizontal speed bytes (byte * maxSpeed / 255 = m/s) */
-  speedBytes: Uint8Array | null = null;
+  speedValues: Float32Array | null = null;
   /** actual min/max of the derived horizontal speed (m/s) */
   speedRange: [number, number] = [0, 1];
   wind: THREE.Data3DTexture | null = null;
 
   constructor(readonly domain: Domain) {}
 
-  scalar(name: string, data: Uint8Array): THREE.Data3DTexture {
+  scalar(name: string, data: Float32Array): THREE.Data3DTexture {
     let texture = this.scalars.get(name);
     if (!texture) {
       texture = make3D(data, this.domain, THREE.RedFormat);
@@ -101,44 +97,38 @@ export class FieldTextures {
 
   /** u, v, w bytes packed in RGB (alpha = horizontal speed byte, 0..255 over 0..maxSpeed). */
   windTexture(
-    u: Uint8Array,
-    v: Uint8Array,
-    w: Uint8Array,
-    uMeta: VariableMeta,
-    vMeta: VariableMeta,
+    u: Float32Array,
+    v: Float32Array,
+    w: Float32Array,
     maxSpeed: number,
   ): THREE.Data3DTexture {
     if (this.wind) return this.wind;
-    const packed = new Uint8Array(u.length * 4);
+    const packed = new Float32Array(u.length * 4);
     for (let i = 0; i < u.length; i += 1) {
-      const uu = u[i] * uMeta.scale + uMeta.offset;
-      const vv = v[i] * vMeta.scale + vMeta.offset;
-      packed[i * 4] = u[i];
-      packed[i * 4 + 1] = v[i];
-      packed[i * 4 + 2] = w[i];
-      packed[i * 4 + 3] = Math.min(255, Math.round((Math.hypot(uu, vv) / maxSpeed) * 255));
+      const uu = u[i], vv = v[i];
+      packed[i * 4] = uu; packed[i * 4 + 1] = vv; packed[i * 4 + 2] = w[i];
+      packed[i * 4 + 3] = Math.hypot(uu, vv);
     }
     this.wind = make3D(packed, this.domain, THREE.RGBAFormat);
     return this.wind;
   }
 
   /** Horizontal speed as its own R8 texture (for slices), derived from u and v. */
-  speed(u: Uint8Array, v: Uint8Array, uMeta: VariableMeta, vMeta: VariableMeta, maxSpeed: number) {
+  speed(u: Float32Array, v: Float32Array, maxSpeed: number) {
     if (this.speedTexture) return this.speedTexture;
-    const bytes = new Uint8Array(u.length);
+    const values = new Float32Array(u.length);
     let lo = Infinity;
     let hi = -Infinity;
     for (let i = 0; i < u.length; i += 1) {
-      const uu = u[i] * uMeta.scale + uMeta.offset;
-      const vv = v[i] * vMeta.scale + vMeta.offset;
+      const uu = u[i], vv = v[i];
       const s = Math.hypot(uu, vv);
       if (s < lo) lo = s;
       if (s > hi) hi = s;
-      bytes[i] = Math.min(255, Math.round((s / maxSpeed) * 255));
+      values[i] = s;
     }
     this.speedRange = [lo, hi];
-    this.speedBytes = bytes;
-    this.speedTexture = make3D(bytes, this.domain, THREE.RedFormat);
+    this.speedValues = values;
+    this.speedTexture = make3D(values, this.domain, THREE.RedFormat);
     return this.speedTexture;
   }
 
@@ -153,33 +143,29 @@ export class FieldTextures {
 }
 
 /**
- * Robust value range of quantised bytes in [start, end): the 2nd–98th percentile via a
- * 256-bin histogram (exact for uint8 data, ~1 ms for a 300x300 level).
+ * Robust value range of physical floats in [start, end): the 2nd–98th percentile.
+ * Levels (90k) are sorted directly; a full 3D field is systematically subsampled.
  */
-export function byteRange(
-  bytes: Uint8Array,
+export function floatRange(
+  values: Float32Array,
   start: number,
   end: number,
   lowPct = 0.02,
   highPct = 0.98,
 ): [number, number] {
-  const hist = new Uint32Array(256);
-  for (let i = start; i < end; i += 1) hist[bytes[i]] += 1;
-  const total = end - start;
-  let acc = 0;
-  let lo = 0;
-  let hi = 255;
-  let foundLo = false;
-  for (let b = 0; b < 256; b += 1) {
-    acc += hist[b];
-    if (!foundLo && acc >= total * lowPct) {
-      lo = b;
-      foundLo = true;
-    }
-    if (acc >= total * highPct) {
-      hi = b;
-      break;
-    }
+  const n = end - start;
+  if (n <= 0) return [0, 1];
+  const maxSample = 200_000;
+  let slice: Float32Array;
+  if (n <= maxSample) {
+    slice = values.subarray(start, end).slice();
+  } else {
+    slice = new Float32Array(maxSample);
+    const step = n / maxSample;
+    for (let i = 0; i < maxSample; i += 1) slice[i] = values[start + Math.floor(i * step)]!;
   }
-  return [lo, Math.max(hi, lo + 1)];
+  slice.sort();
+  const at = (p: number) => slice[Math.min(slice.length - 1, Math.max(0, Math.floor(p * (slice.length - 1))))]!;
+  const lo = at(lowPct), hi = at(highPct);
+  return [lo, hi > lo ? hi : lo + 1e-9];
 }

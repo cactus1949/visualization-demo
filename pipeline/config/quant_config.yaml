@@ -1,0 +1,29 @@
+# Per-variable storage and quantisation policy.  Ranges are computed from the data
+# (after the optional transform) unless fixed_range is supplied.
+defaults:
+  encoding: u8_linear
+  range_scope: global
+  clip_percentiles: [0, 100]
+u: {encoding: f16, range_scope: global}
+v: {encoding: f16, range_scope: global}
+w: {encoding: f16, range_scope: global}
+u_gust: {encoding: u8_linear, range_scope: per_level}
+tke: {encoding: u8_linear, range_scope: per_level}
+sigma_u: {encoding: u8_linear, range_scope: per_level}
+sigma_v: {encoding: u8_linear, range_scope: per_level}
+sigma_w: {encoding: u8_linear, range_scope: per_level}
+wind_shear: {encoding: u8_log10, range_scope: per_level}
+dirdz: {encoding: u8_linear, range_scope: per_level}
+icing_index: {encoding: u8_linear, range_scope: per_level}
+icing_accum: {encoding: u8_linear, range_scope: per_level}
+t2m: {encoding: u8_linear, range_scope: global}
+q2m: {encoding: u8_linear, range_scope: global}
+u10m: {encoding: u8_linear, range_scope: global}
+v10m: {encoding: u8_linear, range_scope: global}
+ustar: {encoding: u8_linear, range_scope: global}
+precip: {encoding: u8_linear, range_scope: global}
+cloud: {encoding: u8_linear, range_scope: global}
+cloud_low: {encoding: u8_linear, range_scope: global}
+visibility: {encoding: u8_log10, range_scope: global}
+risk_level: {encoding: u8_linear, range_scope: global}
+p: {encoding: u8_linear, range_scope: global}

@@ -14,7 +14,7 @@ import { GLSL_DOMAIN, domainUniforms, type Domain } from "./fields";
 
 export interface ScalarBinding {
   texture: THREE.Data3DTexture;
-  /** physical value = sample(0..1) * 255 * scale + offset */
+  /** Values are physical floats in the half-float texture. */
   scale: number;
   offset: number;
   log10: boolean;
@@ -60,8 +60,7 @@ out vec4 outColor;
 
 void main() {
   if (!insideDomain(vLocal)) discard;
-  float raw = texture(uField, localToTex(vLocal)).r * 255.0 * uScale + uOffset;
-  float value = uLog > 0.5 ? pow(10.0, raw) : raw;
+  float value = texture(uField, localToTex(vLocal)).r;
   if (uFilterEnable > 0.5 && (value < uFilterMin - 1e-6 || value > uFilterMax + 1e-6)) discard;
   float t = clamp((value - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
   vec3 color = texture(uColormap, vec2(t, 0.5)).rgb;
@@ -114,9 +113,9 @@ export class SliceMaterial extends THREE.ShaderMaterial {
 
   bind(field: ScalarBinding): void {
     this.uniforms.uField.value = field.texture;
-    this.uniforms.uScale.value = field.scale;
-    this.uniforms.uOffset.value = field.offset;
-    this.uniforms.uLog.value = field.log10 ? 1 : 0;
+    this.uniforms.uScale.value = 1;
+    this.uniforms.uOffset.value = 0;
+    this.uniforms.uLog.value = 0;
   }
 
   style(style: SliceStyle): void {

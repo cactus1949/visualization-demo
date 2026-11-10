@@ -1,11 +1,15 @@
 export interface VariableMeta {
   dims: string[];
   shape: number[];
-  dtype: "uint8";
-  bits: 8;
-  scale: number;
-  offset: number;
-  transform: "log10" | null;
+  encoding: string;
+  range_scope: "global" | "per_level";
+  dtype: "uint8" | "uint16" | "float16";
+  bits: 8 | 16;
+  scale?: number;
+  offset?: number;
+  level_scale?: number[];
+  level_offset?: number[];
+  transform: "log10" | "log1p" | "signed_sqrt" | null;
   range: [number, number];
   units: string;
   long_name: string;
@@ -20,15 +24,6 @@ export interface VariableMeta {
   clipped_high_frac: number;
   nan_count: number;
   staggered_from?: string;
-  u16?: {
-    file: string;
-    scale: number;
-    offset: number;
-    bytes_raw: number;
-    bytes_compressed: number;
-    dtype: "uint16";
-    bits: 16;
-  };
 }
 
 export interface GridMeta {

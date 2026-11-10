@@ -5,7 +5,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { Manifest, VariableMeta } from "../data/manifest";
 import { DataStore } from "../data/store";
 import { AtmosScene, field2D, type Theme } from "../render/scene";
-import { FieldTextures, byteRange, dequantize, domainOf, type Domain } from "../render/fields";
+import { FieldTextures, floatRange, domainOf, type Domain } from "../render/fields";
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
 import { VolumeLayer } from "../render/volume";
 import { Buildings } from "../render/buildings";
@@ -141,9 +141,7 @@ function volumeFullRange(name: string): [number, number] {
   if (name === SPEED) return [...fields.speedRange] as [number, number];
   const meta = manifest.value?.variables[name];
   if (!meta) return [0, 1];
-  return meta.transform === "log10"
-    ? [Math.pow(10, meta.range[0]), Math.pow(10, meta.range[1])]
-    : [meta.data_min, meta.data_max];
+  return [meta.data_min, meta.data_max];
 }
 
 function resetVolumeFilter(name: string): void {
@@ -151,7 +149,7 @@ function resetVolumeFilter(name: string): void {
   layers.volumeFilterMin = lo;
   layers.volumeFilterMax = hi;
   volumeFilterVariable.value = name;
-  volumeFilterNeedsSpeedRange.value = name === SPEED && !fields.speedBytes;
+  volumeFilterNeedsSpeedRange.value = name === SPEED && !fields.speedValues;
 }
 
 function updateSliceFilter(): void {
@@ -216,8 +214,8 @@ function binding(name: string): ScalarBinding | null {
     const v = loaded("v");
     if (!u || !v) return null;
     return {
-      texture: fields.speed(u.data, v.data, u.meta, v.meta, MAX_SPEED),
-      scale: MAX_SPEED / 255,
+      texture: fields.speed(u.data, v.data, MAX_SPEED),
+      scale: 1,
       offset: 0,
       log10: false,
     };
@@ -226,9 +224,9 @@ function binding(name: string): ScalarBinding | null {
   if (!data) return null;
   return {
     texture: fields.scalar(name, data.data),
-    scale: data.meta.scale,
-    offset: data.meta.offset,
-    log10: data.meta.transform === "log10",
+    scale: 1,
+    offset: 0,
+    log10: false,
   };
 }
 
@@ -250,14 +248,12 @@ function autoRange(name: string, colormap: string, heightM?: number): [number, n
   let lo: number;
   let hi: number;
   if (name === SPEED) {
-    if (!fields.speedBytes) return [0, 15];
-    const [a, b] = byteRange(fields.speedBytes, start, end);
-    [lo, hi] = [(a * MAX_SPEED) / 255, (b * MAX_SPEED) / 255];
+    if (!fields.speedValues) return [0, 15];
+    [lo, hi] = floatRange(fields.speedValues, start, end);
   } else {
     const data = loaded(name);
     if (!data) return [0, 1];
-    const [a, b] = byteRange(data.data, start, end);
-    [lo, hi] = [dequantize(data.meta, a), dequantize(data.meta, b)];
+    [lo, hi] = floatRange(data.data, start, end);
   }
   if (DIVERGING.has(colormap)) {
     const m = Math.max(Math.abs(lo), Math.abs(hi));
@@ -314,7 +310,7 @@ function updateGround(): void {
     const v = loaded("v");
     if (!u || !v) return request("speed0");
     const read = (i: number) =>
-      Math.hypot(dequantize(u.meta, u.data[i]), dequantize(v.meta, v.data[i]));
+      Math.hypot(u.data[i], v.data[i]);
     let lo = Infinity;
     let hi = -Infinity;
     for (let i = 0; i < domain.nx * domain.ny; i += 1) {
@@ -329,10 +325,7 @@ function updateGround(): void {
   if (!data) return request(name);
   const meta = data.meta;
   const cmap = meta.colormap === "rdbu" ? "rdbu" : meta.colormap;
-  const range: [number, number] =
-    meta.transform === "log10"
-      ? [Math.pow(10, meta.range[0]), Math.pow(10, meta.range[1])]
-      : [meta.data_min, meta.data_max];
+  const range: [number, number] = [meta.data_min, meta.data_max];
   atmos.setGroundField(field2D(meta, data.data), range, cmap, view.theme, 0.55);
 }
 
@@ -351,7 +344,7 @@ function updateVolume(): void {
     syncVolumeSlices();
     return;
   }
-  if (layers.volumeVar === SPEED && volumeFilterNeedsSpeedRange.value && fields.speedBytes) {
+  if (layers.volumeVar === SPEED && volumeFilterNeedsSpeedRange.value && fields.speedValues) {
     resetVolumeFilter(SPEED);
   } else if (volumeFilterVariable.value !== layers.volumeVar) {
     resetVolumeFilter(layers.volumeVar);
@@ -417,16 +410,16 @@ function ensureParticles(): void {
   const v = loaded("v");
   const w = loaded("w");
   if (!u || !v || !w) return;
-  const texture = fields.windTexture(u.data, v.data, w.data, u.meta, v.meta, MAX_SPEED);
-  fields.speed(u.data, v.data, u.meta, v.meta, MAX_SPEED);
+  const texture = fields.windTexture(u.data, v.data, w.data, MAX_SPEED);
+  fields.speed(u.data, v.data, MAX_SPEED);
   const wAbs = Math.max(Math.abs(w.meta.data_min), Math.abs(w.meta.data_max));
   particles = new WindParticles(
     renderer,
     domain,
     {
       texture,
-      scale: new THREE.Vector3(u.meta.scale, v.meta.scale, w.meta.scale),
-      offset: new THREE.Vector3(u.meta.offset, v.meta.offset, w.meta.offset),
+      scale: new THREE.Vector3(1, 1, 1),
+      offset: new THREE.Vector3(0, 0, 0),
       maxSpeed: MAX_SPEED,
       speedRange: [...fields.speedRange] as [number, number],
       wRange: Math.max(0.05, wAbs * 0.6),
@@ -494,12 +487,12 @@ function refreshProbe(pinned = probe.value?.pinned ?? false): void {
   const values: number[] = [];
   for (let k = 0; k < g.nz; k += 1) {
     const i = k * g.nx * g.ny + iy * g.nx + ix;
-    const uu = dequantize(u.meta, u.data[i]);
-    const vv = dequantize(v.meta, v.data[i]);
+    const uu = u.data[i];
+    const vv = v.data[i];
     speed.push(Math.hypot(uu, vv));
     // meteorological direction: where the wind comes from, clockwise from north
     direction.push((THREE.MathUtils.radToDeg(Math.atan2(-uu, -vv)) + 360) % 360);
-    values.push(data ? dequantize(data.meta, data.data[i]) : Math.hypot(uu, vv));
+    values.push(data ? data.data[i] : Math.hypot(uu, vv));
   }
   probe.value = {
     lon: THREE.MathUtils.lerp(g.lon_min, g.lon_max, ix / (g.nx - 1)),

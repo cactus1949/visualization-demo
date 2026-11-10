@@ -61,10 +61,10 @@ export const DEFAULT_PARTICLES: ParticleParams = {
 
 export interface WindBinding {
   texture: THREE.Data3DTexture;
-  /** per channel: m/s = byte * scale + offset */
+  /** Physical m/s channels already stored in the half-float texture. */
   scale: THREE.Vector3;
   offset: THREE.Vector3;
-  /** alpha channel = speed byte / 255 * maxSpeed */
+  /** alpha channel stores horizontal speed in m/s. */
   maxSpeed: number;
   speedRange: [number, number];
   wRange: number;
@@ -89,7 +89,7 @@ vec3 gridToTex(vec3 g) {
   return vec3((g.xy * (uGridN.xy - 1.0) + 0.5) / uGridN.xy, g.z / uDomain.z);
 }
 vec4 windRaw(vec3 g) { return textureLod(uWind, gridToTex(g), 0.0); }
-vec3 windMs(vec4 raw) { return raw.rgb * 255.0 * uWindScale + uWindOffset; }
+vec3 windMs(vec4 raw) { return raw.rgb; }
 `;
 
 const simFragment = /* glsl */ `
@@ -217,7 +217,7 @@ void main() {
   vec4 raw = windRaw(g);
   float t;
   if (uColorMode == 0) {
-    float speed = raw.a * uColorRange.x;
+    float speed = raw.a;
     t = (speed - uColorRange.y) / max(uColorRange.z - uColorRange.y, 1e-3);
   } else if (uColorMode == 1) {
     t = 0.5 + 0.5 * windMs(raw).z / uColorRange.x;

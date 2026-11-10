@@ -2,7 +2,7 @@ import type { Manifest, VariableMeta } from "./manifest";
 
 export interface LoadedVariable {
   meta: VariableMeta;
-  data: Uint8Array;
+  data: Float32Array;
 }
 
 export class DataStore {
@@ -28,7 +28,7 @@ export class DataStore {
       if (!this.manifest) return;
       this.loaded.set(message.name, {
         meta: this.manifest.variables[message.name],
-        data: new Uint8Array(message.buffer),
+        data: new Float32Array(message.buffer),
       });
       this.loading.delete(message.name);
       this.notify(message.name);

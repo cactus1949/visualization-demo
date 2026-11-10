@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { VariableMeta } from "../data/manifest";
 import { colormapBytes } from "./colormaps";
-import { dequantize, type Domain } from "./fields";
+import type { Domain } from "./fields";
 
 export type Theme = "dark" | "light";
 
@@ -143,7 +143,7 @@ export class AtmosScene {
   }
 }
 
-/** Value reader for a 2D variable stored as bytes. */
-export function field2D(meta: VariableMeta, data: Uint8Array): (i: number) => number {
-  return (i) => dequantize(meta, data[i]);
+/** Value reader for a decoded 2D variable (physical floats). */
+export function field2D(_meta: VariableMeta, data: Float32Array): (i: number) => number {
+  return (i) => data[i];
 }
