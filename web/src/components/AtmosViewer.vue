@@ -8,6 +8,12 @@ import { AtmosScene, field2D, type Theme } from "../render/scene";
 import { FieldTextures, floatRange, domainOf, textureUploadMs, type Domain } from "../render/fields";
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
 import { VolumeLayer } from "../render/volume";
+import { DEFAULT_CUTS, clampCuts, cutBounds, type CutState } from "../render/cuts";
+import { PolylineSection } from "../render/sections/polyline";
+import { AxisSection } from "../render/sections/planes";
+import { BoxStack, type BoxStackParams } from "../render/sections/boxStack";
+import { buildCompositeSurfaces, type CompositeSurface } from "../render/sections/composite";
+import { sampleUnfolded, type UnfoldedGrid } from "../render/sections/unfolded";
 import { Buildings } from "../render/buildings";
 import { ProbeMarker } from "../render/probeMarker";
 import {
@@ -20,6 +26,7 @@ import { COLORMAPS, COLORMAP_LABELS, DIVERGING } from "../render/colormaps";
 import ColorLegend from "./ColorLegend.vue";
 import ProfileChart from "./ProfileChart.vue";
 import RangeSlider from "./RangeSlider.vue";
+import UnfoldedPlot from "./UnfoldedPlot.vue";
 
 const props = withDefaults(defineProps<{ manifestUrl?: string; showPanel?: boolean }>(), {
   manifestUrl: "/data/lowair_atmos/manifest.json",
@@ -112,6 +119,8 @@ const slice = reactive({
 });
 const section = reactive({
   enabled: false,
+  kind: "lon" as "lon" | "lat" | "polyline" | "box",
+  drawMode: false,
   variable: SPEED,
   offsetKm: 0,
   azimuthDeg: 90,
@@ -121,7 +130,12 @@ const section = reactive({
   max: 15,
   opacity: 1,
   contours: 12,
+  points: [] as { x: number; z: number }[],
+  box: { x0: -2, z0: -2, x1: 2, z1: 2, heightMinM: 100, heightMaxM: 300, stepLevels: 5, stretch: 1, spacingKm: 0 } as BoxStackParams,
 });
+const cuts = reactive<CutState>({ x: [...DEFAULT_CUTS.x], y: [...DEFAULT_CUTS.y], z: [...DEFAULT_CUTS.z], faces: DEFAULT_CUTS.faces });
+const unfolded = ref<UnfoldedGrid | null>(null);
+const unfoldedVisible = ref(true);
 const probe = ref<{
   lon: number;
   lat: number;
@@ -203,6 +217,8 @@ function updateSliceFilter(): void {
   const enabled = layers.filterSlices;
   hslice?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
   vsection?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
+  polyline?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
+  boxStack?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
 }
 
 function updateVolumeFilter(): void {
@@ -233,6 +249,8 @@ let particles: WindParticles | null = null;
 let hslice: HorizontalSlice | null = null;
 let vsection: VerticalSection | null = null;
 let volume: VolumeLayer | null = null;
+let polyline: PolylineSection | null = null;
+let boxStack: BoxStack | null = null;
 let buildings: Buildings | null = null;
 let probeMarker: ProbeMarker | null = null;
 let resizeObserver: ResizeObserver | null = null;
@@ -333,19 +351,44 @@ function updateSlice(): void {
 }
 
 function updateSection(): void {
-  if (!vsection) return;
-  vsection.group.visible = section.enabled;
-  if (!section.enabled) return;
+  if (!vsection || !polyline || !boxStack) return;
+  vsection.group.visible = section.enabled && (section.kind === "lon" || section.kind === "lat");
+  polyline.group.visible = section.enabled && section.kind === "polyline" && section.points.length >= 2;
+  boxStack.group.visible = section.enabled && section.kind === "box";
+  if (section.kind === "lon") { vsection.azimuthDeg = 0; vsection.setOffset(section.offsetKm); }
+  if (section.kind === "lat") { vsection.azimuthDeg = 90; vsection.setOffset(section.offsetKm); }
+  if (section.kind === "polyline") { polyline.setPoints(section.points); updateUnfolded(); }
+  if (section.kind === "box") boxStack.update({ ...section.box, levels: manifest.value?.grid.levels_m ?? domain.levels });
+  if (!section.enabled) { syncVolumeSlices(); return; }
   const b = binding(section.variable);
   if (!b) {
-    vsection.group.visible = false;
+    vsection.group.visible = false; polyline.group.visible = false; boxStack.group.visible = false;
     request(section.variable);
     return;
   }
   if (section.autoRange) [section.min, section.max] = autoRange(section.variable, section.colormap);
   vsection.material.bind(b);
   vsection.material.style(section);
+  polyline.material.bind(b); polyline.material.style(section);
+  boxStack.material.bind(b); boxStack.material.style(section);
   updateSliceFilter();
+  updateComposite();
+}
+
+function updateUnfolded(): void {
+  if (section.kind !== "polyline" || section.points.length < 2 || !manifest.value) { unfolded.value = null; return; }
+  const data = section.variable === SPEED ? null : loaded(section.variable);
+  const u = loaded("u"), v = loaded("v");
+  if (section.variable === SPEED && (!u || !v)) return;
+  if (section.variable !== SPEED && !data) return;
+  const g = manifest.value.grid;
+  unfolded.value = sampleUnfolded(section.points, g.levels_m, domain, (x, y, z) => {
+    const ix = THREE.MathUtils.clamp(Math.round((x / domain.sx + .5) * (g.nx - 1)), 0, g.nx - 1);
+    const iy = THREE.MathUtils.clamp(Math.round((.5 - z / domain.sz) * (g.ny - 1)), 0, g.ny - 1);
+    const k = THREE.MathUtils.clamp(Math.round((y * 1000 - g.levels_m[0]) / (g.levels_m[1] - g.levels_m[0])), 0, g.nz - 1);
+    const idx = k * g.nx * g.ny + iy * g.nx + ix;
+    return section.variable === SPEED ? Math.hypot(u!.data[idx], v!.data[idx]) : data!.data[idx];
+  });
 }
 
 function updateGround(): void {
@@ -414,40 +457,53 @@ function syncVolumeSlices(): void {
   const filterMax = layers.volumeFilterMax;
   const hb = slice.enabled ? binding(slice.variable) : null;
   const vb = section.enabled ? binding(section.variable) : null;
-  volume.setHorizontalSlice({
-    enabled: compositing && Boolean(hslice?.group.visible),
-    field: hb,
-    min: slice.min,
-    max: slice.max,
-    opacity: slice.opacity,
-    colormap: slice.colormap,
-    filterMin,
-    filterMax,
-    filterEnable: layers.filterSlices,
-    contours: slice.contours,
+  const h: CompositeSurface = {
+    kind: "horizontal", binding: "slice", field: hb,
+    min: slice.min, max: slice.max, opacity: slice.opacity, colormap: slice.colormap,
+    filterMin, filterMax, filterEnable: layers.filterSlices, contours: slice.contours,
     height: slice.heightM / 1000,
+  };
+  const s: CompositeSurface | null = section.enabled ? {
+    kind: section.kind === "box" ? "horizontal" : "vertical", binding: "section", field: vb,
+    min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
+    filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
+    height: section.kind === "box" ? section.box.heightMinM / 1000 : undefined,
+    normalX: section.kind === "lat" ? 0 : 1, normalZ: section.kind === "lat" ? 1 : 0,
+    offset: section.offsetKm,
+  } : null;
+  const surfaces = buildCompositeSurfaces({
+    slice: slice.enabled && hb ? h : null,
+    section: section.enabled && vb && (section.kind === "lon" || section.kind === "lat") ? s : null,
+    domain,
+    cutBounds: cutBounds(domain, cuts),
+    cutFaces: cuts.faces && layers.volume,
+    volumeField: binding(layers.volumeVar),
+    volumeStyle: { min: volumeColorRange.value[0], max: volumeColorRange.value[1], opacity: 0.9, colormap: defaultColormap(layers.volumeVar) === "rdbu" ? "magma" : defaultColormap(layers.volumeVar), contours: 0, filterMin, filterMax, filterEnable: Boolean(layers.volume) },
   });
-  volume.setVerticalSlice({
-    enabled: compositing && Boolean(vsection?.group.visible),
-    field: vb,
-    min: section.min,
-    max: section.max,
-    opacity: section.opacity,
-    colormap: section.colormap,
-    filterMin,
-    filterMax,
-    filterEnable: layers.filterSlices,
-    contours: section.contours,
-    normal: vsection?.normal(),
-    offset: vsection?.offsetKm(),
-  });
-  hslice?.material.setVolumeComposited(
-    compositing && Boolean(hslice?.group.visible) && Boolean(hb),
-  );
-  vsection?.material.setVolumeComposited(
-    compositing && Boolean(vsection?.group.visible) && Boolean(vb),
-  );
+  if (section.kind === "box" && section.enabled && vb) {
+    const levels = (section.box.levels ?? domain.levels).filter((h) => h >= section.box.heightMinM && h <= section.box.heightMaxM);
+    let count = 0;
+    for (let i = 0; i < levels.length && count < 16; i += Math.max(1, section.box.stepLevels)) {
+      const y = levels[i] / 1000 * (section.box.stretch || 1) + count * (section.box.spacingKm || 0);
+      surfaces.push({ ...s!, kind: "horizontal", height: y, clipX0: Math.min(section.box.x0, section.box.x1), clipX1: Math.max(section.box.x0, section.box.x1), clipZ0: Math.min(section.box.z0, section.box.z1), clipZ1: Math.max(section.box.z0, section.box.z1) }); count++;
+    }
+  }
+  if (section.kind === "polyline" && section.enabled && vb) {
+    for (let i = 0; i < section.points.length - 1 && surfaces.length < 16; i += 1) {
+      const a = section.points[i], b = section.points[i + 1]; const dx = b.x - a.x, dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
+      surfaces.push({ ...s!, kind: "vertical", normalX: -dz / len, normalZ: dx / len, offset: (-dz / len) * a.x + (dx / len) * a.z, ax: a.x, az: a.z, bx: b.x, bz: b.z });
+    }
+  }
+  volume.setSurfaces(surfaces);
+  volume.setCuts(cuts);
+  hslice?.material.setVolumeComposited(compositing && Boolean(hslice?.group.visible) && Boolean(hb));
+  vsection?.material.setVolumeComposited(compositing && Boolean(vsection?.group.visible) && Boolean(vb));
+  polyline?.material.setVolumeComposited(compositing && Boolean(polyline?.group.visible) && Boolean(vb));
+  boxStack?.material.setVolumeComposited(compositing && Boolean(boxStack?.group.visible) && Boolean(vb));
 }
+
+function updateComposite(): void { syncVolumeSlices(); }
+
 
 function ensureParticles(): void {
   if (particles || !renderer || !manifest.value) return;
@@ -497,6 +553,8 @@ function updateDepthOccluders(): void {
     depthOccluders.push(vsection.outline, vsection.handle);
     depthOccluders.push(vsection.mesh);
   }
+  if (polyline) depthOccluders.push(polyline.group);
+  if (boxStack) depthOccluders.push(boxStack.group);
   if (probeMarker) depthOccluders.push(probeMarker.object);
 }
 
@@ -652,10 +710,27 @@ const drag = {
 };
 const pointerDown = { x: 0, y: 0, moved: false, active: false };
 const tmp = new THREE.Vector3();
+let drawStart: THREE.Vector3 | null = null;
+let boxDrawing = false;
+let vertexIndex = -1;
 
 function sectionHit(): THREE.Intersection | undefined {
-  if (!vsection?.group.visible) return undefined;
-  return raycaster.intersectObject(vsection.group, true)[0];
+  const targets: THREE.Object3D[] = [];
+  if (vsection?.group.visible) targets.push(vsection.group);
+  if (polyline?.group.visible) targets.push(polyline.markers);
+  if (boxStack?.group.visible) targets.push(boxStack.group);
+  return raycaster.intersectObjects(targets, true)[0];
+}
+
+function groundPoint(): THREE.Vector3 | null {
+  if (!atmos?.ground) return null;
+  const hit = raycaster.intersectObject(atmos.ground, true)[0];
+  if (!hit) return null;
+  const p = atmos.root.worldToLocal(hit.point.clone());
+  p.x = THREE.MathUtils.clamp(p.x, -domain.sx / 2, domain.sx / 2);
+  p.z = THREE.MathUtils.clamp(p.z, -domain.sz / 2, domain.sz / 2);
+  p.y = 0;
+  return p;
 }
 
 function onPointerDown(event: PointerEvent): void {
@@ -666,15 +741,25 @@ function onPointerDown(event: PointerEvent): void {
   pointerDown.moved = false;
   pointerDown.active = true;
   const hit = sectionHit();
-  if (hit && vsection) {
+  if (section.drawMode && hit?.object.userData.pickable === "polyline-vertex") {
+    vertexIndex = polyline?.markers.children.indexOf(hit.object) ?? -1;
+    controls.enabled = false; canvas.value!.setPointerCapture(event.pointerId); event.preventDefault(); return;
+  }
+  if (hit && vsection && (section.kind === "lon" || section.kind === "lat")) {
     drag.active = true;
-    drag.rotate = event.shiftKey || hit.object !== vsection.mesh;
+    drag.rotate = false;
     drag.plane.set(new THREE.Vector3(0, 1, 0), -hit.point.y);
     drag.start.copy(hit.point);
     drag.startOffset = vsection.offsetKm();
     controls.enabled = false;
     canvas.value!.setPointerCapture(event.pointerId);
     event.preventDefault();
+  } else if (section.drawMode) {
+    const p = groundPoint();
+    if (!p) return;
+    if (section.kind === "polyline") {
+      drawStart = p;
+    } else if (section.kind === "box") { drawStart = p; boxDrawing = true; controls.enabled = false; canvas.value!.setPointerCapture(event.pointerId); event.preventDefault(); }
   }
 }
 
@@ -707,10 +792,18 @@ function processPointer(): void {
     }
     return;
   }
+  if (vertexIndex >= 0 && polyline) {
+    const p = groundPoint(); if (p && section.points[vertexIndex]) { section.points[vertexIndex] = { x: p.x, z: p.z }; updateSection(); }
+    return;
+  }
+  if (boxDrawing && drawStart) {
+    const p = groundPoint(); if (p) { section.box.x0 = drawStart.x; section.box.z0 = drawStart.z; section.box.x1 = p.x; section.box.z1 = p.z; updateSection(); }
+    return;
+  }
   const hover = Boolean(sectionHit());
   vsection?.setHighlight(hover);
   canvas.value!.style.cursor = hover ? "grab" : "";
-  if (layers.probe) probeFromPointer(false);
+  if (layers.probe && !section.drawMode) probeFromPointer(false);
 }
 
 function onPointerUp(event: PointerEvent): void {
@@ -720,11 +813,38 @@ function onPointerUp(event: PointerEvent): void {
     controls.enabled = true;
     canvas.value!.releasePointerCapture(event.pointerId);
   }
+  if (vertexIndex >= 0 || boxDrawing) { vertexIndex = -1; boxDrawing = false; drawStart = null; controls.enabled = true; canvas.value!.releasePointerCapture(event.pointerId); pointerDown.active = false; return; }
+  if (section.drawMode && section.kind === "polyline" && wasClick && drawStart) { section.points = [...section.points, { x: drawStart.x, z: drawStart.z }].slice(-16); drawStart = null; updateSection(); }
   pointerDown.active = false;
   if (wasClick && layers.probe) {
     setPointer(event);
     probeFromPointer(true);
   }
+}
+
+function onContextMenu(event: MouseEvent): void {
+  if (!section.drawMode) return;
+  event.preventDefault();
+  if (section.kind !== "polyline") return;
+  setPointer(event as unknown as PointerEvent);
+  const hit = sectionHit(); const i = hit ? polyline?.markers.children.indexOf(hit.object) ?? -1 : -1;
+  if (i >= 0 && section.points.length > 2) { section.points.splice(i, 1); updateSection(); }
+}
+
+function setDrawOrbit(on: boolean): void {
+  if (!controls) return;
+  (controls.mouseButtons as any).LEFT = on ? -1 : THREE.MOUSE.ROTATE;
+  (controls.mouseButtons as any).RIGHT = on ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+}
+
+function selectKind(kind: "lon" | "lat" | "polyline" | "box"): void {
+  if ((kind === "polyline" || kind === "box") && section.kind === kind && section.drawMode) {
+    section.drawMode = false;
+    return;
+  }
+  section.kind = kind;
+  section.enabled = true;
+  section.drawMode = kind === "polyline" || kind === "box";
 }
 
 // ---------------------------------------------------------------- camera presets
@@ -751,6 +871,7 @@ function setView(name: string): void {
   } else if (name === "overview") {
     slice.enabled = false;
     section.enabled = false;
+    section.drawMode = false;
   }
 }
 
@@ -781,9 +902,9 @@ function frame(now: number): void {
   atmos.root.updateMatrixWorld();
   camera.updateMatrixWorld();
   vsection?.setHandleScale(view.exaggeration);
+  boxStack?.updateLabels(camera);
   hslice?.material.setRoot(atmos.root);
   vsection?.material.setRoot(atmos.root);
-  syncVolumeSlices();
   if (particles) {
     particles.object.visible = layers.particles;
     if (layers.particles) particles.step(dt);
@@ -828,7 +949,11 @@ function resize(): void {
 function exposeApi(): void {
   window.__atmosApi = {
     setView,
-    setSection: (p: Partial<typeof section>) => Object.assign(section, { enabled: true }, p),
+    setSection: (p: Partial<typeof section>) => { Object.assign(section, { enabled: true }, p); updateSection(); },
+    setSectionMode: (kind: "lon" | "lat" | "polyline" | "box") => { section.kind = kind; section.enabled = true; section.drawMode = kind === "polyline" || kind === "box"; updateSection(); },
+    setPolyline: (points: { x: number; z: number }[]) => { section.kind = "polyline"; section.enabled = true; section.points = points.slice(0, 16); updateSection(); },
+    setBox: (p: Partial<BoxStackParams>) => { section.kind = "box"; section.enabled = true; Object.assign(section.box, p); updateSection(); },
+    setCuts: (p: Partial<CutState>) => { if (p.x) cuts.x = [...p.x] as [number, number]; if (p.y) cuts.y = [...p.y] as [number, number]; if (p.z) cuts.z = [...p.z] as [number, number]; if (p.faces !== undefined) cuts.faces = p.faces; clampCuts(cuts); updateVolume(); },
     setSlice: (p: Partial<typeof slice>) => Object.assign(slice, { enabled: true }, p),
     setParticles: (p: Partial<ParticleParams>) => Object.assign(particleParams, p),
     setLayer: (name: string, on: boolean) => {
@@ -947,12 +1072,16 @@ async function start(): Promise<void> {
   probeMarker = new ProbeMarker(domain.top);
   atmos.root.add(probeMarker.object);
   hslice = new HorizontalSlice(domain);
-  vsection = new VerticalSection(domain);
+  vsection = new AxisSection(domain, "lon");
+  polyline = new PolylineSection(domain);
+  boxStack = new BoxStack(domain, manifest.value.grid.levels_m);
   volume = new VolumeLayer(domain);
   hslice.group.visible = false;
   vsection.group.visible = false;
   volume.mesh.visible = false;
-  atmos.root.add(hslice.group, vsection.group, volume.mesh);
+  polyline.group.visible = false;
+  boxStack.group.visible = false;
+  atmos.root.add(hslice.group, vsection.group, polyline.group, boxStack.group, volume.mesh);
   camera = new THREE.PerspectiveCamera(40, 1, 0.05, 200);
   controls = new OrbitControls(camera, canvas.value!);
   controls.enableDamping = true;
@@ -969,6 +1098,8 @@ async function start(): Promise<void> {
   el.addEventListener("pointerdown", onPointerDown);
   el.addEventListener("pointermove", onPointerMove);
   el.addEventListener("pointerup", onPointerUp);
+  el.addEventListener("contextmenu", onContextMenu);
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape" && section.drawMode) section.drawMode = false; });
   exposeApi();
   updateGround();
   raf = requestAnimationFrame(frame);
@@ -1035,8 +1166,11 @@ watch(
     if (!vsection) return;
     vsection.azimuthDeg = section.azimuthDeg;
     vsection.setOffset(section.offsetKm);
+    syncVolumeSlices();
   },
 );
+watch(() => [section.kind, section.drawMode, section.points.length, section.box.x0, section.box.x1, section.box.z0, section.box.z1, section.box.heightMinM, section.box.heightMaxM, section.box.stepLevels, section.box.stretch, section.box.spacingKm], updateSection);
+watch(() => [cuts.x[0], cuts.x[1], cuts.y[0], cuts.y[1], cuts.z[0], cuts.z[1], cuts.faces], () => { clampCuts(cuts); volume?.setCuts(cuts); syncVolumeSlices(); });
 watch(() => [layers.ground, layers.groundVar], updateGround);
 watch(
   () => [layers.volume, layers.volumeVar, layers.volumeOpacity, layers.volumeThreshold],
@@ -1073,6 +1207,7 @@ watch(
     if (layers.probe && probe.value) refreshProbe();
   },
 );
+watch(() => section.drawMode, (on) => { setDrawOrbit(on); if (on) layers.probe = false; });
 watch(
   () => [layers.probe, layers.probeFollowMouse],
   ([enabled, follow]) => {
@@ -1162,6 +1297,8 @@ onBeforeUnmount(() => {
   particles?.dispose();
   hslice?.dispose();
   vsection?.dispose();
+  polyline?.dispose();
+  boxStack?.dispose();
   volume?.dispose();
   buildings?.dispose();
   fields?.dispose();
@@ -1214,9 +1351,11 @@ onBeforeUnmount(() => {
       :show-variable="profileVariable() !== 'speed'"
       @close="probe = null; fixedCell = null; updateMarker()"
     />
+    <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" @close="unfoldedVisible = false" />
 
     <div class="hint">
-      拖动：旋转 · 右键：平移 · 滚轮：缩放 · 拖剖面：平移剖面 · Shift+拖剖面 / 拖顶部手柄：旋转 ·
+      拖动：旋转 · 右键：平移 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 ·
+      折线/框选绘制：左键放点或拖框，右键旋转，Esc 或再点同一模式退出 ·
       打开探针 → 悬停预览位置（不改读数）→ 单击（非拖动）固定并更新廓线；可选跟随鼠标
     </div>
 
@@ -1277,6 +1416,10 @@ onBeforeUnmount(() => {
               max="0.95"
               step="0.01"
           /></label>
+          <div class="slider range-label"><span>xcut</span><RangeSlider :min="0" :max="1" :min-value="cuts.x[0]" :max-value="cuts.x[1]" :step="0.01" @update:min-value="cuts.x[0] = $event" @update:max-value="cuts.x[1] = $event" /></div>
+          <div class="slider range-label"><span>ycut</span><RangeSlider :min="0" :max="1" :min-value="cuts.y[0]" :max-value="cuts.y[1]" :step="0.01" @update:min-value="cuts.y[0] = $event" @update:max-value="cuts.y[1] = $event" /></div>
+          <div class="slider range-label"><span>zcut</span><RangeSlider :min="0" :max="1" :min-value="cuts.z[0]" :max-value="cuts.z[1]" :step="0.01" @update:min-value="cuts.z[0] = $event" @update:max-value="cuts.z[1] = $event" /></div>
+          <label class="row"><input v-model="cuts.faces" type="checkbox" />切面</label>
           <div class="slider range-label">
             <span>显示范围</span>
             <RangeSlider
@@ -1446,22 +1589,26 @@ onBeforeUnmount(() => {
 
       <details open>
         <summary>
-          垂直剖面 <em>{{ section.enabled ? `${section.azimuthDeg.toFixed(0)}°` : "关" }}</em>
+          垂直剖面 <em>{{ section.enabled ? section.kind : "关" }}</em>
         </summary>
         <label class="row"
           ><input v-model="section.enabled" type="checkbox" />显示
+          <span class="mode-picks">
+            <button type="button" :class="{ on: section.kind === 'lon' }" @click="selectKind('lon')">经度方向</button>
+            <button type="button" :class="{ on: section.kind === 'lat' }" @click="selectKind('lat')">纬度方向</button>
+            <button type="button" :class="{ on: section.kind === 'polyline' && section.drawMode }" @click="selectKind('polyline')">折线</button>
+            <button type="button" :class="{ on: section.kind === 'box' && section.drawMode }" @click="selectKind('box')">框选</button>
+          </span>
           <select v-model="section.variable">
             <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
           </select></label
         >
-        <label class="slider"
+        <label v-if="section.kind === 'lon' || section.kind === 'lat'" class="slider"
           >位置偏移 {{ section.offsetKm.toFixed(2) }} km
           <input v-model.number="section.offsetKm" type="range" min="-12" max="12" step="0.01"
         /></label>
-        <label class="slider"
-          >方位角 {{ section.azimuthDeg.toFixed(1) }}°
-          <input v-model.number="section.azimuthDeg" type="range" min="0" max="180" step="0.5"
-        /></label>
+        <div v-if="section.kind === 'polyline'" class="row-wrap"><span class="muted">左键地面连续放点（上限 16），右键删点，Esc 退出</span><button @click="section.points = []; updateSection()">清除折线</button><button @click="unfoldedVisible = !unfoldedVisible">{{ unfoldedVisible ? '隐藏展开图' : '显示展开图' }}</button></div>
+        <template v-if="section.kind === 'box'"><label class="slider">高度拉伸 {{ section.box.stretch.toFixed(2) }}×<input v-model.number="section.box.stretch" type="range" min="0.5" max="4" step="0.05" /></label><label class="slider">层间距 {{ section.box.spacingKm.toFixed(2) }} km<input v-model.number="section.box.spacingKm" type="range" min="0" max="0.5" step="0.01" /></label><div class="slider range-label"><span>高度范围</span><RangeSlider :min="0" :max="1000" :min-value="section.box.heightMinM" :max-value="section.box.heightMaxM" :step="12.5" @update:min-value="section.box.heightMinM = $event" @update:max-value="section.box.heightMaxM = $event" /></div><label class="row">间隔 <select v-model.number="section.box.stepLevels"><option :value="1">每 1 层</option><option :value="2">每 2 层</option><option :value="5">每 5 层</option></select></label></template>
         <label class="row"
           >色带
           <select v-model="section.colormap">
@@ -1533,6 +1680,9 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.mode-picks { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.mode-picks button { background: rgba(20,40,55,.8); color: inherit; border: 1px solid var(--line); border-radius: 3px; padding: 1px 6px; }
+.mode-picks button.on { border-color: var(--accent); color: var(--accent); }
 .viewer {
   --card: rgba(8, 17, 30, 0.78);
   --panel: rgba(8, 16, 28, 0.9);
