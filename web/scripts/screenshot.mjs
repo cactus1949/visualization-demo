@@ -3,7 +3,7 @@
 import { chromium } from "playwright-core";
 
 const args = process.argv.slice(2);
-const VIEWS = ["overview", "slice", "section", "close", "embedded", "filter", "panel"];
+const VIEWS = ["overview", "slice", "section", "section-volume", "close", "embedded", "filter", "panel"];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
 const base = args.find((a) => a.startsWith("http")) ?? "http://localhost:4173/";
@@ -40,6 +40,12 @@ await page.evaluate((v) => {
     api.setView("section");
     api.setSection({ variable: "speed", azimuthDeg: 75, offsetKm: -1.2 });
     api.probeAt(150, 160);
+  } else if (v === "section-volume") {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setSection({ variable: "speed", azimuthDeg: 90, offsetKm: -0.4, opacity: 1, contours: 12 });
+    api.setVolume({ enabled: true, variable: "tke", opacity: 0.7, threshold: 0.15, filterSlices: false });
+    api.setCamera([-12.5, 7.2, 11.5], [0.4, 0.8, -0.4]);
   } else if (v === "close") {
     api.setView("close");
     api.setParticles({ paused: true });
@@ -70,7 +76,7 @@ await page.evaluate((v) => {
     api.setView("overview");
   }
 }, view);
-if (["embedded", "filter", "panel", "close"].includes(view)) {
+if (["embedded", "filter", "panel", "close", "section-volume"].includes(view)) {
   await page.waitForFunction(() => window.__atmosStatus?.volume === "tke", null, {
     timeout: 90_000,
   });

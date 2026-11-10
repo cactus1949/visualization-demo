@@ -389,9 +389,23 @@ function ensureParticles(): void {
     { ...particleParams },
   );
   atmos.root.add(particles.object);
-  depthOccluders.push(particles.object);
   speedRange.value = [...fields.speedRange] as [number, number];
   status.value = "风场就绪";
+}
+
+/** Objects excluded from the volume depth pre-pass. Field meshes remain visible when opaque
+ * enough to occlude the volume; particles and visual helpers must never write occluder depth. */
+function updateDepthOccluders(): void {
+  depthOccluders.length = 0;
+  if (particles) depthOccluders.push(particles.object);
+  if (hslice) {
+    depthOccluders.push(hslice.outline);
+    if (hslice.group.visible && slice.opacity < 0.5) depthOccluders.push(hslice.mesh);
+  }
+  if (vsection) {
+    depthOccluders.push(vsection.outline, vsection.handle);
+    if (vsection.group.visible && section.opacity < 0.5) depthOccluders.push(vsection.mesh);
+  }
 }
 
 function onData(name: string): void {
@@ -639,6 +653,7 @@ function frame(now: number): void {
     if (layers.particles) particles.step(dt);
   }
   if (volume?.mesh.visible) {
+    updateDepthOccluders();
     volume.captureDepth(renderer, atmos.scene, camera, depthOccluders);
     volume.update(camera, atmos.root, renderer);
   }
@@ -761,7 +776,6 @@ async function start(): Promise<void> {
   hslice = new HorizontalSlice(domain);
   vsection = new VerticalSection(domain);
   volume = new VolumeLayer(domain);
-  depthOccluders.push(hslice.group, vsection.group);
   hslice.group.visible = false;
   vsection.group.visible = false;
   volume.mesh.visible = false;

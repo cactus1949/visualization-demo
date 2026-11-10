@@ -145,7 +145,7 @@ export class HorizontalSlice {
   readonly group = new THREE.Group();
   readonly mesh: THREE.Mesh;
   readonly material: SliceMaterial;
-  private readonly outline: THREE.LineLoop;
+  readonly outline: THREE.LineLoop;
 
   constructor(private readonly domain: Domain) {
     this.material = new SliceMaterial(domain);
@@ -191,9 +191,9 @@ export class VerticalSection {
   readonly center = new THREE.Vector2(0, 0);
   azimuthDeg = 90;
   private readonly positions: Float32Array;
-  private readonly outline: THREE.LineLoop;
+  readonly outline: THREE.LineLoop;
   private readonly outlinePositions: Float32Array;
-  private readonly handle: THREE.Mesh;
+  readonly handle: THREE.Mesh;
 
   constructor(private readonly domain: Domain) {
     this.material = new SliceMaterial(domain);
