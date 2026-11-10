@@ -12,6 +12,7 @@ import { DEFAULT_CUTS, clampCuts, cutBounds, type CutState } from "../render/cut
 import { PolylineSection } from "../render/sections/polyline";
 import { AxisSection } from "../render/sections/planes";
 import { BoxStack, type BoxStackParams } from "../render/sections/boxStack";
+import type { SectionKind } from "../render/sections/types";
 import { buildCompositeSurfaces, type CompositeSurface } from "../render/sections/composite";
 import { sampleUnfolded, type UnfoldedGrid } from "../render/sections/unfolded";
 import { Buildings } from "../render/buildings";
@@ -120,20 +121,31 @@ const slice = reactive({
 });
 const section = reactive({
   enabled: false,
-  kind: "lon" as "lon" | "lat" | "polyline" | "box",
+  kind: "lon" as SectionKind,
   drawMode: false,
   variable: SPEED,
   offsetKm: 0,
-  azimuthDeg: 90,
+  azimuthDeg: 0,
   colormap: "viridis",
   autoRange: true,
   min: 0,
   max: 15,
-  opacity: 1,
+  opacity: 0.85,
   contours: 12,
   points: [] as { x: number; z: number }[],
-  box: { x0: -2, z0: -2, x1: 2, z1: 2, heightMinM: 100, heightMaxM: 300, stepLevels: 5, stretch: 1, spacingKm: 0 } as BoxStackParams,
+  box: {
+    x0: 0, z0: 0, x1: 0, z1: 0,
+    heightMinM: 0, heightMaxM: 1000, stepLevels: 1,
+    defined: false,
+  } as BoxStackParams,
 });
+const SECTION_KIND_LABELS: Record<SectionKind, string> = {
+  height: "高度",
+  lon: "经度",
+  lat: "纬度",
+  polyline: "折线",
+  box: "框选",
+};
 const cuts = reactive<CutState>({ x: [...DEFAULT_CUTS.x], y: [...DEFAULT_CUTS.y], z: [...DEFAULT_CUTS.z], faces: DEFAULT_CUTS.faces });
 const unfolded = ref<UnfoldedGrid | null>(null);
 const unfoldedVisible = ref(true);
@@ -334,60 +346,173 @@ function autoRange(name: string, colormap: string, heightM?: number): [number, n
   return [lo, hi];
 }
 
+function isBoxMode(): boolean {
+  return section.enabled && section.kind === "box";
+}
+function volumeWanted(): boolean {
+  return layers.volume && !isBoxMode();
+}
+function syncStyleToSlice(): void {
+  slice.variable = section.variable;
+  slice.colormap = section.colormap;
+  slice.autoRange = section.autoRange;
+  slice.min = section.min;
+  slice.max = section.max;
+  slice.opacity = section.opacity;
+  slice.contours = section.contours;
+  slice.enabled = section.enabled && section.kind === "height";
+}
+function syncStyleToSection(): void {
+  section.variable = slice.variable;
+  section.colormap = slice.colormap;
+  section.autoRange = slice.autoRange;
+  section.min = slice.min;
+  section.max = slice.max;
+  section.opacity = slice.opacity;
+  section.contours = slice.contours;
+}
+function levelsOf(): number[] {
+  return manifest.value?.grid.levels_m ?? domain.levels;
+}
+function clearPolyline(): void {
+  section.points = [];
+  unfolded.value = null;
+  unfoldedVisible.value = false;
+  polyline?.setPoints([]);
+  polyline?.clearHandles();
+  annotations?.removePrefixed("polyline-v-");
+}
+function clearBox(): void {
+  section.box.defined = false;
+  section.box.x0 = 0;
+  section.box.z0 = 0;
+  section.box.x1 = 0;
+  section.box.z1 = 0;
+  boxStack?.clearAnnotations();
+  boxStack?.update({ ...section.box, levels: levelsOf(), defined: false, drawing: false });
+}
+function leaveKind(prev: SectionKind | null | undefined): void {
+  if (prev === "polyline") clearPolyline();
+  if (prev === "box") clearBox();
+  if (prev === "height") hslice?.setHandleVisible(false);
+  if (prev === "lon" || prev === "lat") vsection?.setDragging(false);
+  annotations?.removePrefixed("section-readout");
+  annotations?.removePrefixed("height-readout");
+}
+
 // ---------------------------------------------------------------- layer updates
 function updateSlice(): void {
   if (!hslice) return;
-  hslice.group.visible = slice.enabled;
-  if (!slice.enabled) return;
-  const b = binding(slice.variable);
-  if (!b) {
-    hslice.group.visible = false;
-    request(slice.variable);
+  const on = section.enabled && section.kind === "height";
+  slice.enabled = on;
+  hslice.group.visible = on;
+  if (!on) {
+    hslice.setHandleVisible(false);
     return;
   }
-  if (slice.autoRange)
-    [slice.min, slice.max] = autoRange(slice.variable, slice.colormap, slice.heightM);
+  const b = binding(section.variable);
+  if (!b) {
+    hslice.group.visible = false;
+    hslice.setHandleVisible(false);
+    request(section.variable);
+    return;
+  }
+  if (section.autoRange)
+    [section.min, section.max] = autoRange(section.variable, section.colormap, slice.heightM);
+  syncStyleToSlice();
   hslice.material.bind(b);
-  hslice.material.style(slice);
+  hslice.material.style(section);
   updateSliceFilter();
   hslice.setHeightKm(slice.heightM / 1000);
+  syncVolumeSlices();
 }
 
 function syncSectionAnnotations(): void {
+  hslice?.syncAnnotations();
   vsection?.syncAnnotations();
-  polyline?.syncAnnotations();
-  boxStack?.syncAnnotations();
+  if (section.enabled && section.kind === "polyline") polyline?.syncAnnotations();
+  else {
+    polyline?.clearHandles();
+    annotations?.removePrefixed("polyline-v-");
+  }
+  if (section.enabled && section.kind === "box") boxStack?.syncAnnotations();
+  else boxStack?.clearAnnotations();
 }
 
 function updateSection(): void {
   if (!vsection || !polyline || !boxStack) return;
-  vsection.group.visible = section.enabled && (section.kind === "lon" || section.kind === "lat");
-  polyline.group.visible = section.enabled && section.kind === "polyline" && section.points.length >= 2;
-  boxStack.group.visible = section.enabled && section.kind === "box";
-  if (section.kind === "lon") { vsection.azimuthDeg = 0; vsection.setOffset(section.offsetKm); }
-  if (section.kind === "lat") { vsection.azimuthDeg = 90; vsection.setOffset(section.offsetKm); }
-  if (section.kind === "polyline") { polyline.setPoints(section.points); updateUnfolded(); }
-  if (section.kind === "box") boxStack.update({ ...section.box, levels: manifest.value?.grid.levels_m ?? domain.levels });
-  if (!section.enabled) { syncVolumeSlices(); syncSectionAnnotations(); return; }
+  const on = section.enabled;
+  const kind = section.kind;
+  vsection.group.visible = on && (kind === "lon" || kind === "lat");
+  if (kind === "lon") {
+    section.azimuthDeg = 0;
+    vsection.azimuthDeg = 0;
+    vsection.setOffset(section.offsetKm);
+  }
+  if (kind === "lat") {
+    section.azimuthDeg = 90;
+    vsection.azimuthDeg = 90;
+    vsection.setOffset(section.offsetKm);
+  }
+  if (on && kind === "polyline") {
+    polyline.setPoints(section.points);
+    updateUnfolded();
+  } else {
+    polyline.setPoints([]);
+    polyline.group.visible = false;
+    polyline.clearHandles();
+    if (kind !== "polyline") {
+      unfolded.value = null;
+    }
+  }
+  if (on && kind === "box") {
+    boxStack.update({
+      ...section.box,
+      levels: levelsOf(),
+      defined: Boolean(section.box.defined),
+      drawing: boxDrawing,
+    });
+  } else {
+    boxStack.update({ ...section.box, levels: levelsOf(), defined: false, drawing: false });
+    boxStack.clearAnnotations();
+    boxStack.group.visible = false;
+  }
+  updateSlice();
+  if (!on) {
+    syncVolumeSlices();
+    syncSectionAnnotations();
+    return;
+  }
+  if (kind === "height") {
+    syncVolumeSlices();
+    syncSectionAnnotations();
+    return;
+  }
   const b = binding(section.variable);
   if (!b) {
-    vsection.group.visible = false; polyline.group.visible = false; boxStack.group.visible = false;
+    vsection.group.visible = false;
+    polyline.group.visible = false;
+    boxStack.group.visible = false;
     request(section.variable);
     syncSectionAnnotations();
     return;
   }
   if (section.autoRange) [section.min, section.max] = autoRange(section.variable, section.colormap);
+  syncStyleToSlice();
   vsection.material.bind(b);
   vsection.material.style(section);
   polyline.material.bind(b); polyline.material.style(section);
-  boxStack.material.bind(b); boxStack.material.style(section);
+  boxStack.material.bind(b);
+  boxStack.material.setVolumeComposited(false);
+  boxStack.material.style(section);
+  boxStack.material.depthWrite = section.opacity >= 0.999;
   updateSliceFilter();
   updateComposite();
   syncSectionAnnotations();
 }
 
 function updateUnfolded(): void {
-  if (section.kind !== "polyline" || section.points.length < 2 || !manifest.value) { unfolded.value = null; return; }
+  if (!section.enabled || section.kind !== "polyline" || section.points.length < 2 || !manifest.value) { unfolded.value = null; return; }
   const data = section.variable === SPEED ? null : loaded(section.variable);
   const u = loaded("u"), v = loaded("v");
   if (section.variable === SPEED && (!u || !v)) return;
@@ -430,8 +555,8 @@ function updateGround(): void {
 
 function updateVolume(): void {
   if (!volume || !manifest.value) return;
-  volume.mesh.visible = layers.volume;
-  if (!layers.volume) {
+  volume.mesh.visible = volumeWanted();
+  if (!volumeWanted()) {
     syncVolumeSlices();
     if (window.__atmosStatus) window.__atmosStatus.volume = null;
     return;
@@ -463,46 +588,40 @@ function updateVolume(): void {
 
 function syncVolumeSlices(): void {
   if (!volume) return;
-  const compositing = Boolean(layers.volume && volume.mesh.visible);
+  const compositing = Boolean(volumeWanted() && volume.mesh.visible);
   const filterMin = layers.volumeFilterMin;
   const filterMax = layers.volumeFilterMax;
-  const hb = slice.enabled ? binding(slice.variable) : null;
-  const vb = section.enabled ? binding(section.variable) : null;
+  const heightOn = section.enabled && section.kind === "height";
+  const vertOn = section.enabled && (section.kind === "lon" || section.kind === "lat");
+  const polyOn = section.enabled && section.kind === "polyline";
+  const hb = heightOn ? binding(section.variable) : null;
+  const vb = (vertOn || polyOn) ? binding(section.variable) : null;
   const h: CompositeSurface = {
     kind: "horizontal", binding: "slice", field: hb,
-    min: slice.min, max: slice.max, opacity: slice.opacity, colormap: slice.colormap,
-    filterMin, filterMax, filterEnable: layers.filterSlices, contours: slice.contours,
-    height: slice.heightM / 1000,
-  };
-  const s: CompositeSurface | null = section.enabled ? {
-    kind: section.kind === "box" ? "horizontal" : "vertical", binding: "section", field: vb,
     min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
     filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
-    height: section.kind === "box" ? section.box.heightMinM / 1000 : undefined,
+    height: slice.heightM / 1000,
+  };
+  const s: CompositeSurface | null = (vertOn || polyOn) ? {
+    kind: "vertical", binding: "section", field: vb,
+    min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
+    filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
     normalX: section.kind === "lat" ? 0 : 1, normalZ: section.kind === "lat" ? 1 : 0,
     offset: section.offsetKm,
   } : null;
   const surfaces = buildCompositeSurfaces({
-    slice: slice.enabled && hb ? h : null,
-    section: section.enabled && vb && (section.kind === "lon" || section.kind === "lat") ? s : null,
+    slice: heightOn && hb ? h : null,
+    section: vertOn && vb ? s : null,
     domain,
     cutBounds: cutBounds(domain, cuts),
-    cutFaces: cuts.faces && layers.volume,
-    volumeField: binding(layers.volumeVar),
-    volumeStyle: { min: volumeColorRange.value[0], max: volumeColorRange.value[1], opacity: 0.9, colormap: defaultColormap(layers.volumeVar) === "rdbu" ? "magma" : defaultColormap(layers.volumeVar), contours: 0, filterMin, filterMax, filterEnable: Boolean(layers.volume) },
+    cutFaces: cuts.faces && volumeWanted(),
+    volumeField: volumeWanted() ? binding(layers.volumeVar) : null,
+    volumeStyle: { min: volumeColorRange.value[0], max: volumeColorRange.value[1], opacity: 0.9, colormap: defaultColormap(layers.volumeVar) === "rdbu" ? "magma" : defaultColormap(layers.volumeVar), contours: 0, filterMin, filterMax, filterEnable: Boolean(volumeWanted()) },
   });
-  if (section.kind === "box" && section.enabled && vb) {
-    const levels = (section.box.levels ?? domain.levels).filter((h) => h >= section.box.heightMinM && h <= section.box.heightMaxM);
-    let count = 0;
-    for (let i = 0; i < levels.length && count < 16; i += Math.max(1, section.box.stepLevels)) {
-      const y = levels[i] / 1000 * (section.box.stretch || 1) + count * (section.box.spacingKm || 0);
-      surfaces.push({ ...s!, kind: "horizontal", height: y, clipX0: Math.min(section.box.x0, section.box.x1), clipX1: Math.max(section.box.x0, section.box.x1), clipZ0: Math.min(section.box.z0, section.box.z1), clipZ1: Math.max(section.box.z0, section.box.z1) }); count++;
-    }
-  }
-  if (section.kind === "polyline" && section.enabled && vb) {
+  if (polyOn && vb && s) {
     for (let i = 0; i < section.points.length - 1 && surfaces.length < 16; i += 1) {
       const a = section.points[i], b = section.points[i + 1]; const dx = b.x - a.x, dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
-      surfaces.push({ ...s!, kind: "vertical", normalX: -dz / len, normalZ: dx / len, offset: (-dz / len) * a.x + (dx / len) * a.z, ax: a.x, az: a.z, bx: b.x, bz: b.z });
+      surfaces.push({ ...s, kind: "vertical", normalX: -dz / len, normalZ: dx / len, offset: (-dz / len) * a.x + (dx / len) * a.z, ax: a.x, az: a.z, bx: b.x, bz: b.z });
     }
   }
   volume.setSurfaces(surfaces);
@@ -510,7 +629,7 @@ function syncVolumeSlices(): void {
   hslice?.material.setVolumeComposited(compositing && Boolean(hslice?.group.visible) && Boolean(hb));
   vsection?.material.setVolumeComposited(compositing && Boolean(vsection?.group.visible) && Boolean(vb));
   polyline?.material.setVolumeComposited(compositing && Boolean(polyline?.group.visible) && Boolean(vb));
-  boxStack?.material.setVolumeComposited(compositing && Boolean(boxStack?.group.visible) && Boolean(vb));
+  boxStack?.material.setVolumeComposited(false);
 }
 
 function updateComposite(): void { syncVolumeSlices(); }
@@ -713,16 +832,18 @@ function probeFromPointer(pin: boolean): boolean {
 // ---------------------------------------------------------------- section dragging
 const drag = {
   active: false,
-  rotate: false,
+  kind: "" as "" | "lon" | "lat" | "height",
   plane: new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
   start: new THREE.Vector3(),
   startOffset: 0,
+  startHeight: 0,
 };
 const pointerDown = { x: 0, y: 0, moved: false, active: false };
 const tmp = new THREE.Vector3();
 let drawStart: THREE.Vector3 | null = null;
 let boxDrawing = false;
 let vertexIndex = -1;
+let boxCorner = -1;
 
 function sectionHit(): THREE.Intersection | undefined {
   const targets: THREE.Object3D[] = [];
@@ -752,36 +873,68 @@ function onPointerDown(event: PointerEvent): void {
   pointerDown.active = true;
   const picked = annotations?.pick(event.clientX, event.clientY);
   const pickedKind = (picked?.userData as { pickable?: string; index?: number } | undefined)?.pickable;
-  if (section.drawMode && pickedKind === "polyline-vertex") {
+  if (section.drawMode && section.kind === "polyline" && pickedKind === "polyline-vertex") {
     vertexIndex = (picked?.userData as { index?: number }).index ?? -1;
     if (picked) annotations?.setState(picked.id, "dragging");
     controls.enabled = false; canvas.value!.setPointerCapture(event.pointerId); event.preventDefault(); return;
   }
-  const hit = sectionHit();
-  const sectionHandle = pickedKind === "section";
-  if ((hit || sectionHandle) && vsection && (section.kind === "lon" || section.kind === "lat")) {
-    drag.active = true;
-    drag.rotate = false;
-    if (hit) {
-      drag.plane.set(new THREE.Vector3(0, 1, 0), -hit.point.y);
-      drag.start.copy(hit.point);
-    } else {
-      tmp.set(0, domain.top, 0);
-      atmos.root.localToWorld(tmp);
-      drag.plane.set(new THREE.Vector3(0, 1, 0), -tmp.y);
-      if (!raycaster.ray.intersectPlane(drag.plane, drag.start)) drag.start.copy(tmp);
-    }
-    drag.startOffset = vsection.offsetKm();
+  if (section.kind === "box" && section.enabled && pickedKind === "box-corner") {
+    boxCorner = (picked?.userData as { index?: number }).index ?? -1;
     if (picked) annotations?.setState(picked.id, "dragging");
     controls.enabled = false;
     canvas.value!.setPointerCapture(event.pointerId);
     event.preventDefault();
-  } else if (section.drawMode) {
+    return;
+  }
+  const sectionHandle = pickedKind === "section";
+  const heightHandle = pickedKind === "height-handle";
+  if (sectionHandle && vsection && section.enabled && (section.kind === "lon" || section.kind === "lat")) {
+    drag.active = true;
+    drag.kind = section.kind;
+    tmp.set(vsection.center.x, domain.top, vsection.center.y);
+    atmos.root.localToWorld(tmp);
+    drag.plane.set(new THREE.Vector3(0, 1, 0), -tmp.y);
+    if (!raycaster.ray.intersectPlane(drag.plane, drag.start)) drag.start.copy(tmp);
+    drag.startOffset = vsection.offsetKm();
+    vsection.setDragging(true, section.offsetKm);
+    if (picked) annotations?.setState(picked.id, "dragging");
+    controls.enabled = false;
+    canvas.value!.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    return;
+  }
+  if (heightHandle && hslice && section.enabled && section.kind === "height") {
+    drag.active = true;
+    drag.kind = "height";
+    const anchor = new THREE.Vector3(domain.sx / 2, slice.heightM / 1000, 0);
+    atmos.root.localToWorld(anchor);
+    const normal = camera.position.clone().sub(anchor);
+    normal.y = 0;
+    if (normal.lengthSq() < 1e-8) camera.getWorldDirection(normal);
+    else normal.normalize();
+    drag.plane.setFromNormalAndCoplanarPoint(normal, anchor);
+    drag.start.copy(anchor);
+    drag.startHeight = slice.heightM;
+    hslice.setDragging(true, slice.heightM);
+    if (picked) annotations?.setState(picked.id, "dragging");
+    controls.enabled = false;
+    canvas.value!.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    return;
+  }
+  if (section.drawMode) {
     const p = groundPoint();
     if (!p) return;
     if (section.kind === "polyline") {
       drawStart = p;
-    } else if (section.kind === "box") { drawStart = p; boxDrawing = true; controls.enabled = false; canvas.value!.setPointerCapture(event.pointerId); event.preventDefault(); }
+    } else if (section.kind === "box") {
+      drawStart = p;
+      boxDrawing = true;
+      section.box.defined = false;
+      controls.enabled = false;
+      canvas.value!.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    }
   }
 }
 
@@ -797,37 +950,55 @@ function processPointer(): void {
   if (!pointerDirty || !pointerEvent || !manifest.value) return;
   pointerDirty = false;
   setPointer(pointerEvent);
-  if (drag.active && vsection) {
+  if (drag.active && drag.kind === "height" && hslice) {
     if (!raycaster.ray.intersectPlane(drag.plane, tmp)) return;
     const local = atmos.root.worldToLocal(tmp.clone());
-    if (drag.rotate) {
-      const c = vsection.center;
-      // azimuth of the pointer around the wall centre, folded to 0..180°
-      const az =
-        (THREE.MathUtils.radToDeg(Math.atan2(local.x - c.x, -(local.z - c.y))) + 360) % 180;
-      section.azimuthDeg = Math.round(az * 10) / 10;
-    } else {
-      const start = atmos.root.worldToLocal(drag.start.clone());
-      const n = vsection.normal();
-      const delta = (local.x - start.x) * n.x + (local.z - start.z) * n.y;
-      section.offsetKm = Math.round((drag.startOffset + delta) * 1000) / 1000;
-    }
+    slice.heightM = THREE.MathUtils.clamp(Math.round(local.y * 1000 * 10) / 10, 12.5, 987.5);
+    hslice.setDragging(true, slice.heightM);
+    return;
+  }
+  if (drag.active && vsection && (drag.kind === "lon" || drag.kind === "lat")) {
+    if (!raycaster.ray.intersectPlane(drag.plane, tmp)) return;
+    const local = atmos.root.worldToLocal(tmp.clone());
+    const start = atmos.root.worldToLocal(drag.start.clone());
+    const delta = drag.kind === "lon" ? local.x - start.x : local.z - start.z;
+    section.offsetKm = Math.round((drag.startOffset + delta) * 1000) / 1000;
+    vsection.setDragging(true, section.offsetKm);
     return;
   }
   if (vertexIndex >= 0 && polyline) {
     const p = groundPoint(); if (p && section.points[vertexIndex]) { section.points[vertexIndex] = { x: p.x, z: p.z }; updateSection(); }
     return;
   }
+  if (boxCorner >= 0) {
+    const p = groundPoint();
+    if (p) {
+      if (boxCorner === 0 || boxCorner === 3) section.box.x0 = p.x;
+      if (boxCorner === 1 || boxCorner === 2) section.box.x1 = p.x;
+      if (boxCorner === 0 || boxCorner === 1) section.box.z0 = p.z;
+      if (boxCorner === 2 || boxCorner === 3) section.box.z1 = p.z;
+      updateSection();
+    }
+    return;
+  }
   if (boxDrawing && drawStart) {
-    const p = groundPoint(); if (p) { section.box.x0 = drawStart.x; section.box.z0 = drawStart.z; section.box.x1 = p.x; section.box.z1 = p.z; updateSection(); }
+    const p = groundPoint();
+    if (p) {
+      section.box.x0 = drawStart.x;
+      section.box.z0 = drawStart.z;
+      section.box.x1 = p.x;
+      section.box.z1 = p.z;
+      section.box.defined = false;
+      updateSection();
+    }
     return;
   }
   const picked = annotations?.pick(pointerEvent.clientX, pointerEvent.clientY);
-  const wall = Boolean(sectionHit()) && (section.kind === "lon" || section.kind === "lat");
   const handle = Boolean(picked?.draggable);
-  vsection?.setHighlight(Boolean(wall || (picked && (picked.userData as { pickable?: string }).pickable === "section")));
-  if (drag.active || vertexIndex >= 0) canvas.value!.style.cursor = "grabbing";
-  else canvas.value!.style.cursor = handle || wall ? "grab" : "";
+  const overSection = (picked?.userData as { pickable?: string } | undefined)?.pickable === "section";
+  vsection?.setHighlight(overSection);
+  if (drag.active || vertexIndex >= 0 || boxCorner >= 0 || boxDrawing) canvas.value!.style.cursor = "grabbing";
+  else canvas.value!.style.cursor = handle ? "grab" : "";
   if (layers.probe && !section.drawMode) probeFromPointer(false);
 }
 
@@ -835,16 +1006,43 @@ function onPointerUp(event: PointerEvent): void {
   const wasClick = pointerDown.active && !pointerDown.moved && !drag.active && event.button === 0;
   if (drag.active) {
     drag.active = false;
+    drag.kind = "";
     controls.enabled = true;
+    vsection?.setDragging(false);
+    hslice?.setDragging(false);
     vsection?.syncAnnotations();
+    hslice?.syncAnnotations();
     canvas.value!.releasePointerCapture(event.pointerId);
   }
-  if (vertexIndex >= 0 || boxDrawing) {
-    polyline?.syncAnnotations();
-    vsection?.syncAnnotations();
-    vertexIndex = -1; boxDrawing = false; drawStart = null; controls.enabled = true; canvas.value!.releasePointerCapture(event.pointerId); pointerDown.active = false; return;
+  if (boxDrawing) {
+    const area = Math.abs(section.box.x1 - section.box.x0) * Math.abs(section.box.z1 - section.box.z0);
+    section.box.defined = area > 0.01;
+    if (!section.box.defined) clearBox();
+    boxDrawing = false;
+    drawStart = null;
+    controls.enabled = true;
+    canvas.value!.releasePointerCapture(event.pointerId);
+    pointerDown.active = false;
+    updateSection();
+    return;
   }
-  if (section.drawMode && section.kind === "polyline" && wasClick && drawStart) { section.points = [...section.points, { x: drawStart.x, z: drawStart.z }].slice(-16); drawStart = null; updateSection(); }
+  if (vertexIndex >= 0 || boxCorner >= 0) {
+    polyline?.syncAnnotations();
+    boxStack?.syncAnnotations();
+    vertexIndex = -1;
+    boxCorner = -1;
+    drawStart = null;
+    controls.enabled = true;
+    canvas.value!.releasePointerCapture(event.pointerId);
+    pointerDown.active = false;
+    return;
+  }
+  if (section.drawMode && section.kind === "polyline" && wasClick && drawStart) {
+    section.points = [...section.points, { x: drawStart.x, z: drawStart.z }].slice(-16);
+    drawStart = null;
+    unfoldedVisible.value = true;
+    updateSection();
+  }
   pointerDown.active = false;
   if (wasClick && layers.probe) {
     setPointer(event);
@@ -861,7 +1059,7 @@ function onContextMenu(event: MouseEvent): void {
   const i = (picked?.userData as { pickable?: string; index?: number } | undefined)?.pickable === "polyline-vertex"
     ? (picked!.userData as { index: number }).index
     : -1;
-  if (i >= 0 && section.points.length > 2) { section.points.splice(i, 1); updateSection(); }
+  if (i >= 0 && section.points.length >= 1) { section.points.splice(i, 1); updateSection(); }
 }
 
 function setDrawOrbit(on: boolean): void {
@@ -870,14 +1068,25 @@ function setDrawOrbit(on: boolean): void {
   (controls.mouseButtons as any).RIGHT = on ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
 }
 
-function selectKind(kind: "lon" | "lat" | "polyline" | "box"): void {
-  if ((kind === "polyline" || kind === "box") && section.kind === kind && section.drawMode) {
+function selectKind(kind: SectionKind): void {
+  if ((kind === "polyline" || kind === "box") && section.kind === kind && section.enabled && section.drawMode) {
     section.drawMode = false;
     return;
   }
+  const prev = section.enabled ? section.kind : null;
+  if (prev && prev !== kind) leaveKind(prev);
   section.kind = kind;
   section.enabled = true;
   section.drawMode = kind === "polyline" || kind === "box";
+  if (kind === "lon") section.azimuthDeg = 0;
+  if (kind === "lat") section.azimuthDeg = 90;
+  if (kind === "polyline") unfoldedVisible.value = true;
+  if (kind === "box" && prev !== "box") {
+    section.box.defined = false;
+    section.box.x0 = section.box.z0 = section.box.x1 = section.box.z1 = 0;
+  }
+  slice.enabled = kind === "height";
+  updateSection();
 }
 
 // ---------------------------------------------------------------- camera presets
@@ -896,15 +1105,16 @@ function setView(name: string): void {
   controls.target.set(...preset.target);
   controls.update();
   if (name === "slice") {
-    slice.enabled = true;
-    section.enabled = false;
+    selectKind("height");
   } else if (name === "section") {
-    section.enabled = true;
-    slice.enabled = false;
+    if (section.kind === "height" || !section.enabled) selectKind("lon");
+    else selectKind(section.kind === "box" || section.kind === "polyline" ? "lon" : section.kind);
   } else if (name === "overview") {
+    if (section.enabled) leaveKind(section.kind);
     slice.enabled = false;
     section.enabled = false;
     section.drawMode = false;
+    updateSection();
   }
 }
 
@@ -934,9 +1144,12 @@ function frame(now: number): void {
   atmos.root.scale.y = view.exaggeration;
   atmos.root.updateMatrixWorld();
   camera.updateMatrixWorld();
+  if (boxStack?.group.visible) boxStack.sortSlabs(camera, atmos.root);
   annotations?.update(camera);
   hslice?.material.setRoot(atmos.root);
   vsection?.material.setRoot(atmos.root);
+  polyline?.material.setRoot(atmos.root);
+  boxStack?.material.setRoot(atmos.root);
   if (particles) {
     particles.object.visible = layers.particles;
     if (layers.particles) particles.step(dt);
@@ -981,12 +1194,62 @@ function resize(): void {
 function exposeApi(): void {
   window.__atmosApi = {
     setView,
-    setSection: (p: Partial<typeof section>) => { Object.assign(section, { enabled: true }, p); updateSection(); },
-    setSectionMode: (kind: "lon" | "lat" | "polyline" | "box") => { section.kind = kind; section.enabled = true; section.drawMode = kind === "polyline" || kind === "box"; updateSection(); },
-    setPolyline: (points: { x: number; z: number }[]) => { section.kind = "polyline"; section.enabled = true; section.points = points.slice(0, 16); updateSection(); },
-    setBox: (p: Partial<BoxStackParams>) => { section.kind = "box"; section.enabled = true; Object.assign(section.box, p); updateSection(); },
+    setSection: (p: Partial<typeof section>) => {
+      const prev = section.enabled ? section.kind : null;
+      Object.assign(section, { enabled: true }, p);
+      if (p.kind && p.kind !== prev) leaveKind(prev);
+      if (p.azimuthDeg !== undefined && p.kind === undefined && (section.kind === "lon" || section.kind === "lat" || prev === null)) {
+        const az = ((Number(p.azimuthDeg) % 180) + 180) % 180;
+        if (section.kind !== "lon" && section.kind !== "lat") section.kind = Math.abs(az - 90) < 45 ? "lat" : "lon";
+      }
+      if (section.kind === "lon") section.azimuthDeg = 0;
+      if (section.kind === "lat") section.azimuthDeg = 90;
+      section.drawMode = section.kind === "polyline" || section.kind === "box";
+      slice.enabled = section.kind === "height";
+      updateSection();
+    },
+    setSectionMode: (kind: SectionKind) => { selectKind(kind); },
+    setPolyline: (points: { x: number; z: number }[]) => {
+      if (section.kind !== "polyline") {
+        if (section.enabled) leaveKind(section.kind);
+      }
+      section.kind = "polyline";
+      section.enabled = true;
+      section.drawMode = true;
+      section.points = points.slice(0, 16);
+      unfoldedVisible.value = true;
+      updateSection();
+    },
+    setBox: (p: Partial<BoxStackParams>) => {
+      if (section.kind !== "box" && section.enabled) leaveKind(section.kind);
+      section.kind = "box";
+      section.enabled = true;
+      section.drawMode = true;
+      Object.assign(section.box, p);
+      const hasArea = Math.abs((section.box.x1 ?? 0) - (section.box.x0 ?? 0)) * Math.abs((section.box.z1 ?? 0) - (section.box.z0 ?? 0)) > 1e-6;
+      section.box.defined = p.defined !== undefined ? Boolean(p.defined) : hasArea;
+      updateSection();
+    },
     setCuts: (p: Partial<CutState>) => { if (p.x) cuts.x = [...p.x] as [number, number]; if (p.y) cuts.y = [...p.y] as [number, number]; if (p.z) cuts.z = [...p.z] as [number, number]; if (p.faces !== undefined) cuts.faces = p.faces; clampCuts(cuts); updateVolume(); },
-    setSlice: (p: Partial<typeof slice>) => Object.assign(slice, { enabled: true }, p),
+    setSlice: (p: Partial<typeof slice>) => {
+      Object.assign(slice, p);
+      if (p.enabled === false) {
+        if (section.kind === "height") {
+          leaveKind("height");
+          section.enabled = false;
+        }
+      } else {
+        if (section.enabled && section.kind !== "height") leaveKind(section.kind);
+        section.kind = "height";
+        section.enabled = true;
+        section.drawMode = false;
+        if (p.variable !== undefined || p.colormap !== undefined || p.autoRange !== undefined || p.min !== undefined || p.max !== undefined || p.opacity !== undefined || p.contours !== undefined) {
+          syncStyleToSection();
+        }
+      }
+      updateSection();
+    },
+    setSliceEnabled: (on: boolean) => { if (on) selectKind("height"); else if (section.kind === "height") { section.enabled = false; leaveKind("height"); updateSection(); } },
     setParticles: (p: Partial<ParticleParams>) => Object.assign(particleParams, p),
     setLayer: (name: string, on: boolean) => {
       if (name in layers) (layers as Record<string, unknown>)[name] = on;
@@ -1120,6 +1383,7 @@ async function start(): Promise<void> {
   volume.mesh.visible = false;
   polyline.group.visible = false;
   boxStack.group.visible = false;
+  hslice.setAnnotationLayer(annotations);
   vsection.setAnnotationLayer(annotations);
   polyline.setAnnotationLayer(annotations);
   boxStack.setAnnotationLayer(annotations);
@@ -1180,20 +1444,13 @@ function applyBuildings(): void {
 // ---------------------------------------------------------------- watchers (all cheap)
 watch(particleParams, () => particles?.setParams({ ...particleParams }), { deep: true });
 watch(
-  () => slice.variable,
-  (name) => {
-    slice.colormap = defaultColormap(name);
-    slice.autoRange = true;
-  },
-);
-watch(
   () => section.variable,
   (name) => {
     section.colormap = defaultColormap(name);
     section.autoRange = true;
   },
 );
-watch(slice, updateSlice, { deep: true });
+watch(() => slice.heightM, () => { if (section.kind === "height") updateSlice(); });
 watch(
   () => [
     section.enabled,
@@ -1208,15 +1465,30 @@ watch(
   updateSection,
 );
 watch(
+  () => section.enabled,
+  (on, was) => {
+    if (!on && was) {
+      leaveKind(section.kind);
+      section.drawMode = false;
+      updateSection();
+    }
+  },
+);
+watch(
   () => [section.offsetKm, section.azimuthDeg],
   () => {
     if (!vsection) return;
-    vsection.azimuthDeg = section.azimuthDeg;
-    vsection.setOffset(section.offsetKm);
+    if (section.kind === "lon") section.azimuthDeg = 0;
+    if (section.kind === "lat") section.azimuthDeg = 90;
+    if (section.kind === "lon" || section.kind === "lat") {
+      vsection.azimuthDeg = section.azimuthDeg;
+      vsection.setOffset(section.offsetKm);
+    }
     syncVolumeSlices();
   },
 );
-watch(() => [section.kind, section.drawMode, section.points.length, section.box.x0, section.box.x1, section.box.z0, section.box.z1, section.box.heightMinM, section.box.heightMaxM, section.box.stepLevels, section.box.stretch, section.box.spacingKm], updateSection);
+watch(() => [section.kind, section.drawMode, section.points.length, section.box.x0, section.box.x1, section.box.z0, section.box.z1, section.box.heightMinM, section.box.heightMaxM, section.box.stepLevels, section.box.defined], updateSection);
+watch(() => isBoxMode(), () => { updateVolume(); });
 watch(() => [cuts.x[0], cuts.x[1], cuts.y[0], cuts.y[1], cuts.z[0], cuts.z[1], cuts.faces], () => { clampCuts(cuts); volume?.setCuts(cuts); syncVolumeSlices(); });
 watch(() => [layers.ground, layers.groundVar], updateGround);
 watch(
@@ -1286,20 +1558,13 @@ const legends = computed(() => {
   if (section.enabled)
     out.push({
       key: "section",
-      title: `剖面 · ${labelOf(section.variable)}`,
+      title: section.kind === "height"
+        ? `剖面 ${slice.heightM.toFixed(0)} m · ${labelOf(section.variable)}`
+        : `剖面 · ${labelOf(section.variable)}`,
       units: unitsOf(section.variable),
       colormap: section.colormap,
       min: section.min,
       max: section.max,
-    });
-  if (slice.enabled)
-    out.push({
-      key: "slice",
-      title: `切片 ${slice.heightM.toFixed(0)} m · ${labelOf(slice.variable)}`,
-      units: unitsOf(slice.variable),
-      colormap: slice.colormap,
-      min: slice.min,
-      max: slice.max,
     });
   if (layers.particles && particleParams.colorMode !== "single") {
     const name =
@@ -1323,7 +1588,7 @@ const legends = computed(() => {
       max: range[1],
     });
   }
-  if (layers.volume) {
+  if (volumeWanted()) {
     out.push({
       key: "volume",
       title: `体渲染 · ${labelOf(layers.volumeVar)}`,
@@ -1403,7 +1668,7 @@ onBeforeUnmount(() => {
       :show-variable="profileVariable() !== 'speed'"
       @close="probe = null; fixedCell = null; updateMarker()"
     />
-    <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" @close="unfoldedVisible = false" />
+    <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
 
     <div class="hint">
       拖动：旋转 · 右键：平移 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 ·
@@ -1594,73 +1859,24 @@ onBeforeUnmount(() => {
 
       <details open>
         <summary>
-          水平切片 <em>{{ slice.enabled ? `${slice.heightM.toFixed(0)} m` : "关" }}</em>
-        </summary>
-        <label class="row"
-          ><input v-model="slice.enabled" type="checkbox" />显示
-          <select v-model="slice.variable">
-            <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
-          </select></label
-        >
-        <label class="slider"
-          >高度 {{ slice.heightM.toFixed(1) }} m
-          <input v-model.number="slice.heightM" type="range" min="12.5" max="987.5" step="0.5"
-        /></label>
-        <label class="row"
-          >色带
-          <select v-model="slice.colormap">
-            <option v-for="c in COLORMAPS" :key="c" :value="c">
-              {{ COLORMAP_LABELS[c] ?? c }}
-            </option>
-          </select></label
-        >
-        <label class="row"
-          ><input v-model="slice.autoRange" type="checkbox" />自动范围
-          <input
-            v-model.number="slice.min"
-            class="num"
-            type="number"
-            step="any"
-            :disabled="slice.autoRange" />–
-          <input
-            v-model.number="slice.max"
-            class="num"
-            type="number"
-            step="any"
-            :disabled="slice.autoRange"
-        /></label>
-        <label class="slider"
-          >不透明度 {{ slice.opacity.toFixed(2)
-          }}<input v-model.number="slice.opacity" type="range" min="0.1" max="1" step="0.01"
-        /></label>
-        <label class="slider"
-          >等值线 {{ slice.contours || "关"
-          }}<input v-model.number="slice.contours" type="range" min="0" max="30" step="1"
-        /></label>
-      </details>
-
-      <details open>
-        <summary>
-          垂直剖面 <em>{{ section.enabled ? section.kind : "关" }}</em>
+          剖面 <em>{{ section.enabled ? SECTION_KIND_LABELS[section.kind] : "关" }}</em>
         </summary>
         <label class="row"
           ><input v-model="section.enabled" type="checkbox" />显示
-          <span class="mode-picks">
-            <button type="button" :class="{ on: section.kind === 'lon' }" @click="selectKind('lon')">经度方向</button>
-            <button type="button" :class="{ on: section.kind === 'lat' }" @click="selectKind('lat')">纬度方向</button>
-            <button type="button" :class="{ on: section.kind === 'polyline' && section.drawMode }" @click="selectKind('polyline')">折线</button>
-            <button type="button" :class="{ on: section.kind === 'box' && section.drawMode }" @click="selectKind('box')">框选</button>
-          </span>
+        </label>
+        <span class="mode-picks">
+          <button type="button" :class="{ on: section.enabled && section.kind === 'height' }" @click="selectKind('height')">高度</button>
+          <button type="button" :class="{ on: section.enabled && section.kind === 'lon' }" @click="selectKind('lon')">经度</button>
+          <button type="button" :class="{ on: section.enabled && section.kind === 'lat' }" @click="selectKind('lat')">纬度</button>
+          <button type="button" :class="{ on: section.enabled && section.kind === 'polyline' }" @click="selectKind('polyline')">折线</button>
+          <button type="button" :class="{ on: section.enabled && section.kind === 'box' }" @click="selectKind('box')">框选</button>
+        </span>
+        <label class="row"
+          >变量
           <select v-model="section.variable">
             <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
           </select></label
         >
-        <label v-if="section.kind === 'lon' || section.kind === 'lat'" class="slider"
-          >位置偏移 {{ section.offsetKm.toFixed(2) }} km
-          <input v-model.number="section.offsetKm" type="range" min="-12" max="12" step="0.01"
-        /></label>
-        <div v-if="section.kind === 'polyline'" class="row-wrap"><span class="muted">左键地面连续放点（上限 16），右键删点，Esc 退出</span><button @click="section.points = []; updateSection()">清除折线</button><button @click="unfoldedVisible = !unfoldedVisible">{{ unfoldedVisible ? '隐藏展开图' : '显示展开图' }}</button></div>
-        <template v-if="section.kind === 'box'"><label class="slider">高度拉伸 {{ section.box.stretch.toFixed(2) }}×<input v-model.number="section.box.stretch" type="range" min="0.5" max="4" step="0.05" /></label><label class="slider">层间距 {{ section.box.spacingKm.toFixed(2) }} km<input v-model.number="section.box.spacingKm" type="range" min="0" max="0.5" step="0.01" /></label><div class="slider range-label"><span>高度范围</span><RangeSlider :min="0" :max="1000" :min-value="section.box.heightMinM" :max-value="section.box.heightMaxM" :step="12.5" @update:min-value="section.box.heightMinM = $event" @update:max-value="section.box.heightMaxM = $event" /></div><label class="row">间隔 <select v-model.number="section.box.stepLevels"><option :value="1">每 1 层</option><option :value="2">每 2 层</option><option :value="5">每 5 层</option></select></label></template>
         <label class="row"
           >色带
           <select v-model="section.colormap">
@@ -1692,6 +1908,35 @@ onBeforeUnmount(() => {
           >等值线 {{ section.contours || "关"
           }}<input v-model.number="section.contours" type="range" min="0" max="30" step="1"
         /></label>
+        <label v-if="section.kind === 'height'" class="slider"
+          >高度 {{ slice.heightM.toFixed(1) }} m
+          <input v-model.number="slice.heightM" type="range" min="12.5" max="987.5" step="0.5"
+        /></label>
+        <label v-if="section.kind === 'lon' || section.kind === 'lat'" class="slider"
+          >位置偏移 {{ section.offsetKm.toFixed(2) }} km
+          <input v-model.number="section.offsetKm" type="range" min="-12" max="12" step="0.01"
+        /></label>
+        <div v-if="section.kind === 'polyline'" class="section-tools">
+          <div class="mode-picks">
+            <button type="button" @click="clearPolyline()">清除折线</button>
+            <button type="button" :class="{ on: unfoldedVisible }" @click="unfoldedVisible = !unfoldedVisible">{{ unfoldedVisible ? "隐藏展开图" : "显示展开图" }}</button>
+          </div>
+          <div class="hint-line">左键加点，右键删点，Esc 退出</div>
+        </div>
+        <template v-if="section.kind === 'box'">
+          <div class="hint-line">拖拽地面框选范围 · 框选时暂停体渲染</div>
+          <div class="slider range-label">
+            <span>高度范围 {{ section.box.heightMinM.toFixed(0) }}–{{ section.box.heightMaxM.toFixed(0) }} m</span>
+            <RangeSlider :min="0" :max="1000" :min-value="section.box.heightMinM" :max-value="section.box.heightMaxM" :step="12.5" @update:min-value="section.box.heightMinM = $event" @update:max-value="section.box.heightMaxM = $event" />
+          </div>
+          <label class="row">间隔
+            <select v-model.number="section.box.stepLevels">
+              <option :value="1">每 1 层</option>
+              <option :value="2">每 2 层</option>
+              <option :value="5">每 5 层</option>
+            </select>
+          </label>
+        </template>
       </details>
 
       <details>
@@ -1732,9 +1977,12 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.mode-picks { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-.mode-picks button { background: rgba(20,40,55,.8); color: inherit; border: 1px solid var(--line); border-radius: 3px; padding: 1px 6px; }
+.mode-picks { display: inline-flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.mode-picks button { background: rgba(20,40,55,.8); color: inherit; border: 1px solid var(--line); border-radius: 3px; padding: 1px 6px; cursor: pointer; font: inherit; }
 .mode-picks button.on { border-color: var(--accent); color: var(--accent); }
+.section-tools { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.hint-line { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 4px 0; }
+.range-label span { display: block; margin-bottom: 4px; }
 .viewer {
   --card: rgba(8, 17, 30, 0.78);
   --panel: rgba(8, 16, 28, 0.9);

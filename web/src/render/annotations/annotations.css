@@ -63,3 +63,37 @@
 .anno-hidden {
   visibility: hidden !important;
 }
+
+.anno-grip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  box-shadow: 0 0 0 1px rgba(8, 14, 22, 0.85), 0 0 3px rgba(0, 0, 0, 0.45);
+  color: #08141c;
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0;
+  will-change: transform, opacity;
+}
+
+.anno-grip.is-selected,
+.anno-grip.is-dragging {
+  box-shadow: 0 0 0 2px #ffffff, 0 0 0 3px rgba(8, 14, 22, 0.45);
+}
+
+.anno-grip.is-disabled {
+  background: #8a97a3;
+  color: #08141c;
+}
+
+.anno-grip-icon {
+  pointer-events: none;
+  font-size: 12px;
+  font-weight: 700;
+}

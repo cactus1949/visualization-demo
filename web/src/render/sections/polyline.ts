@@ -67,7 +67,8 @@ export class PolylineSection {
 
   private syncHandles(): void {
     if (!this.layer) return;
-    const visible = this.group.visible;
+    // A single vertex must still show its handle; the wall itself needs ≥2 points.
+    const visible = this.points.length >= 1;
     this.points.forEach((p, i) => {
       const id = `${HANDLE_PREFIX}${i}`;
       this.layer!.addHandle(id, {
@@ -93,6 +94,10 @@ export class PolylineSection {
     this.points.forEach((_, i) => {
       this.layer!.setState(`${HANDLE_PREFIX}${i}`, i === this.selected ? "selected" : "idle");
     });
+  }
+
+  clearHandles(): void {
+    this.layer?.removePrefixed(HANDLE_PREFIX);
   }
 
   dispose(): void {

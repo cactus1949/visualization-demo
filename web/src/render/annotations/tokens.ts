@@ -28,6 +28,9 @@ export const ANNOTATION_TOKENS = Object.freeze({
     leaderPx: 12,
     hoverScale: 1.15,
     draggingScale: 1.25,
+    gripWidthPx: 28,
+    gripHeightPx: 14,
+    gripHitPx: 28,
   }),
   opacity: Object.freeze({
     idle: 1,

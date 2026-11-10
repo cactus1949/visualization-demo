@@ -28,6 +28,12 @@ export interface AnnotationDesc {
   priority?: number;
   draggable?: boolean;
   userData?: unknown;
+  /** Handle shape: default circular dot, or a pill grip with an axis icon. */
+  variant?: "dot" | "grip";
+  /** Drag axis for grip handles: horizontal (x/z/h) or vertical (y/v). */
+  axis?: "x" | "y" | "z" | "h" | "v";
+  /** Optional group id used to decimate overlapping labels (e.g. box height labels). */
+  cluster?: string;
 }
 
 export interface AnnotationHit {
@@ -170,8 +176,18 @@ export class AnnotationLayer {
       if (item.desc.kind !== "handle") continue;
       if (item.desc.visible === false || !item.onScreen) continue;
       if (item.desc.state === "disabled") continue;
-      const d = Math.hypot(x - item.sx, y - item.sy);
-      if (d <= bestD) {
+      let hit = false;
+      let d = Math.hypot(x - item.sx, y - item.sy);
+      if (item.desc.variant === "grip") {
+        const hw = Math.max(T.sizes.gripHitPx, item.width || T.sizes.gripWidthPx) * 0.5 + 2;
+        const hh = Math.max(T.sizes.gripHeightPx + 8, item.height || T.sizes.gripHeightPx) * 0.5 + 2;
+        hit = Math.abs(x - item.sx) <= hw && Math.abs(y - item.sy) <= hh;
+        // Prefer the closer grip when several overlap, but still allow a rectangular hit.
+        d = hit ? Math.min(d, Math.max(Math.abs(x - item.sx) / hw, Math.abs(y - item.sy) / hh) * r) : d;
+      } else {
+        hit = d <= r;
+      }
+      if (hit && d <= bestD) {
         bestD = d;
         best = {
           id: item.id,
@@ -203,7 +219,8 @@ export class AnnotationLayer {
       this.projectItem(item, camera, rect, checkOcc);
       if (item.desc.kind === "label" && item.onScreen && item.desc.visible !== false) labels.push(item);
     }
-    this.resolveOverlap(labels);
+    this.decimateClusters(labels);
+    this.resolveOverlap(labels.filter((item) => item.onScreen && item.desc.visible !== false));
   }
 
   private upsert(id: string, desc: AnnotationDesc): void {
@@ -271,21 +288,39 @@ export class AnnotationLayer {
     const { desc } = item;
     const state = desc.state ?? "idle";
     const color = roleColor(desc.role, state);
+    const grip = desc.kind === "handle" && desc.variant === "grip";
     item.el.className =
-      (desc.kind === "label" ? "anno-label" : "anno-dot") +
+      (desc.kind === "label" ? "anno-label" : grip ? "anno-grip" : "anno-dot") +
       (desc.kind === "handle" ? " is-handle" : "") +
-      (state === "selected" ? " is-selected" : "") +
+      (state === "selected" || state === "dragging" ? " is-selected" : "") +
+      (state === "dragging" ? " is-dragging" : "") +
       (state === "disabled" ? " is-disabled" : "");
-    if (desc.kind !== "label") {
+    if (desc.kind === "label") {
+      item.el.style.background = T.colors.labelBackground;
+      item.el.style.color = T.colors.labelText;
+    } else if (grip) {
+      item.el.style.width = `${T.sizes.gripWidthPx}px`;
+      item.el.style.height = `${T.sizes.gripHeightPx}px`;
+      item.el.style.background = color;
+      item.width = T.sizes.gripWidthPx;
+      item.height = T.sizes.gripHeightPx;
+      const vertical = desc.axis === "y" || desc.axis === "v";
+      const icon = vertical ? "↕" : "↔";
+      let iconEl = item.el.querySelector(".anno-grip-icon") as HTMLElement | null;
+      if (!iconEl) {
+        item.el.textContent = "";
+        iconEl = document.createElement("span");
+        iconEl.className = "anno-grip-icon";
+        item.el.appendChild(iconEl);
+      }
+      if (iconEl.textContent !== icon) iconEl.textContent = icon;
+    } else {
       const d = desc.kind === "handle" ? T.sizes.handlePx : T.sizes.markerPx;
       item.el.style.width = `${d}px`;
       item.el.style.height = `${d}px`;
       item.el.style.background = color;
       item.width = d;
       item.height = d;
-    } else {
-      item.el.style.background = T.colors.labelBackground;
-      item.el.style.color = T.colors.labelText;
     }
     if (item.ring) item.ring.setAttribute("stroke", color);
   }
@@ -448,6 +483,38 @@ export class AnnotationLayer {
     item.el.classList.add("anno-hidden");
     if (item.line) item.line.style.display = "none";
     if (item.ring) item.ring.style.display = "none";
+  }
+
+  private decimateClusters(labels: Item[]): void {
+    const groups = new Map<string, Item[]>();
+    for (const item of labels) {
+      const key = item.desc.cluster;
+      if (!key) continue;
+      let list = groups.get(key);
+      if (!list) {
+        list = [];
+        groups.set(key, list);
+      }
+      list.push(item);
+    }
+    const minPx = 28;
+    for (const list of groups.values()) {
+      if (list.length <= 2) continue;
+      list.sort((a, b) => (a.desc.priority ?? 0) - (b.desc.priority ?? 0));
+      const first = list[0]!;
+      const last = list[list.length - 1]!;
+      let lastKeptSy = first.sy;
+      for (let i = 1; i < list.length - 1; i += 1) {
+        const item = list[i]!;
+        const gapPrev = Math.abs(item.sy - lastKeptSy);
+        const gapLast = Math.abs(item.sy - last.sy);
+        if (gapPrev >= minPx && gapLast >= minPx) {
+          lastKeptSy = item.sy;
+        } else {
+          this.hide(item);
+        }
+      }
+    }
   }
 
   private resolveOverlap(labels: Item[]): void {

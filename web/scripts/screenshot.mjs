@@ -32,6 +32,14 @@ const VIEWS = [
   "v6_1-polyline",
   "v6_1-boxstack",
   "v6_1-lon",
+  "v6_2-panel-section",
+  "v6_2-height-handle",
+  "v6_2-lon-handle",
+  "v6_2-polyline-1pt",
+  "v6_2-polyline-3pt",
+  "v6_2-box-empty",
+  "v6_2-box-40",
+  "v6_2-box-exag",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -216,6 +224,53 @@ await page.evaluate((v) => {
     api.setSection({ variable: "speed", offsetKm: -1.0, opacity: 0.5 });
     api.setVolume({ enabled: true, variable: "tke" });
     api.setCamera([-14, 5.5, 2], [0.4, 0.7, -0.4]);
+  } else if (v === "v6_2-panel-section") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("polyline");
+  } else if (v === "v6_2-height-handle") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setSlice({ variable: "speed", heightM: 250, opacity: 0.85, contours: 12 });
+    api.setCamera([-8, 6.5, 12], [6, 0.8, 0]);
+  } else if (v === "v6_2-lon-handle") {
+    api.setLayer("particles", false);
+    api.setSectionMode("lon");
+    api.setSection({ variable: "speed", offsetKm: -1.0, opacity: 0.6, contours: 12 });
+    api.setVolume({ enabled: true, variable: "tke", opacity: 0.6 });
+    api.setExaggeration(3);
+    api.setCamera([-14, 5.5, 2], [0.4, 1.0, -0.4]);
+  } else if (v === "v6_2-polyline-1pt") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setPolyline([{ x: -2, z: 1 }]);
+    api.setSection({ variable: "speed" });
+    api.setCamera([-8, 5.5, 12], [-2, 0.3, 1]);
+  } else if (v === "v6_2-polyline-3pt") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSection({ variable: "speed", opacity: 0.85 });
+    api.selectPolylineVertex(1);
+    api.setCamera([-8, 5.2, 14], [0, 0.6, 0]);
+  } else if (v === "v6_2-box-empty") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke" });
+    api.setExaggeration(3);
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSectionMode("box");
+    api.setCamera([-13, 8, 12], [0, 0.4, 0]);
+  } else if (v === "v6_2-box-40" || v === "v6_2-box-exag") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke" });
+    api.setExaggeration(v === "v6_2-box-exag" ? 3 : 1);
+    api.setSectionMode("box");
+    api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 0, heightMaxM: 1000, stepLevels: 1, defined: true });
+    api.setSection({ variable: "speed", opacity: 0.75 });
+    api.setCamera(v === "v6_2-box-exag" ? [-7.5, 3.6, 9.5] : [-6.5, 1.7, 8.5], [0, v === "v6_2-box-exag" ? 1.2 : 0.45, 0]);
   } else {
     api.setView("overview");
   }
@@ -237,19 +292,36 @@ if (
     "v6-lon-05",
     "v6-lat-1",
     "v6_1-lon",
+    "v6_2-lon-handle",
   ].includes(view)
 ) {
   await page.waitForFunction(() => window.__atmosStatus?.volume === "tke", null, {
     timeout: 90_000,
   });
 }
-if (["v6-boxstack", "v6-polyline", "v6_1-boxstack", "v6_1-polyline"].includes(view)) {
+if (
+  [
+    "v6-boxstack",
+    "v6-polyline",
+    "v6_1-boxstack",
+    "v6_1-polyline",
+    "v6_2-panel-section",
+    "v6_2-polyline-1pt",
+    "v6_2-polyline-3pt",
+    "v6_2-box-empty",
+    "v6_2-box-40",
+    "v6_2-box-exag",
+    "v6_2-height-handle",
+    "v6_2-lon-handle",
+  ].includes(view)
+) {
   await page.evaluate(() => {
-    const details = [...document.querySelectorAll("details")].find((d) =>
-      d.querySelector("summary")?.textContent?.includes("垂直剖面"),
-    );
+    const details = [...document.querySelectorAll("details")].find((d) => {
+      const text = d.querySelector("summary")?.textContent ?? "";
+      return text.includes("剖面") || text.includes("垂直剖面") || text.includes("水平切片");
+    });
     details?.setAttribute("open", "");
-    details?.scrollIntoView({ block: "center" });
+    details?.scrollIntoView({ block: "start" });
   });
 }
 await page.waitForTimeout(1500);
@@ -264,7 +336,21 @@ await page.evaluate(() => window.__atmosApi.advance(3, 1 / 60));
 const after = await page.evaluate(() => window.__atmosApi.sampleParticle());
 await page.waitForTimeout(2500);
 const status = await page.evaluate(() => window.__atmosApi.status());
-await page.screenshot({ path: output, timeout: 120_000 });
+if (view === "v6_2-panel-section") {
+  const panel = page.locator(".panel");
+  await panel.evaluate((el) => {
+    for (const d of el.querySelectorAll("details")) {
+      const text = d.querySelector("summary")?.textContent ?? "";
+      if (text.includes("剖面") && !text.includes("粒子")) d.setAttribute("open", "");
+      else d.removeAttribute("open");
+    }
+    el.scrollTop = 0;
+  });
+  await page.waitForTimeout(400);
+  await panel.screenshot({ path: output, timeout: 120_000 });
+} else {
+  await page.screenshot({ path: output, timeout: 120_000 });
+}
 console.log(
   JSON.stringify({
     view,

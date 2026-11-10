@@ -1,6 +1,6 @@
 import type { ScalarBinding } from "../slices";
 
-export type SectionKind = "lon" | "lat" | "polyline" | "box";
+export type SectionKind = "height" | "lon" | "lat" | "polyline" | "box";
 export interface SectionStyle {
   variable: string;
   binding?: ScalarBinding | null;
@@ -24,6 +24,5 @@ export interface SectionDefinition {
   heightMinM?: number;
   heightMaxM?: number;
   stepLevels?: number;
-  stretch?: number;
-  spacingKm?: number;
+  defined?: boolean;
 }

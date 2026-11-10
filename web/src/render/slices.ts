@@ -154,6 +154,9 @@ export class HorizontalSlice {
   readonly mesh: THREE.Mesh;
   readonly material: SliceMaterial;
   readonly outline: THREE.LineLoop;
+  private layer: AnnotationLayer | null = null;
+  private readonly handleId = "height-handle";
+  private readonly readoutId = "height-readout";
 
   constructor(private readonly domain: Domain) {
     this.material = new SliceMaterial(domain);
@@ -177,6 +180,56 @@ export class HorizontalSlice {
 
   setHeightKm(h: number): void {
     this.group.position.y = THREE.MathUtils.clamp(h, 0.0001, this.domain.top - 0.0001);
+    this.syncHandle();
+  }
+
+  setAnnotationLayer(layer: AnnotationLayer | null): void {
+    this.layer = layer;
+    this.syncHandle();
+  }
+
+  setHandleVisible(on: boolean): void {
+    this.layer?.setVisible(this.handleId, on);
+    if (!on) this.layer?.setVisible(this.readoutId, false);
+  }
+
+  setDragging(on: boolean, heightM?: number): void {
+    if (!this.layer) return;
+    this.layer.setState(this.handleId, on ? "dragging" : "idle");
+    if (on && heightM !== undefined) {
+      this.layer.addLabel(this.readoutId, {
+        anchor: this.handleAnchor(),
+        text: `${heightM.toFixed(1)} m`,
+        leader: false,
+        visible: true,
+        priority: 10_000,
+      });
+    } else {
+      this.layer.setVisible(this.readoutId, false);
+    }
+  }
+
+  syncAnnotations(): void {
+    this.syncHandle();
+  }
+
+  private handleAnchor(): { x: number; y: number; z: number } {
+    return { x: this.domain.sx / 2, y: this.group.position.y, z: 0 };
+  }
+
+  private syncHandle(): void {
+    if (!this.layer) return;
+    const visible = this.group.visible;
+    this.layer.addHandle(this.handleId, {
+      anchor: this.handleAnchor(),
+      role: "fixed",
+      variant: "grip",
+      axis: "y",
+      draggable: true,
+      visible,
+      userData: { pickable: "height-handle" },
+    });
+    if (!visible) this.layer.setVisible(this.readoutId, false);
   }
 
   dispose(): void {
@@ -184,6 +237,8 @@ export class HorizontalSlice {
     this.material.dispose();
     this.outline.geometry.dispose();
     (this.outline.material as THREE.Material).dispose();
+    this.layer?.remove(this.handleId);
+    this.layer?.remove(this.readoutId);
   }
 }
 
@@ -203,6 +258,8 @@ export class VerticalSection {
   private readonly outlinePositions: Float32Array;
   private layer: AnnotationLayer | null = null;
   private readonly handleId = "section-handle";
+  private readonly readoutId = "section-readout";
+  private dragging = false;
 
   constructor(private readonly domain: Domain) {
     this.material = new SliceMaterial(domain);
@@ -309,22 +366,48 @@ export class VerticalSection {
 
   setHighlight(on: boolean): void {
     this.material.uniforms.uHighlight.value = on ? 1 : 0;
-    if (this.layer) this.layer.setState(this.handleId, on ? "hover" : "idle");
+    if (this.layer && !this.dragging) this.layer.setState(this.handleId, on ? "hover" : "idle");
+  }
+
+  setDragging(on: boolean, offsetKm?: number): void {
+    if (!this.layer) return;
+    this.dragging = on;
+    this.layer.setState(this.handleId, on ? "dragging" : "idle");
+    if (on && offsetKm !== undefined) {
+      const chord = this.chord();
+      const mid = chord
+        ? { x: (chord[0].x + chord[1].x) / 2, y: this.domain.top, z: (chord[0].y + chord[1].y) / 2 }
+        : { x: this.center.x, y: this.domain.top, z: this.center.y };
+      this.layer.addLabel(this.readoutId, {
+        anchor: mid,
+        text: `${offsetKm.toFixed(2)} km`,
+        leader: false,
+        visible: true,
+        priority: 10_000,
+      });
+    } else {
+      this.layer.setVisible(this.readoutId, false);
+    }
   }
 
   syncAnnotations(): void {
     this.layer?.setVisible(this.handleId, this.group.visible);
+    if (!this.group.visible) this.layer?.setVisible(this.readoutId, false);
   }
 
   private syncHandle(x: number, y: number, z: number): void {
     if (!this.layer) return;
+    const lon = Math.abs(this.azimuthDeg % 180) < 45 || Math.abs(this.azimuthDeg % 180) > 135;
     this.layer.addHandle(this.handleId, {
       anchor: { x, y, z },
-      role: "preview",
+      role: "fixed",
+      variant: "grip",
+      axis: lon ? "x" : "z",
       draggable: true,
       visible: this.group.visible,
       userData: { pickable: "section" },
     });
+    if (!this.group.visible) this.layer.setVisible(this.readoutId, false);
   }
 
   dispose(): void {
@@ -333,5 +416,6 @@ export class VerticalSection {
     this.outline.geometry.dispose();
     (this.outline.material as THREE.Material).dispose();
     this.layer?.remove(this.handleId);
+    this.layer?.remove(this.readoutId);
   }
 }
