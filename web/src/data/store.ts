@@ -5,10 +5,18 @@ export interface LoadedVariable {
   data: Float32Array;
 }
 
+export interface FileTiming {
+  fetchMs: number;
+  decodeMs: number;
+  bytes: number;
+}
+
 export class DataStore {
   manifest: Manifest | null = null;
   loaded = new Map<string, LoadedVariable>();
   loading = new Set<string>();
+  readonly fileTimings: Record<string, FileTiming> = {};
+  manifestFetchMs: number | null = null;
   readonly worker: Worker;
   private readonly listeners = new Set<(name: string) => void>();
 
@@ -18,14 +26,16 @@ export class DataStore {
     });
     this.worker.onmessage = (event: MessageEvent) => {
       const message = event.data as
-        | { type: "manifest"; manifest: Manifest }
-        | { type: "data"; name: string; buffer: ArrayBuffer };
+        | { type: "manifest"; manifest: Manifest; timing?: { fetchMs: number } }
+        | { type: "data"; name: string; buffer: ArrayBuffer; timing?: FileTiming };
       if (message.type === "manifest") {
         this.manifest = message.manifest;
+        if (message.timing) this.manifestFetchMs = message.timing.fetchMs;
         this.notify("manifest");
         return;
       }
       if (!this.manifest) return;
+      if (message.timing) this.fileTimings[message.name] = message.timing;
       this.loaded.set(message.name, {
         meta: this.manifest.variables[message.name],
         data: new Float32Array(message.buffer),

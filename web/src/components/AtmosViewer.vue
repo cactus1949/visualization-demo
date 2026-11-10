@@ -5,7 +5,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { Manifest, VariableMeta } from "../data/manifest";
 import { DataStore } from "../data/store";
 import { AtmosScene, field2D, type Theme } from "../render/scene";
-import { FieldTextures, floatRange, domainOf, type Domain } from "../render/fields";
+import { FieldTextures, floatRange, domainOf, textureUploadMs, type Domain } from "../render/fields";
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
 import { VolumeLayer } from "../render/volume";
 import { Buildings } from "../render/buildings";
@@ -44,6 +44,40 @@ const gpu = ref("");
 const fps = ref(0);
 const drawCalls = ref(0);
 const loadMs = reactive<Record<string, number>>({});
+const uploadMs: Record<string, number> = {};
+
+function recordUpload(name: string, ms: number): void {
+  if (uploadMs[name] !== undefined) return;
+  uploadMs[name] = ms;
+  publishTimings();
+}
+
+let firstFrameMsValue: number | undefined;
+function publishTimings(extra: Record<string, unknown> = {}) {
+  const started = (window as any).__atmosStart as number | undefined;
+  const files = store?.fileTimings ? { ...store.fileTimings } : {};
+  const fetchDone = Object.fromEntries(Object.entries(files).map(([k, v]) => [k, v.fetchMs]));
+  const decodeDone = Object.fromEntries(Object.entries(files).map(([k, v]) => [k, v.decodeMs]));
+  if (typeof extra.firstFrameMs === "number") firstFrameMsValue = extra.firstFrameMs;
+  const payload = {
+    start: started ?? 0,
+    now: performance.now(),
+    sinceStartMs: started !== undefined ? performance.now() - started : undefined,
+    manifestMs: loadMs.manifest,
+    manifestFetchMs: store?.manifestFetchMs ?? undefined,
+    buildingsMs: loadMs.buildings,
+    files,
+    fetchMs: fetchDone,
+    decodeMs: decodeDone,
+    uploadMs: { ...textureUploadMs, ...uploadMs },
+    loadMs: { ...loadMs },
+    firstFrameMs: firstFrameMsValue,
+    ...extra,
+  };
+  (window as any).__atmosTimings = payload;
+  return payload;
+}
+
 const buildingsInfo = ref("加载中…");
 const speedRange = ref<[number, number]>([0, 15]);
 
@@ -147,6 +181,16 @@ function volumeFullRange(name: string): [number, number] {
   return [meta.data_min, meta.data_max];
 }
 
+/** Fixed colour scale from the manifest; independent of the current time step. */
+function displayRange(name: string): [number, number] | null {
+  if (name === SPEED || name === "speed0") {
+    const r = manifest.value?.derived?.speed?.display_range;
+    return r ? [r[0], r[1]] : null;
+  }
+  const r = manifest.value?.variables[name]?.display_range;
+  return r ? [r[0], r[1]] : null;
+}
+
 function resetVolumeFilter(name: string): void {
   const [lo, hi] = volumeFullRange(name);
   layers.volumeFilterMin = lo;
@@ -235,10 +279,13 @@ function binding(name: string): ScalarBinding | null {
 }
 
 /**
- * Auto colour range: 2nd–98th percentile of the whole 3D field, or of one model level when
- * `heightM` is given (horizontal slices). Diverging colormaps get a symmetric range.
+ * Colour range for a layer. "自动范围" uses the configured `display_range` so later
+ * time steps share one scale. Manual min/max still override this. The 2–98%
+ * percentile path is only a fallback for older manifests without display_range.
  */
 function autoRange(name: string, colormap: string, heightM?: number): [number, number] {
+  const configured = displayRange(name);
+  if (configured) return configured;
   const g = manifest.value!.grid;
   const n = g.nx * g.ny;
   let start = 0;
@@ -315,21 +362,15 @@ function updateGround(): void {
     if (!u || !v) return request("speed0");
     const read = (i: number) =>
       Math.hypot(u.data[i], v.data[i]);
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (let i = 0; i < domain.nx * domain.ny; i += 1) {
-      const s = read(i);
-      lo = Math.min(lo, s);
-      hi = Math.max(hi, s);
-    }
-    atmos.setGroundField(read, [lo, hi], "viridis", view.theme, 0.55);
+    const range = displayRange("speed0") ?? displayRange(SPEED) ?? [0, 20];
+    atmos.setGroundField(read, range, "viridis", view.theme, 0.55);
     return;
   }
   const data = loaded(name);
   if (!data) return request(name);
   const meta = data.meta;
   const cmap = meta.colormap === "rdbu" ? "rdbu" : meta.colormap;
-  const range: [number, number] = [meta.data_min, meta.data_max];
+  const range: [number, number] = displayRange(name) ?? [meta.data_min, meta.data_max];
   atmos.setGroundField(field2D(meta, data.data), range, cmap, view.theme, 0.55);
 }
 
@@ -414,9 +455,18 @@ function ensureParticles(): void {
   const v = loaded("v");
   const w = loaded("w");
   if (!u || !v || !w) return;
+  const tUpload = performance.now();
+  performance.mark("atmos:upload:wind:start");
   const texture = fields.windTexture(u.data, v.data, w.data, MAX_SPEED);
   fields.speed(u.data, v.data, MAX_SPEED);
+  performance.mark("atmos:upload:wind:end");
+  recordUpload("wind", performance.now() - tUpload);
   const wAbs = Math.max(Math.abs(w.meta.data_min), Math.abs(w.meta.data_max));
+  const colourSpeed = displayRange(SPEED) ?? ([...fields.speedRange] as [number, number]);
+  const wDisplay = displayRange("w");
+  const wRange = wDisplay
+    ? Math.max(Math.abs(wDisplay[0]), Math.abs(wDisplay[1]))
+    : Math.max(0.05, wAbs * 0.6);
   particles = new WindParticles(
     renderer,
     domain,
@@ -425,13 +475,13 @@ function ensureParticles(): void {
       scale: new THREE.Vector3(1, 1, 1),
       offset: new THREE.Vector3(0, 0, 0),
       maxSpeed: MAX_SPEED,
-      speedRange: [...fields.speedRange] as [number, number],
-      wRange: Math.max(0.05, wAbs * 0.6),
+      speedRange: colourSpeed,
+      wRange,
     },
     { ...particleParams },
   );
   atmos.root.add(particles.object);
-  speedRange.value = [...fields.speedRange] as [number, number];
+  speedRange.value = colourSpeed;
   status.value = "风场就绪";
 }
 
@@ -454,6 +504,7 @@ function onData(name: string): void {
   if (name === "manifest") return;
   if (requestedAt[name] !== undefined)
     loadMs[name] = Math.round(performance.now() - requestedAt[name]);
+  publishTimings();
   ensureParticles();
   updateSlice();
   updateSection();
@@ -745,6 +796,10 @@ function frame(now: number): void {
   renderer.render(atmos.scene, camera);
   if (!ready && particles) {
     ready = true;
+    performance.mark("atmos:first-frame");
+    const started = (window as any).__atmosStart as number | undefined;
+    const firstFrameMs = performance.now() - (started ?? 0);
+    publishTimings({ firstFrameMs });
     window.__atmosStatus = {
       backend: "WebGL2",
       gpu: gpu.value,
@@ -841,12 +896,15 @@ function exposeApi(): void {
     sampleParticle: () => particles?.sample() ?? [],
     sampleHistory: () => particles?.sampleHistory() ?? [],
     status: () => ({ ...window.__atmosStatus, fps: fps.value, drawCalls: drawCalls.value }),
+    timings: () => window.__atmosTimings ?? publishTimings(),
   };
 }
 
 async function start(): Promise<void> {
-  store = new DataStore(props.manifestUrl);
   const t0 = performance.now();
+  performance.mark("atmos:start");
+  (window as any).__atmosStart = t0;
+  store = new DataStore(props.manifestUrl);
   await new Promise<void>((resolve) => {
     const off = store.on((name) => {
       if (name === "manifest") {
@@ -862,7 +920,11 @@ async function start(): Promise<void> {
   fields = new FieldTextures(domain);
   resetVolumeFilter(layers.volumeVar);
   store.on(onData);
-  for (const n of ["u", "v", "w"]) request(n);
+  // The worker already preloads u, v, w then tke, t2m; do not request them again
+  // or a second fetch can start on a slow network before the first is cached.
+  for (const n of ["u", "v", "w", "tke", "t2m"]) {
+    if (requestedAt[n] === undefined) requestedAt[n] = performance.now();
+  }
 
   renderer = new THREE.WebGLRenderer({
     canvas: canvas.value!,
@@ -911,6 +973,12 @@ async function start(): Promise<void> {
   updateGround();
   raf = requestAnimationFrame(frame);
 
+  const skipBuildings = new URLSearchParams(location.search).has("noBuildings");
+  if (skipBuildings) {
+    loadMs.buildings = 0;
+    buildingsInfo.value = "已跳过";
+    return;
+  }
   buildings = new Buildings();
   atmos.root.add(buildings.group);
   const tb = performance.now();
@@ -1055,7 +1123,11 @@ const legends = computed(() => {
           ? "height"
           : SPEED;
     const range: [number, number] =
-      name === SPEED ? speedRange.value : name === "w" ? [-0.3, 0.3] : [0, 1000];
+      name === SPEED
+        ? (displayRange(SPEED) ?? speedRange.value)
+        : name === "w"
+          ? (displayRange("w") ?? [-0.2, 0.2])
+          : [0, 1000];
     out.push({
       key: "particles",
       title: `粒子 · ${name === "height" ? "高度" : labelOf(name)}`,

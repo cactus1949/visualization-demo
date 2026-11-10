@@ -1,8 +1,8 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "case": "tianjin_18km",
   "source_file": "data/lowair_atmos.nc",
-  "created_utc": "2026-11-10T07:20:11.618741+00:00",
+  "created_utc": "2026-11-10T08:01:39.862196+00:00",
   "global_attrs": {
     "case": "tianjin_18km",
     "solver": "steady neutral ABL, Arakawa-C FVM, transported k-epsilon (torch)",
@@ -134,6 +134,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        -15.0,
+        15.0
+      ],
       "range": [
         -20,
         20
@@ -169,6 +173,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        -15.0,
+        15.0
+      ],
       "range": [
         -20,
         20
@@ -204,6 +212,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        -0.2,
+        0.2
+      ],
       "range": [
         -1,
         1
@@ -240,6 +252,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        25.0
+      ],
       "range": [
         0,
         30
@@ -357,6 +373,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        13.0
+      ],
       "range": [
         0,
         15
@@ -474,6 +494,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        4.0
+      ],
       "range": [
         0,
         5
@@ -591,6 +615,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        3.0
+      ],
       "range": [
         0,
         5
@@ -708,6 +736,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        2.0
+      ],
       "range": [
         0,
         5
@@ -825,6 +857,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        0.2
+      ],
       "range": [
         0,
         0.25
@@ -942,6 +978,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        -0.05,
+        0.05
+      ],
       "range": [
         -0.5,
         0.5
@@ -1059,6 +1099,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        1.0
+      ],
       "range": [
         0,
         1
@@ -1176,6 +1220,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        600.0
+      ],
       "range": [
         0,
         600
@@ -1291,6 +1339,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        270.0,
+        280.0
+      ],
       "range": [
         260,
         300
@@ -1324,6 +1376,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        0.008
+      ],
       "range": [
         0,
         0.02
@@ -1357,6 +1413,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        -8.0,
+        8.0
+      ],
       "range": [
         -20,
         20
@@ -1390,6 +1450,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        -8.0,
+        8.0
+      ],
       "range": [
         -20,
         20
@@ -1423,6 +1487,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        2.0
+      ],
       "range": [
         0,
         3
@@ -1456,6 +1524,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        2.5
+      ],
       "range": [
         0,
         5
@@ -1489,6 +1561,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        100.0
+      ],
       "range": [
         0,
         100
@@ -1522,6 +1598,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        100.0
+      ],
       "range": [
         0,
         100
@@ -1555,6 +1635,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        200.0,
+        5000.0
+      ],
       "range": [
         2,
         4.5
@@ -1588,6 +1672,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        0.0,
+        4.0
+      ],
       "range": [
         0,
         4
@@ -1621,6 +1709,10 @@
       "clipped_low_frac": 0.0,
       "clipped_high_frac": 0.0,
       "nan_count": 0,
+      "display_range": [
+        100000.0,
+        103000.0
+      ],
       "range": [
         90000,
         110000
@@ -1633,9 +1725,17 @@
       "offset": 101325.0
     }
   },
+  "derived": {
+    "speed": {
+      "display_range": [
+        0.0,
+        20.0
+      ]
+    }
+  },
   "timing": {
-    "load_s": 0.042472250002902,
-    "total_s": 5.036628442998335,
+    "load_s": 0.0548970019999615,
+    "total_s": 5.071124150000003,
     "bytes_raw": 54990000,
     "bytes_compressed": 12536830
   }

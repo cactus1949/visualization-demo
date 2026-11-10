@@ -6,5 +6,7 @@ declare global {
     __atmosReady?: boolean;
     __atmosStatus?: Record<string, unknown> & { fps?: number; buildings?: number };
     __atmosApi?: Record<string, (...args: any[]) => unknown>;
+    __atmosStart?: number;
+    __atmosTimings?: Record<string, unknown>;
   }
 }

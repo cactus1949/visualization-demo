@@ -10,6 +10,7 @@ export interface VariableMeta {
   level_scale?: number[];
   level_offset?: number[];
   transform: "log10" | "log1p" | "signed_sqrt" | null;
+  display_range: [number, number];
   range: [number, number];
   units: string;
   long_name: string;
@@ -50,6 +51,7 @@ export interface Manifest {
   global_attrs: Record<string, unknown>;
   grid: GridMeta;
   variables: Record<string, VariableMeta>;
+  derived?: Record<string, { display_range: [number, number] }>;
   timing: {
     load_s: number;
     total_s: number;

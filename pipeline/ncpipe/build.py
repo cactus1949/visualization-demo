@@ -58,10 +58,12 @@ def build(input_path: str | Path, config_path: str | Path, out_dir: str | Path,
                                         tuple(spec.get("clip_percentiles", [0, 100])), spec.get("fixed_range"))
         raw = encoded.astype("<f2" if meta["dtype"] == "float16" else ("<u2" if meta["dtype"] == "uint16" else "u1"), copy=False).tobytes(order="C")
         filename = f"{name}.bin.br"; compressed = _write_compressed(output / filename, raw)
+        display = spec.get("display_range") or labels.get(name, {}).get("range") or [meta["data_min"], meta["data_max"]]
         entry = {"dims": dims, "shape": list(encoded.shape), "encoding": meta["encoding"], "range_scope": meta["range_scope"],
                  "dtype": meta["dtype"], "bits": meta["bits"], "transform": meta.get("transform"), "file": filename,
                  "bytes_raw": len(raw), "bytes_compressed": compressed, "data_min": meta["data_min"], "data_max": meta["data_max"],
                  "clipped_low_frac": meta["clipped_low_frac"], "clipped_high_frac": meta["clipped_high_frac"], "nan_count": meta["nan_count"],
+                 "display_range": [float(display[0]), float(display[1])],
                  "range": labels.get(name, {}).get("range", [meta["data_min"], meta["data_max"]]), "units": attrs.get("units", ""),
                  "long_name": attrs.get("long_name", name), "label_zh": labels.get(name, {}).get("label_zh", name),
                  "colormap": labels.get(name, {}).get("colormap", "viridis")}
@@ -72,8 +74,13 @@ def build(input_path: str | Path, config_path: str | Path, out_dir: str | Path,
         print(f"{name}: raw={len(raw)/1e6:.2f}MB br={compressed/1e6:.2f}MB")
     for stale in output.glob("*.u16.bin.br"): stale.unlink()
     selected_attrs = {k: _jsonable(v) for k, v in dataset.attrs.items() if k in {"case", "solver", "backend", "dx_m", "dy_m", "dz_m", "ztop_m"}}
-    manifest = {"schema_version": 2, "case": str(dataset.attrs.get("case", "")), "source_file": str(input_path), "created_utc": datetime.now(timezone.utc).isoformat(),
-                "global_attrs": selected_attrs, "grid": grid, "variables": variables,
+    derived = {}
+    for key, value in ((quant_cfg or {}).get("derived") or {}).items():
+        if isinstance(value, dict) and value.get("display_range"):
+            lo, hi = value["display_range"]
+            derived[key] = {"display_range": [float(lo), float(hi)]}
+    manifest = {"schema_version": 3, "case": str(dataset.attrs.get("case", "")), "source_file": str(input_path), "created_utc": datetime.now(timezone.utc).isoformat(),
+                "global_attrs": selected_attrs, "grid": grid, "variables": variables, "derived": derived,
                 "timing": {"load_s": load_seconds, "total_s": time.perf_counter()-started, "bytes_raw": total_raw, "bytes_compressed": total_compressed}}
     (output / "manifest.json").write_text(json.dumps(_jsonable(manifest), ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest

@@ -1,29 +1,35 @@
-# Per-variable storage and quantisation policy.  Ranges are computed from the data
-# (after the optional transform) unless fixed_range is supplied.
+# Per-variable storage and colour-scale policy.
+# Quantisation ranges are computed from the data (after the optional transform)
+# unless fixed_range is supplied. display_range is the fixed physical colour
+# scale used by the frontend (colormap / legend) and is independent of
+# encoding and range_scope, so later time steps share one scale.
 defaults:
   encoding: u8_linear
   range_scope: global
   clip_percentiles: [0, 100]
-u: {encoding: f16, range_scope: global}
-v: {encoding: f16, range_scope: global}
-w: {encoding: f16, range_scope: global}
-u_gust: {encoding: u8_linear, range_scope: per_level}
-tke: {encoding: u8_linear, range_scope: per_level}
-sigma_u: {encoding: u8_linear, range_scope: per_level}
-sigma_v: {encoding: u8_linear, range_scope: per_level}
-sigma_w: {encoding: u8_linear, range_scope: per_level}
-wind_shear: {encoding: u8_log10, range_scope: per_level}
-dirdz: {encoding: u8_linear, range_scope: per_level}
-icing_index: {encoding: u8_linear, range_scope: per_level}
-icing_accum: {encoding: u8_linear, range_scope: per_level}
-t2m: {encoding: u8_linear, range_scope: global}
-q2m: {encoding: u8_linear, range_scope: global}
-u10m: {encoding: u8_linear, range_scope: global}
-v10m: {encoding: u8_linear, range_scope: global}
-ustar: {encoding: u8_linear, range_scope: global}
-precip: {encoding: u8_linear, range_scope: global}
-cloud: {encoding: u8_linear, range_scope: global}
-cloud_low: {encoding: u8_linear, range_scope: global}
-visibility: {encoding: u8_log10, range_scope: global}
-risk_level: {encoding: u8_linear, range_scope: global}
-p: {encoding: u8_linear, range_scope: global}
+# Derived horizontal speed (from u, v) is not stored; the frontend reads this.
+derived:
+  speed: {display_range: [0, 20]}
+u: {encoding: f16, range_scope: global, display_range: [-15, 15]}
+v: {encoding: f16, range_scope: global, display_range: [-15, 15]}
+w: {encoding: f16, range_scope: global, display_range: [-0.2, 0.2]}
+u_gust: {encoding: u8_linear, range_scope: per_level, display_range: [0, 25]}
+tke: {encoding: u8_linear, range_scope: per_level, display_range: [0, 13]}
+sigma_u: {encoding: u8_linear, range_scope: per_level, display_range: [0, 4]}
+sigma_v: {encoding: u8_linear, range_scope: per_level, display_range: [0, 3]}
+sigma_w: {encoding: u8_linear, range_scope: per_level, display_range: [0, 2]}
+wind_shear: {encoding: u8_log10, range_scope: per_level, display_range: [0, 0.2]}
+dirdz: {encoding: u8_linear, range_scope: per_level, display_range: [-0.05, 0.05]}
+icing_index: {encoding: u8_linear, range_scope: per_level, display_range: [0, 1]}
+icing_accum: {encoding: u8_linear, range_scope: per_level, display_range: [0, 600]}
+t2m: {encoding: u8_linear, range_scope: global, display_range: [270, 280]}
+q2m: {encoding: u8_linear, range_scope: global, display_range: [0, 0.008]}
+u10m: {encoding: u8_linear, range_scope: global, display_range: [-8, 8]}
+v10m: {encoding: u8_linear, range_scope: global, display_range: [-8, 8]}
+ustar: {encoding: u8_linear, range_scope: global, display_range: [0, 2]}
+precip: {encoding: u8_linear, range_scope: global, display_range: [0, 2.5]}
+cloud: {encoding: u8_linear, range_scope: global, display_range: [0, 100]}
+cloud_low: {encoding: u8_linear, range_scope: global, display_range: [0, 100]}
+visibility: {encoding: u8_log10, range_scope: global, display_range: [200, 5000]}
+risk_level: {encoding: u8_linear, range_scope: global, display_range: [0, 4]}
+p: {encoding: u8_linear, range_scope: global, display_range: [100000, 103000]}

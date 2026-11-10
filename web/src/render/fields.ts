@@ -74,6 +74,9 @@ function make3D(data: Float32Array, d: Domain, format: THREE.AnyPixelFormat, cha
   return texture;
 }
 
+/** Wall time of the first upload of each named 3D texture, in milliseconds. */
+export const textureUploadMs: Record<string, number> = {};
+
 /** Uploads each variable once; layers only swap texture references afterwards. */
 export class FieldTextures {
   private scalars = new Map<string, THREE.Data3DTexture>();
@@ -89,7 +92,11 @@ export class FieldTextures {
   scalar(name: string, data: Float32Array): THREE.Data3DTexture {
     let texture = this.scalars.get(name);
     if (!texture) {
+      const t0 = performance.now();
+      performance.mark(`atmos:upload:${name}:start`);
       texture = make3D(data, this.domain, THREE.RedFormat);
+      performance.mark(`atmos:upload:${name}:end`);
+      textureUploadMs[name] = performance.now() - t0;
       this.scalars.set(name, texture);
     }
     return texture;

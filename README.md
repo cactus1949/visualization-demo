@@ -30,7 +30,7 @@ PYTHONPATH=pipeline /workspace/.venv-nc/bin/python -m ncpipe build \
   --out data/web/lowair_atmos
 ```
 
-每个变量按 `pipeline/config/quant_config.yaml` 编码，再经 Brotli（quality 9）压缩。配置里可以写编码（`u8_linear`、`u16_linear`、`f16`、`u8_log10` 等）、区间范围（`global` 或 `per_level`），以及可选的分位数裁剪。本案例中 u、v、w 存成 float16（也测过逐层 u16，体积更大、更难压）；温度、湿度等窄区间的 2D 变量，以及多数脉动、结冰类 3D 变量，用 8 位线性；`visibility` 和跨数量级的 `wind_shear` 用 log10。`tke` 在这份数据里大约 2.4–12.7，没有跨数量级，所以仍用逐层 8 位线性。区间默认按数据的 min/max（或分位数）计算，不再使用 `variables.yaml` 里的固定范围；后者只保留中文名、色带和参考范围。`w` 仍从 41 个界面层平均到 40 个层中心。manifest 记录 encoding、dtype，以及全局或逐层的 scale/offset。
+每个变量按 `pipeline/config/quant_config.yaml` 编码，再经 Brotli（quality 9）压缩。配置里可以写编码（`u8_linear`、`u16_linear`、`f16`、`u8_log10` 等）、区间范围（`global` 或 `per_level`），以及可选的分位数裁剪。本案例中 u、v、w 存成 float16（也测过逐层 u16，体积更大、更难压）；温度、湿度等窄区间的 2D 变量，以及多数脉动、结冰类 3D 变量，用 8 位线性；`visibility` 和跨数量级的 `wind_shear` 用 log10。`tke` 在这份数据里大约 2.4–12.7，没有跨数量级，所以仍用逐层 8 位线性。量化区间默认按数据的 min/max（或分位数）计算，只影响存储。色带和色例使用配置里的固定 `display_range`（物理单位），与量化范围无关，后一个时次也会用同一套颜色。`variables.yaml` 仍只保留中文名、色带和参考范围。`w` 仍从 41 个界面层平均到 40 个层中心。manifest 记录 encoding、dtype，以及全局或逐层的 scale/offset。
 
 ### 建筑白膜
 
@@ -78,7 +78,7 @@ npx vite preview --port 4173 --strictPort
 | 垂直剖面 | 开关、变量、位置偏移、方位角（0–180°）、色带、自动或手动范围、不透明度、等值线条数                                                                                                                                       |
 | 视图     | 垂直夸张（1–10 倍）、建筑阴影、深色 / 浅色主题、总览 / 近景 / 俯视                                                                                                                                                       |
 
-色带有 Glacier（粒子默认）、Viridis、Magma、Turbo、Cividis、Inferno、Blues，以及发散型 RdBu 和 Coolwarm。`w`、`u`、`v` 这类有正有负的变量默认用 RdBu，范围关于 0 对称。自动范围取 2%–98% 分位数（水平切片按当前高度层统计），极端值不会把颜色压扁。
+色带有 Glacier（粒子默认）、Viridis、Magma、Turbo、Cividis、Inferno、Blues，以及发散型 RdBu 和 Coolwarm。`w`、`u`、`v` 这类有正有负的变量默认用 RdBu，范围关于 0 对称。自动范围使用配置里的固定 `display_range`，不按当前时次重算分位数；也可以改成手动范围。体渲染的“显示范围”过滤器仍按物理值裁剪，和色带范围相互独立。
 
 ## 架构
 

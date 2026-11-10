@@ -20,6 +20,9 @@ def test_manifest_real():
             assert len(v["level_offset"]) == v["shape"][0]
         elif v["dtype"] != "float16":
             assert "scale" in v and "offset" in v
+        assert len(v["display_range"]) == 2
+        assert v["display_range"][1] > v["display_range"][0]
+    assert m.get("derived", {}).get("speed", {}).get("display_range")
 
 
 def test_wind_is_f16():
