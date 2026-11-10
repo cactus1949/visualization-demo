@@ -1,9 +1,9 @@
 // Headless screenshots of the demo (software WebGL via SwiftShader — FPS is NOT representative).
-// usage: node scripts/screenshot.mjs [url] [overview|slice|section|close|panel] [out.png]
+// usage: node scripts/screenshot.mjs [url] [overview|slice|section|close|embedded|filter|panel] [out.png]
 import { chromium } from "playwright-core";
 
 const args = process.argv.slice(2);
-const VIEWS = ["overview", "slice", "section", "close", "panel"];
+const VIEWS = ["overview", "slice", "section", "close", "embedded", "filter", "panel"];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
 const base = args.find((a) => a.startsWith("http")) ?? "http://localhost:4173/";
@@ -42,14 +42,39 @@ await page.evaluate((v) => {
     api.probeAt(150, 160);
   } else if (v === "close") {
     api.setView("close");
+    api.setParticles({ paused: true });
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+  } else if (v === "embedded") {
+    api.setView("close");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    // slightly lower opacity so façades stay readable in the close view
+    api.setVolume({ enabled: true, variable: "tke", opacity: 0.4, filterSlices: false });
+  } else if (v === "filter") {
+    api.setView("close");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({
+      enabled: true,
+      variable: "tke",
+      filterMin: 8.5,
+      filterMax: 12.5,
+      filterSlices: false,
+    });
   } else if (v === "panel") {
     api.setView("overview");
-    api.setSection({ variable: "w", azimuthDeg: 110, offsetKm: 1.5 });
-    api.probeAt(140, 150);
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
   } else {
     api.setView("overview");
   }
 }, view);
+if (["embedded", "filter", "panel", "close"].includes(view)) {
+  await page.waitForFunction(() => window.__atmosStatus?.volume === "tke", null, {
+    timeout: 90_000,
+  });
+}
 await page.waitForTimeout(1500);
 // software GL renders ~1 fps: pre-run 40 simulation steps so trails are fully grown
 await page.evaluate(() => {

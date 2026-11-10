@@ -49,6 +49,9 @@ uniform float uOffset;
 uniform float uLog;
 uniform float uMin;
 uniform float uMax;
+uniform float uFilterMin;
+uniform float uFilterMax;
+uniform float uFilterEnable;
 uniform float uOpacity;
 uniform float uContours;
 uniform float uHighlight;
@@ -59,6 +62,7 @@ void main() {
   if (!insideDomain(vLocal)) discard;
   float raw = texture(uField, localToTex(vLocal)).r * 255.0 * uScale + uOffset;
   float value = uLog > 0.5 ? pow(10.0, raw) : raw;
+  if (uFilterEnable > 0.5 && (value < uFilterMin - 1e-6 || value > uFilterMax + 1e-6)) discard;
   float t = clamp((value - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
   vec3 color = texture(uColormap, vec2(t, 0.5)).rgb;
   if (uContours > 0.5) {
@@ -89,6 +93,9 @@ export class SliceMaterial extends THREE.ShaderMaterial {
         uLog: { value: 0 },
         uMin: { value: 0 },
         uMax: { value: 1 },
+        uFilterMin: { value: 0 },
+        uFilterMax: { value: 1 },
+        uFilterEnable: { value: 0 },
         uOpacity: { value: 0.9 },
         uContours: { value: 0 },
         uHighlight: { value: 0 },
@@ -120,6 +127,12 @@ export class SliceMaterial extends THREE.ShaderMaterial {
     // Slices always write depth: particles behind a slice are hidden by it (drawn later),
     // opaque buildings are drawn earlier and stay visible through translucent slices.
     this.depthWrite = true;
+  }
+
+  setFilter(min: number, max: number, enabled: boolean): void {
+    this.uniforms.uFilterMin.value = Math.min(min, max);
+    this.uniforms.uFilterMax.value = Math.max(min, max);
+    this.uniforms.uFilterEnable.value = enabled ? 1 : 0;
   }
 }
 

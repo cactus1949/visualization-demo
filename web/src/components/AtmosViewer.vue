@@ -18,6 +18,7 @@ import {
 import { COLORMAPS, COLORMAP_LABELS, DIVERGING } from "../render/colormaps";
 import ColorLegend from "./ColorLegend.vue";
 import ProfileChart from "./ProfileChart.vue";
+import RangeSlider from "./RangeSlider.vue";
 
 const props = withDefaults(defineProps<{ manifestUrl?: string; showPanel?: boolean }>(), {
   manifestUrl: "/data/lowair_atmos/manifest.json",
@@ -56,6 +57,9 @@ const layers = reactive({
   volumeVar: "tke",
   volumeOpacity: 0.6,
   volumeThreshold: 0.2,
+  volumeFilterMin: 0,
+  volumeFilterMax: 1,
+  filterSlices: false,
 });
 const particleParams = reactive<ParticleParams>({ ...DEFAULT_PARTICLES });
 const slice = reactive({
@@ -133,6 +137,45 @@ function defaultColormap(name: string): string {
   return meta.colormap === "blues" ? "cividis" : meta.colormap;
 }
 
+function volumeFullRange(name: string): [number, number] {
+  if (name === SPEED) return [...fields.speedRange] as [number, number];
+  const meta = manifest.value?.variables[name];
+  if (!meta) return [0, 1];
+  return meta.transform === "log10"
+    ? [Math.pow(10, meta.range[0]), Math.pow(10, meta.range[1])]
+    : [meta.data_min, meta.data_max];
+}
+
+function resetVolumeFilter(name: string): void {
+  const [lo, hi] = volumeFullRange(name);
+  layers.volumeFilterMin = lo;
+  layers.volumeFilterMax = hi;
+  volumeFilterVariable.value = name;
+  volumeFilterNeedsSpeedRange.value = name === SPEED && !fields.speedBytes;
+}
+
+function updateSliceFilter(): void {
+  const enabled = layers.filterSlices;
+  hslice?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
+  vsection?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
+}
+
+function updateVolumeFilter(): void {
+  if (layers.volumeFilterMin > layers.volumeFilterMax) {
+    [layers.volumeFilterMin, layers.volumeFilterMax] = [
+      layers.volumeFilterMax,
+      layers.volumeFilterMin,
+    ];
+  }
+  volume?.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, layers.volume);
+  updateSliceFilter();
+}
+
+const volumeBounds = computed<[number, number]>(() => {
+  if (!manifest.value || !fields) return [0, 1];
+  return volumeFullRange(layers.volumeVar);
+});
+
 // ---------------------------------------------------------------- three.js objects
 let store: DataStore;
 let renderer: THREE.WebGLRenderer;
@@ -150,6 +193,10 @@ let resizeObserver: ResizeObserver | null = null;
 let raf = 0;
 let disposed = false;
 const requestedAt: Record<string, number> = {};
+const volumeColorRange = ref<[number, number]>([0, 1]);
+const volumeFilterVariable = ref("");
+const volumeFilterNeedsSpeedRange = ref(false);
+const depthOccluders: THREE.Object3D[] = [];
 
 const loaded = (name: string) => store?.loaded.get(name);
 
@@ -234,6 +281,7 @@ function updateSlice(): void {
     [slice.min, slice.max] = autoRange(slice.variable, slice.colormap, slice.heightM);
   hslice.material.bind(b);
   hslice.material.style(slice);
+  updateSliceFilter();
   hslice.setHeightKm(slice.heightM / 1000);
 }
 
@@ -250,6 +298,7 @@ function updateSection(): void {
   if (section.autoRange) [section.min, section.max] = autoRange(section.variable, section.colormap);
   vsection.material.bind(b);
   vsection.material.style(section);
+  updateSliceFilter();
 }
 
 function updateGround(): void {
@@ -290,18 +339,31 @@ function updateGround(): void {
 function updateVolume(): void {
   if (!volume || !manifest.value) return;
   volume.mesh.visible = layers.volume;
-  if (!layers.volume) return;
+  if (!layers.volume) {
+    if (window.__atmosStatus) window.__atmosStatus.volume = null;
+    return;
+  }
   const b = binding(layers.volumeVar);
   if (!b) {
     volume.mesh.visible = false;
     request(layers.volumeVar);
     return;
   }
+  if (layers.volumeVar === SPEED && volumeFilterNeedsSpeedRange.value && fields.speedBytes) {
+    resetVolumeFilter(SPEED);
+  } else if (volumeFilterVariable.value !== layers.volumeVar) {
+    resetVolumeFilter(layers.volumeVar);
+  }
   const cmap = defaultColormap(layers.volumeVar);
   const [lo, hi] = autoRange(layers.volumeVar, cmap);
+  volumeColorRange.value = [lo, hi];
   volume.bind(b, cmap === "rdbu" ? "magma" : cmap, lo, hi);
   volume.material.uniforms.uOpacity.value = layers.volumeOpacity;
   volume.material.uniforms.uThreshold.value = layers.volumeThreshold;
+  updateVolumeFilter();
+  if (window.__atmosStatus) {
+    window.__atmosStatus.volume = volume.mesh.visible ? layers.volumeVar : null;
+  }
 }
 
 function ensureParticles(): void {
@@ -327,6 +389,7 @@ function ensureParticles(): void {
     { ...particleParams },
   );
   atmos.root.add(particles.object);
+  depthOccluders.push(particles.object);
   speedRange.value = [...fields.speedRange] as [number, number];
   status.value = "风场就绪";
 }
@@ -567,6 +630,7 @@ function frame(now: number): void {
   controls.update();
   atmos.root.scale.y = view.exaggeration;
   atmos.root.updateMatrixWorld();
+  camera.updateMatrixWorld();
   vsection?.setHandleScale(view.exaggeration);
   hslice?.material.setRoot(atmos.root);
   vsection?.material.setRoot(atmos.root);
@@ -574,7 +638,10 @@ function frame(now: number): void {
     particles.object.visible = layers.particles;
     if (layers.particles) particles.step(dt);
   }
-  if (volume?.mesh.visible) volume.update(camera, atmos.root);
+  if (volume?.mesh.visible) {
+    volume.captureDepth(renderer, atmos.scene, camera, depthOccluders);
+    volume.update(camera, atmos.root, renderer);
+  }
   renderer.render(atmos.scene, camera);
   if (!ready && particles) {
     ready = true;
@@ -598,6 +665,7 @@ function resize(): void {
   const h = canvas.value.clientHeight;
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
   renderer.setSize(w, h, false);
+  volume?.resize(renderer);
   camera.aspect = w / Math.max(1, h);
   camera.updateProjectionMatrix();
 }
@@ -610,6 +678,27 @@ function exposeApi(): void {
     setParticles: (p: Partial<ParticleParams>) => Object.assign(particleParams, p),
     setLayer: (name: string, on: boolean) => {
       if (name in layers) (layers as Record<string, unknown>)[name] = on;
+    },
+    setVolume: (p: {
+      enabled?: boolean;
+      variable?: string;
+      opacity?: number;
+      threshold?: number;
+      filterMin?: number;
+      filterMax?: number;
+      filterSlices?: boolean;
+    }) => {
+      if (p.variable !== undefined) {
+        layers.volumeVar = p.variable;
+        if (p.filterMin === undefined && p.filterMax === undefined) resetVolumeFilter(p.variable);
+        else volumeFilterVariable.value = p.variable;
+      }
+      if (p.enabled !== undefined) layers.volume = p.enabled;
+      if (p.opacity !== undefined) layers.volumeOpacity = p.opacity;
+      if (p.threshold !== undefined) layers.volumeThreshold = p.threshold;
+      if (p.filterMin !== undefined) layers.volumeFilterMin = p.filterMin;
+      if (p.filterMax !== undefined) layers.volumeFilterMax = p.filterMax;
+      if (p.filterSlices !== undefined) layers.filterSlices = p.filterSlices;
     },
     setCamera: (pos: [number, number, number], target: [number, number, number]) => {
       camera.position.set(...pos);
@@ -647,6 +736,7 @@ async function start(): Promise<void> {
   manifest.value = store.manifest;
   domain = domainOf(store.manifest);
   fields = new FieldTextures(domain);
+  resetVolumeFilter(layers.volumeVar);
   store.on(onData);
   for (const n of ["u", "v", "w"]) request(n);
 
@@ -671,6 +761,7 @@ async function start(): Promise<void> {
   hslice = new HorizontalSlice(domain);
   vsection = new VerticalSection(domain);
   volume = new VolumeLayer(domain);
+  depthOccluders.push(hslice.group, vsection.group);
   hslice.group.visible = false;
   vsection.group.visible = false;
   volume.mesh.visible = false;
@@ -761,6 +852,16 @@ watch(
   updateVolume,
 );
 watch(
+  () => layers.volumeVar,
+  (name) => {
+    if (name !== volumeFilterVariable.value) resetVolumeFilter(name);
+  },
+);
+watch(
+  () => [layers.volumeFilterMin, layers.volumeFilterMax, layers.filterSlices],
+  updateVolumeFilter,
+);
+watch(
   () => [layers.buildings, layers.buildingOpacity, view.exaggeration, view.shadows],
   applyBuildings,
 );
@@ -790,6 +891,8 @@ const legends = computed(() => {
     colormap: string;
     min: number;
     max: number;
+    windowMin?: number;
+    windowMax?: number;
   }[] = [];
   if (section.enabled)
     out.push({
@@ -825,6 +928,19 @@ const legends = computed(() => {
       colormap: particleParams.colormap,
       min: range[0],
       max: range[1],
+    });
+  }
+  if (layers.volume) {
+    out.push({
+      key: "volume",
+      title: `体渲染 · ${labelOf(layers.volumeVar)}`,
+      units: unitsOf(layers.volumeVar),
+      colormap:
+        defaultColormap(layers.volumeVar) === "rdbu" ? "magma" : defaultColormap(layers.volumeVar),
+      min: volumeColorRange.value[0],
+      max: volumeColorRange.value[1],
+      windowMin: layers.volumeFilterMin,
+      windowMax: layers.volumeFilterMax,
     });
   }
   return out;
@@ -870,6 +986,8 @@ onBeforeUnmount(() => {
         :colormap="l.colormap"
         :min="l.min"
         :max="l.max"
+        :window-min="l.windowMin"
+        :window-max="l.windowMax"
       />
     </div>
 
@@ -947,6 +1065,22 @@ onBeforeUnmount(() => {
               max="0.95"
               step="0.01"
           /></label>
+          <div class="slider range-label">
+            <span>显示范围</span>
+            <RangeSlider
+              :min="volumeBounds[0]"
+              :max="volumeBounds[1]"
+              :min-value="layers.volumeFilterMin"
+              :max-value="layers.volumeFilterMax"
+              :unit="unitsOf(layers.volumeVar)"
+              :step="Math.max((volumeBounds[1] - volumeBounds[0]) / 200, 1e-6)"
+              @update:min-value="layers.volumeFilterMin = $event"
+              @update:max-value="layers.volumeFilterMax = $event"
+            />
+          </div>
+          <label class="row"
+            ><input v-model="layers.filterSlices" type="checkbox" />截面同步过滤</label
+          >
         </template>
       </details>
 
