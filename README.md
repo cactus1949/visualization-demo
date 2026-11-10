@@ -7,7 +7,7 @@
 - **建筑白膜**：13 万栋建筑，按真实高度拉伸，和风场网格对齐。
 - **GPGPU 风粒子**：粒子位置和历史轨迹都放在 GPU 浮点纹理里计算，拖尾是真实的三维几何，转动相机时不会断。尾迹长度、线宽、数量、配色等参数都能实时调。
 - **GPU 采样切片**：水平切片和可拖动、可旋转的垂直剖面直接在片元着色器里采样 3D 纹理，拖动时只改变换矩阵或 4 个顶点，CPU 不重新生成数据。
-- **探针廓线**：鼠标悬停或双击固定一个位置，显示该点 40 层的风速、风向和所选变量的垂直廓线。
+- **探针廓线**：打开“探针”后悬停只预览 3D 气象站位置（不改读数），单击（非拖动）固定并更新该点 40 层的风速、风向和所选变量廓线；可选“跟随鼠标”实时更新读数。
 
 ## 目录结构
 
@@ -66,7 +66,7 @@ npx vite preview --port 4173 --strictPort
 
 - 左键拖动旋转视角，右键平移，滚轮缩放，相机带阻尼。
 - 鼠标按在垂直剖面上拖动可以平移剖面；按住 Shift 拖动，或拖剖面顶部的青色手柄，可以旋转剖面。
-- 鼠标悬停时左上角显示探针廓线，双击固定探针。
+- 打开右侧“探针”：悬停显示预览标记，单击（非拖动）固定位置并更新左侧廓线；“跟随鼠标”开启后悬停也会更新读数。
 
 ### 控制面板参数
 
@@ -100,8 +100,8 @@ nc ─ ncpipe ─▶ data/web/*.bin.br ─ Worker 解压并解码为 Float32 ─
 - **切片**（`slices.ts`）：片元着色器把片元的 root 局部坐标换算成 3D 纹理坐标后采样（高度层在层中心，所以纹理 r 坐标正好是 h / 1000 m），查色带，等值线用 `fwidth` 做抗锯齿。开启“截面同步过滤”时，切片和剖面也会按体渲染的物理区间丢弃片元；这适合它们显示同一个变量或同单位变量。垂直剖面在 CPU 上按方位角和偏移把四个顶点裁剪到计算域内，每次拖动只更新 4 个顶点。
 - **体渲染**（`volume.ts`）：每帧先把体和粒子隐藏，在带深度纹理的目标中渲染地面和建筑；半透明切片/剖面在光线步进里按交点合成，背后的体可以透过并受不透明度减弱，不透明度约为 1 时仍挡住后面的体；体渲染关闭时切片仍走原来的网格绘制。体盒从地面 0 m 开始，第一层中心为 12.5 m，半层由纹理坐标处理，顶部为 1000 m；建筑和体渲染共用 `root.scale.y` 的垂直夸张。
 - **建筑**（`buildings.ts`）：`MeshStandardMaterial`，开启 flatShading，并通过 `onBeforeCompile` 把墙脚约 28 m 压暗，模拟环境光遮蔽；配合方向光阴影（4096² 阴影贴图）。
-- **探针**：直接读内存中解码后的 Float32 数组（每次 40 个值），每帧最多做一次射线检测，只检测地面和切片，不检测 192 万个建筑三角形。
-- `window.__atmosApi` 提供 `setView / setSection / setSlice / setParticles / setLayer / setVolume / setCamera / probeAt / advance / status`，供截图和录屏脚本调用（`web/scripts/screenshot.mjs`、`web/scripts/record.mjs`）。
+- **探针**：直接读内存中解码后的 Float32 数组（每次 40 个值），每帧最多做一次射线检测，只检测地面和切片，不检测 192 万个建筑三角形；固定点显示为贯穿场景高度的 3D 气象站标记。
+- `window.__atmosApi` 提供 `setView / setSection / setSlice / setParticles / setLayer / setVolume / setCamera / setProbeEnabled / setProbeFollowMouse / probeAt / probeHoverAt / advance / status`，供截图和录屏脚本调用（`web/scripts/screenshot.mjs`、`web/scripts/record.mjs`）。
 
 ## 生产部署
 

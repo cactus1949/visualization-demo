@@ -9,6 +9,7 @@ import { FieldTextures, floatRange, domainOf, type Domain } from "../render/fiel
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
 import { VolumeLayer } from "../render/volume";
 import { Buildings } from "../render/buildings";
+import { ProbeMarker } from "../render/probeMarker";
 import {
   DEFAULT_PARTICLES,
   WindParticles,
@@ -60,6 +61,8 @@ const layers = reactive({
   volumeFilterMin: 0,
   volumeFilterMax: 1,
   filterSlices: false,
+  probe: false,
+  probeFollowMouse: false,
 });
 const particleParams = reactive<ParticleParams>({ ...DEFAULT_PARTICLES });
 const slice = reactive({
@@ -187,6 +190,7 @@ let hslice: HorizontalSlice | null = null;
 let vsection: VerticalSection | null = null;
 let volume: VolumeLayer | null = null;
 let buildings: Buildings | null = null;
+let probeMarker: ProbeMarker | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let raf = 0;
 let disposed = false;
@@ -443,6 +447,7 @@ function updateDepthOccluders(): void {
     depthOccluders.push(vsection.outline, vsection.handle);
     depthOccluders.push(vsection.mesh);
   }
+  if (probeMarker) depthOccluders.push(probeMarker.object);
 }
 
 function onData(name: string): void {
@@ -459,11 +464,13 @@ function onData(name: string): void {
   ) {
     updateGround();
   }
-  if (probe.value) refreshProbe();
+  if (layers.probe && probe.value) refreshProbe();
 }
 
 // ---------------------------------------------------------------- probe / profile
-const probeCell = { ix: 0, iy: 0 };
+const previewCell = { ix: 0, iy: 0 };
+let previewActive = false;
+const fixedCell = ref<{ ix: number; iy: number } | null>(null);
 const pointer = new THREE.Vector2();
 const raycaster = new THREE.Raycaster();
 let pointerDirty = false;
@@ -473,12 +480,16 @@ function profileVariable(): string {
   return section.enabled ? section.variable : slice.enabled ? slice.variable : SPEED;
 }
 
-function refreshProbe(pinned = probe.value?.pinned ?? false): void {
+function refreshProbe(
+  pinned = probe.value?.pinned ?? false,
+  cell: { ix: number; iy: number } | null = fixedCell.value,
+): void {
   if (!manifest.value) return;
   const u = loaded("u");
   const v = loaded("v");
   if (!u || !v) return;
-  const { ix, iy } = probeCell;
+  const source = cell ?? previewCell;
+  const { ix, iy } = source;
   const g = manifest.value.grid;
   const name = profileVariable();
   const data = name === SPEED ? null : loaded(name);
@@ -522,6 +533,33 @@ function setPointer(event: PointerEvent): void {
   raycaster.setFromCamera(pointer, camera);
 }
 
+function cellPosition(ix: number, iy: number): [number, number] {
+  const g = manifest.value!.grid;
+  return [
+    (ix / (g.nx - 1) - 0.5) * domain.sx,
+    (0.5 - iy / (g.ny - 1)) * domain.sz,
+  ];
+}
+
+function updateMarker(): void {
+  if (!probeMarker) return;
+  if (!layers.probe) return probeMarker.setVisible(false, false);
+  const fixed = fixedCell.value;
+  const same = fixed !== null && previewCell.ix === fixed.ix && previewCell.iy === fixed.iy;
+  if (previewActive && !same) {
+    const [px, pz] = cellPosition(previewCell.ix, previewCell.iy);
+    probeMarker.setPreview(px, pz, true);
+  } else {
+    probeMarker.setPreview(0, 0, false);
+  }
+  if (fixed) {
+    const [fx, fz] = cellPosition(fixed.ix, fixed.iy);
+    probeMarker.setFixed(fx, fz, true);
+  } else {
+    probeMarker.setFixed(0, 0, false);
+  }
+}
+
 function pickTargets(): THREE.Object3D[] {
   const list: THREE.Object3D[] = [];
   if (vsection?.group.visible) list.push(vsection.group);
@@ -530,18 +568,27 @@ function pickTargets(): THREE.Object3D[] {
   return list;
 }
 
-function probeFromPointer(pin: boolean): void {
+function probeFromPointer(pin: boolean): boolean {
   const hit = raycaster.intersectObjects(pickTargets(), true)[0];
-  if (!hit) return;
+  if (!hit) return false;
   const local = atmos.root.worldToLocal(hit.point.clone());
   const g = manifest.value!.grid;
-  probeCell.ix = Math.round(
+  previewCell.ix = Math.round(
     THREE.MathUtils.clamp((local.x / domain.sx + 0.5) * (g.nx - 1), 0, g.nx - 1),
   );
-  probeCell.iy = Math.round(
+  previewCell.iy = Math.round(
     THREE.MathUtils.clamp((0.5 - local.z / domain.sz) * (g.ny - 1), 0, g.ny - 1),
   );
-  refreshProbe(pin);
+  previewActive = true;
+  updateMarker();
+  if (pin) {
+    fixedCell.value = { ...previewCell };
+    refreshProbe(true);
+    updateMarker();
+  } else if (layers.probeFollowMouse) {
+    refreshProbe(false, previewCell);
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------- section dragging
@@ -552,6 +599,7 @@ const drag = {
   start: new THREE.Vector3(),
   startOffset: 0,
 };
+const pointerDown = { x: 0, y: 0, moved: false, active: false };
 const tmp = new THREE.Vector3();
 
 function sectionHit(): THREE.Intersection | undefined {
@@ -562,6 +610,10 @@ function sectionHit(): THREE.Intersection | undefined {
 function onPointerDown(event: PointerEvent): void {
   if (!manifest.value || event.button !== 0) return;
   setPointer(event);
+  pointerDown.x = event.clientX;
+  pointerDown.y = event.clientY;
+  pointerDown.moved = false;
+  pointerDown.active = true;
   const hit = sectionHit();
   if (hit && vsection) {
     drag.active = true;
@@ -576,6 +628,8 @@ function onPointerDown(event: PointerEvent): void {
 }
 
 function onPointerMove(event: PointerEvent): void {
+  if (pointerDown.active && Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5)
+    pointerDown.moved = true;
   pointerEvent = event;
   pointerDirty = true;
 }
@@ -605,28 +659,21 @@ function processPointer(): void {
   const hover = Boolean(sectionHit());
   vsection?.setHighlight(hover);
   canvas.value!.style.cursor = hover ? "grab" : "";
-  if (!probe.value?.pinned) probeFromPointer(false);
+  if (layers.probe) probeFromPointer(false);
 }
 
 function onPointerUp(event: PointerEvent): void {
+  const wasClick = pointerDown.active && !pointerDown.moved && !drag.active && event.button === 0;
   if (drag.active) {
     drag.active = false;
     controls.enabled = true;
     canvas.value!.releasePointerCapture(event.pointerId);
   }
-}
-
-function onClick(event: MouseEvent): void {
-  if (!manifest.value || event.detail > 1) return;
-  if (event.altKey || event.ctrlKey || event.metaKey) {
-    setPointer(event as PointerEvent);
+  pointerDown.active = false;
+  if (wasClick && layers.probe) {
+    setPointer(event);
     probeFromPointer(true);
   }
-}
-
-function onDoubleClick(event: MouseEvent): void {
-  setPointer(event as PointerEvent);
-  probeFromPointer(true);
 }
 
 // ---------------------------------------------------------------- camera presets
@@ -759,9 +806,33 @@ function exposeApi(): void {
       controls.update();
     },
     probeAt: (ix: number, iy: number) => {
-      probeCell.ix = ix;
-      probeCell.iy = iy;
+      layers.probe = true;
+      previewCell.ix = THREE.MathUtils.clamp(Math.round(ix), 0, domain.nx - 1);
+      previewCell.iy = THREE.MathUtils.clamp(Math.round(iy), 0, domain.ny - 1);
+      fixedCell.value = { ...previewCell };
+      updateMarker();
       refreshProbe(true);
+    },
+    setProbeEnabled: (on: boolean) => {
+      layers.probe = on;
+      if (on && fixedCell.value) {
+        previewCell.ix = fixedCell.value.ix;
+        previewCell.iy = fixedCell.value.iy;
+        refreshProbe(true);
+      }
+      updateMarker();
+    },
+    setProbeFollowMouse: (on: boolean) => {
+      layers.probeFollowMouse = on;
+      if (on && layers.probe && probe.value) refreshProbe(false, previewCell);
+    },
+    probeHoverAt: (ix: number, iy: number) => {
+      layers.probe = true;
+      previewCell.ix = THREE.MathUtils.clamp(Math.round(ix), 0, domain.nx - 1);
+      previewCell.iy = THREE.MathUtils.clamp(Math.round(iy), 0, domain.ny - 1);
+      previewActive = true;
+      updateMarker();
+      if (layers.probeFollowMouse) refreshProbe(false, previewCell);
     },
     /** run n simulation steps without drawing the scene (screenshots on slow software GL) */
     advance: (steps: number, dt = 1 / 60) => {
@@ -811,6 +882,8 @@ async function start(): Promise<void> {
   }
 
   atmos = new AtmosScene(domain);
+  probeMarker = new ProbeMarker(domain.top);
+  atmos.root.add(probeMarker.object);
   hslice = new HorizontalSlice(domain);
   vsection = new VerticalSection(domain);
   volume = new VolumeLayer(domain);
@@ -834,8 +907,6 @@ async function start(): Promise<void> {
   el.addEventListener("pointerdown", onPointerDown);
   el.addEventListener("pointermove", onPointerMove);
   el.addEventListener("pointerup", onPointerUp);
-  el.addEventListener("click", onClick);
-  el.addEventListener("dblclick", onDoubleClick);
   exposeApi();
   updateGround();
   raf = requestAnimationFrame(frame);
@@ -931,7 +1002,19 @@ watch(
 watch(
   [() => section.enabled, () => slice.enabled, () => section.variable, () => slice.variable],
   () => {
-    if (probe.value) refreshProbe();
+    if (layers.probe && probe.value) refreshProbe();
+  },
+);
+watch(
+  () => [layers.probe, layers.probeFollowMouse],
+  ([enabled, follow]) => {
+    if (!enabled) {
+      probeMarker?.setVisible(false, false);
+      return;
+    }
+    if (fixedCell.value && !probe.value) refreshProbe(true);
+    updateMarker();
+    if (follow && probe.value) refreshProbe(false, previewCell);
   },
 );
 
@@ -1012,6 +1095,7 @@ onBeforeUnmount(() => {
   fields?.dispose();
   controls?.dispose();
   renderer?.dispose();
+  probeMarker?.dispose();
 });
 </script>
 
@@ -1044,7 +1128,7 @@ onBeforeUnmount(() => {
     </div>
 
     <ProfileChart
-      v-if="probe"
+      v-if="layers.probe && probe"
       class="profile-box"
       :lon="probe.lon"
       :lat="probe.lat"
@@ -1056,12 +1140,12 @@ onBeforeUnmount(() => {
       :label="labelOf(profileVariable())"
       :units="unitsOf(profileVariable())"
       :show-variable="profileVariable() !== 'speed'"
-      @close="probe = null"
+      @close="probe = null; fixedCell = null; updateMarker()"
     />
 
     <div class="hint">
       拖动：旋转 · 右键：平移 · 滚轮：缩放 · 拖剖面：平移剖面 · Shift+拖剖面 / 拖顶部手柄：旋转 ·
-      双击：固定探针
+      打开探针 → 悬停预览位置（不改读数）→ 单击（非拖动）固定并更新廓线；可选跟随鼠标
     </div>
 
     <aside v-if="panelOpen" class="panel">
@@ -1091,6 +1175,10 @@ onBeforeUnmount(() => {
         >
         <label class="row"
           ><input v-model="layers.particles" type="checkbox" />风粒子（GPGPU 流线）</label
+        >
+        <label class="row"><input v-model="layers.probe" type="checkbox" />探针</label>
+        <label v-if="layers.probe" class="row"
+          ><input v-model="layers.probeFollowMouse" type="checkbox" />跟随鼠标</label
         >
         <label class="row"
           ><input v-model="layers.volume" type="checkbox" />体渲染

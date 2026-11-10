@@ -1,5 +1,5 @@
 // Headless screenshots of the demo (software WebGL via SwiftShader — FPS is NOT representative).
-// usage: node scripts/screenshot.mjs [url] [overview|slice|section|close|embedded|filter|panel] [out.png]
+// usage: node scripts/screenshot.mjs [url] [overview|slice|section|close|embedded|filter|panel|probe-hover|probe-fixed|probe-panel] [out.png]
 import { chromium } from "playwright-core";
 
 const args = process.argv.slice(2);
@@ -15,6 +15,9 @@ const VIEWS = [
   "embedded",
   "filter",
   "panel",
+  "probe-hover",
+  "probe-fixed",
+  "probe-panel",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -109,6 +112,27 @@ await page.evaluate((v) => {
     api.setView("overview");
     api.setLayer("particles", false);
     api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+  } else if (v === "probe-hover") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setProbeEnabled(true);
+    api.probeHoverAt(190, 120);
+  } else if (v === "probe-fixed") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setProbeEnabled(true);
+    api.probeAt(140, 170);
+    api.probeHoverAt(200, 110);
+  } else if (v === "probe-panel") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+    api.setProbeEnabled(true);
+    api.probeAt(150, 160);
   } else {
     api.setView("overview");
   }
@@ -118,6 +142,7 @@ if (
     "embedded",
     "filter",
     "panel",
+    "probe-panel",
     "close",
     "section-volume",
     "section-volume-05",
