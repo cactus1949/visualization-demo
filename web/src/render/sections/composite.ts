@@ -8,6 +8,7 @@ export interface CompositeSurface {
   field: ScalarBinding | null;
   min: number; max: number; opacity: number; colormap: string; contours: number;
   filterMin: number; filterMax: number; filterEnable: boolean;
+  lowAlpha?: boolean; lowThreshold?: number;
   height?: number; normalX?: number; normalZ?: number; offset?: number;
   clipX0?: number; clipX1?: number; clipZ0?: number; clipZ1?: number;
   ax?: number; az?: number; bx?: number; bz?: number;

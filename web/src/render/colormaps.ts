@@ -136,3 +136,22 @@ export function colormapColor(name: string, value: number): THREE.Color {
     THREE.SRGBColorSpace,
   );
 }
+
+const lutCache = new Map<string, Uint8Array>();
+
+/** CPU lookup with the same 256-entry LUT and linear filtering as `colormapTexture`. */
+export function colormapRGB(name: string, t: number): [number, number, number] {
+  let bytes = lutCache.get(name);
+  if (!bytes) {
+    bytes = colormapBytes(name);
+    lutCache.set(name, bytes);
+  }
+  // texture(uColormap, vec2(t, .5)) with LinearFilter: texel centres at (i + .5) / 256
+  const x = THREE.MathUtils.clamp(t, 0, 1) * 256 - 0.5;
+  const i0 = THREE.MathUtils.clamp(Math.floor(x), 0, 255);
+  const i1 = Math.min(255, i0 + 1);
+  const f = THREE.MathUtils.clamp(x - Math.floor(x), 0, 1) * (x < 0 ? 0 : 1);
+  const out: [number, number, number] = [0, 0, 0];
+  for (let c = 0; c < 3; c += 1) out[c] = Math.round(bytes[i0 * 4 + c]! * (1 - f) + bytes[i1 * 4 + c]! * f);
+  return out;
+}

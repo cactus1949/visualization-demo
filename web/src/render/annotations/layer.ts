@@ -357,7 +357,7 @@ export class AnnotationLayer {
       item.desc = next;
     }
     this.styleItem(item);
-    if (item.desc.kind === "label") item.el.textContent = item.desc.text ?? "";
+    if (item.desc.kind === "label" && item.el.textContent !== (item.desc.text ?? "")) item.el.textContent = item.desc.text ?? "";
   }
 
   private makeLine(): SVGLineElement {
@@ -415,7 +415,11 @@ export class AnnotationLayer {
       item.height = d;
     }
     if (item.ring) item.ring.setAttribute("stroke", color);
-    if (desc.visible === false) item.el.classList.add("anno-hidden");
+    // Resetting className must not resurrect labels that the last update() hid
+    // (decimation / overlap / off-screen). Rebuilds during a drag run from Vue
+    // watchers after update(), so the browser would otherwise paint every label,
+    // unpositioned, until the next frame. New items stay hidden until projected.
+    if (desc.visible === false || !item.onScreen) item.el.classList.add("anno-hidden");
   }
 
   private projectToScreen(

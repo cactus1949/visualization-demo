@@ -59,6 +59,12 @@ const VIEWS = [
   "v6_6-probe-speed",
   "v6_6-probe-tke",
   "v6_6-probe-w",
+  "v6_8-volume-icing",
+  "v6_8-volume-icing-boxcut",
+  "v6_8-box-icing-opaque",
+  "v6_8-box-icing-lowalpha",
+  "v6_8-hslice-icing",
+  "v6_8-box-drag-labels",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -326,6 +332,30 @@ await page.evaluate((v) => {
     api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
     api.setSection({ variable: "speed", opacity: 0.55 });
     api.setCamera(v === "v6_7-box-back" ? [9.5, 6.5, -11] : [-9.5, 6.5, 11], [0, 0.5, 0]);
+  } else if (v.startsWith("v6_8-")) {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setExaggeration(3);
+    if (v === "v6_8-volume-icing" || v === "v6_8-volume-icing-boxcut") {
+      api.setSection({ enabled: false });
+      api.setVolume({ enabled: true, variable: "icing_index", opacity: 0.6, threshold: 0.2, filterSlices: false });
+      // same footprint as the box stack (x ±3.2 km, z ±2.4 km of a ~17.9 km domain)
+      if (v === "v6_8-volume-icing-boxcut") api.setCuts({ x: [0.322, 0.678], y: [0.366, 0.634], faces: false });
+    } else if (v === "v6_8-hslice-icing") {
+      api.setVolume({ enabled: false });
+      api.setSlice({ variable: "icing_index", heightM: 487.5, colormap: "magma", autoRange: true, opacity: 0.9, lowAlpha: true, lowThreshold: 0.15, contours: 0 });
+    } else {
+      api.setVolume({ enabled: false });
+      api.setSectionMode("box");
+      const drag = v === "v6_8-box-drag-labels";
+      api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: drag ? 1 : 4, defined: true });
+      api.setSection({
+        variable: "icing_index", colormap: "magma", autoRange: true, contours: 0,
+        opacity: v === "v6_8-box-icing-opaque" ? 1 : 0.9,
+        lowAlpha: v !== "v6_8-box-icing-opaque", lowThreshold: 0.15,
+      });
+    }
+    api.setCamera([-9.5, 6.5, 11], [0, 0.6, 0]);
   } else if (v === "v6_4-panel-volume") {
     api.setLayer("particles", false);
     api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
@@ -382,6 +412,20 @@ await page.evaluate((v) => {
 }, view);
 if (view.startsWith("v6_5-tint")) {
   await page.waitForFunction(() => window.__atmosApi.hasData("t2m") === true, null, { timeout: 90_000 });
+}
+if (view.startsWith("v6_8-")) {
+  await page.waitForFunction(() => window.__atmosApi.hasData("icing_index") === true, null, { timeout: 120_000 });
+  if (view.startsWith("v6_8-volume-icing")) {
+    await page.waitForFunction(() => window.__atmosStatus?.volume === "icing_index", null, { timeout: 120_000 });
+  }
+  if (view === "v6_8-hslice-icing") {
+    // slice at the level holding the column maximum of icing_index
+    await page.evaluate(() => {
+      const api = window.__atmosApi;
+      const m = api.debugArgmax("icing_index");
+      api.setSlice({ heightM: 12.5 + 25 * m.k, lowAlpha: true, lowThreshold: 0.15, colormap: "magma", opacity: 0.9, contours: 0 });
+    });
+  }
 }
 if (view.startsWith("v6_6-probe-")) {
   const name = view === "v6_6-probe-speed" ? "speed" : view === "v6_6-probe-tke" ? "tke" : "w";
@@ -442,6 +486,10 @@ if (
     "v6_3-particles-exag",
     "v6_4-box-drag",
     "v6_4-box-fixed",
+    "v6_8-box-icing-opaque",
+    "v6_8-box-icing-lowalpha",
+    "v6_8-hslice-icing",
+    "v6_8-box-drag-labels",
     "v6_7-box-front",
     "v6_7-box-back",
     "v6_4-panel-volume",
@@ -470,6 +518,46 @@ const after = await page.evaluate(() => window.__atmosApi.sampleParticle());
 await page.waitForTimeout(2500);
 const status = await page.evaluate(() => window.__atmosApi.status());
 let gripInfo = null;
+let debugCompare = null;
+let dragLabels = null;
+if (view.startsWith("v6_8-")) {
+  debugCompare = await page.evaluate(() => {
+    const api = window.__atmosApi;
+    const m = api.debugArgmax("icing_index");
+    // the max voxel plus a near-zero voxel at the same level (sparse low end)
+    return { argmax: m, max: api.debugCompare("icing_index", m.ix, m.iy, m.k), low: api.debugCompare("icing_index", 5, 5, m.k) };
+  });
+}
+if (view === "v6_8-box-drag-labels") {
+  const canvas = page.locator("canvas.canvas");
+  const cbox = await canvas.boundingBox();
+  // grab the visible corner handle closest to the bottom of the screen and drag it outward
+  const handle = await page.evaluate(() => {
+    const hs = [...document.querySelectorAll(".anno-dot.is-handle")].filter((el) => !el.classList.contains("anno-hidden"));
+    let best = null;
+    for (const el of hs) {
+      const r = el.getBoundingClientRect();
+      const c = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      if (!best || c.y > best.y) best = c;
+    }
+    return best;
+  });
+  if (handle && cbox) {
+    await page.mouse.move(handle.x, handle.y);
+    await page.waitForTimeout(200);
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i += 1) {
+      await page.mouse.move(handle.x + i * 9, handle.y + i * 5);
+      await page.waitForTimeout(250); // SwiftShader renders ~1–4 fps; let frames run mid-drag
+    }
+    await page.waitForTimeout(800);
+  }
+  dragLabels = await page.evaluate(() => {
+    const labels = [...document.querySelectorAll(".anno-label")];
+    const visible = labels.filter((el) => !el.classList.contains("anno-hidden"));
+    return { total: labels.length, visible: visible.length, texts: visible.map((el) => el.textContent) };
+  });
+}
 if (view === "v6_3-box-drag" || view === "v6_4-box-drag") {
   const canvas = page.locator("canvas.canvas");
   const box = await canvas.boundingBox();
@@ -519,6 +607,8 @@ console.log(
     particleSampleBefore: before,
     particleSampleAfter: after,
     gripInfo,
+    debugCompare,
+    dragLabels,
     consoleErrors: consoleErrors.slice(0, 10),
   }),
 );

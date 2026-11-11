@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { colormapTexture } from "./colormaps";
 import { GLSL_DOMAIN, domainUniforms, type Domain } from "./fields";
-import type { ScalarBinding } from "./slices";
+import { GLSL_LOW_ALPHA, type ScalarBinding } from "./slices";
 import type { CompositeSurface } from "./sections/composite";
 import { type CutState, cutBounds } from "./cuts";
 
@@ -49,6 +49,9 @@ uniform float uSurfFilterMin[16];
 uniform float uSurfFilterMax[16];
 uniform float uSurfFilterEnable[16];
 uniform float uSurfContours[16];
+uniform float uSurfLowAlpha[16];
+uniform float uSurfLowThreshold[16];
+${GLSL_LOW_ALPHA}
 uniform sampler2D uDepth;
 uniform float uDepthValid;
 uniform vec2 uResolution;
@@ -126,7 +129,7 @@ vec4 surfaceColor(int i, vec3 p) {
     float dd = abs(fract(bands - 0.5) - 0.5) / max(fwidth(bands), 1e-5);
     c.rgb = mix(c.rgb, c.rgb * 0.35, (1.0 - smoothstep(0.0, 1.2, dd)) * 0.55);
   }
-  c.a = uSurfOpacity[i];
+  c.a = uSurfOpacity[i] * lowAlphaFactor(n, uSurfLowAlpha[i], uSurfLowThreshold[i]);
   return c;
 }
 
@@ -276,6 +279,8 @@ export class VolumeLayer {
       "FilterMax",
       "FilterEnable",
       "Contours",
+      "LowAlpha",
+      "LowThreshold",
     ]) {
       uniforms[`uSurf${n}`] = { value: new Array(MAX_SURFACES).fill(0) };
     }
@@ -309,7 +314,11 @@ export class VolumeLayer {
     this.material.uniforms.uDepth.value = this.depthTarget.depthTexture;
   }
 
+  /** Last colour mapping handed to the raymarcher (for debug comparisons). */
+  bound: { colormap: string; min: number; max: number } | null = null;
+
   bind(field: ScalarBinding, colormap: string, min: number, max: number): void {
+    this.bound = { colormap, min, max };
     const u = this.material.uniforms;
     u.uField.value = field.texture;
     u.uColormap.value = colormapTexture(colormap);
@@ -346,6 +355,8 @@ export class VolumeLayer {
       u.uSurfFilterMax.value[i] = s.filterMax;
       u.uSurfFilterEnable.value[i] = s.filterEnable ? 1 : 0;
       u.uSurfContours.value[i] = s.contours;
+      u.uSurfLowAlpha.value[i] = s.lowAlpha ? 1 : 0;
+      u.uSurfLowThreshold.value[i] = s.lowThreshold ?? 0.15;
       if (s.field) {
         if (s.binding === "slice") {
           u.uSliceField.value = s.field.texture;

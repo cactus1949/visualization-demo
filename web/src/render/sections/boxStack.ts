@@ -252,6 +252,7 @@ export class BoxStack {
 
   /** True when the camera-to-anchor segment crosses a displayed slab footprint. */
   occlusionTest = (camLocal: THREE.Vector3, anchor: THREE.Vector3): boolean => {
+    if (!this.depthTwins.visible) return false;
     const minX = Math.min(this.params.x0, this.params.x1) + 1e-4;
     const maxX = Math.max(this.params.x0, this.params.x1) - 1e-4;
     const minZ = Math.min(this.params.z0, this.params.z1) + 1e-4;

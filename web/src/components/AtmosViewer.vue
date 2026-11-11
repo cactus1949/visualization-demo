@@ -24,7 +24,8 @@ import {
   type ColorMode,
   type ParticleParams,
 } from "../render/particles";
-import { COLORMAPS, COLORMAP_LABELS, DIVERGING } from "../render/colormaps";
+import { COLORMAPS, COLORMAP_LABELS, DIVERGING, colormapRGB } from "../render/colormaps";
+import { LOW_ALPHA_RAMP } from "../render/slices";
 import ColorLegend from "./ColorLegend.vue";
 import ProfileChart from "./ProfileChart.vue";
 import RangeSlider from "./RangeSlider.vue";
@@ -120,6 +121,8 @@ const slice = reactive({
   max: 15,
   opacity: 0.85,
   contours: 12,
+  lowAlpha: false,
+  lowThreshold: 0.15,
 });
 const section = reactive({
   enabled: false,
@@ -134,6 +137,9 @@ const section = reactive({
   max: 15,
   opacity: 0.85,
   contours: 12,
+  /** 低值透明: value-based alpha ramp, default on for sparse non-negative fields. */
+  lowAlpha: false,
+  lowThreshold: 0.15,
   points: [] as { x: number; z: number }[],
   box: {
     x0: 0, z0: 0, x1: 0, z1: 0,
@@ -221,6 +227,42 @@ function defaultColormap(name: string): string {
   if (!meta) return "viridis";
   if (meta.colormap === "rdbu" || (meta.data_min < 0 && meta.data_max > 0)) return "rdbu";
   return meta.colormap === "blues" ? "cividis" : meta.colormap;
+}
+
+const SPARSE_VARS = new Set(["icing_index", "icing_accum", "cloud", "cloud_low", "precip", "risk_level"]);
+const sparseCache = new Map<string, boolean>();
+/** Sparse, non-negative fields (mostly ~0) default to a transparent low end in sections. */
+function isSparseVar(name: string): boolean {
+  if (SPARSE_VARS.has(name)) return true;
+  if (name === SPEED) return false;
+  const meta = manifest.value?.variables[name];
+  if (!meta || meta.data_min < 0) return false;
+  const cached = sparseCache.get(name);
+  if (cached !== undefined) return cached;
+  const data = loaded(name)?.data;
+  if (!data) return false;
+  const [lo, hi] = displayRange(name) ?? [meta.data_min, meta.data_max];
+  const cut = lo + 0.02 * (hi - lo);
+  const step = Math.max(1, Math.floor(data.length / 200_000));
+  let low = 0;
+  let total = 0;
+  for (let i = 0; i < data.length; i += step) {
+    total += 1;
+    if (data[i]! <= cut) low += 1;
+  }
+  const sparse = total > 0 && low / total >= 0.5;
+  sparseCache.set(name, sparse);
+  return sparse;
+}
+
+/** Colour mapping the volume uses for `name`: follows the section style for the same variable. */
+function volumeStyleFor(name: string): { colormap: string; min: number; max: number } {
+  if (section.variable === name) {
+    return { colormap: section.colormap, min: section.min, max: section.max };
+  }
+  const cmap = defaultColormap(name);
+  const [min, max] = autoRange(name, cmap);
+  return { colormap: cmap === "rdbu" ? "magma" : cmap, min, max };
 }
 
 function volumeFullRange(name: string): [number, number] {
@@ -379,6 +421,8 @@ function syncStyleToSlice(): void {
   slice.max = section.max;
   slice.opacity = section.opacity;
   slice.contours = section.contours;
+  slice.lowAlpha = section.lowAlpha;
+  slice.lowThreshold = section.lowThreshold;
   slice.enabled = section.enabled && section.kind === "height";
 }
 function syncStyleToSection(): void {
@@ -389,6 +433,8 @@ function syncStyleToSection(): void {
   section.max = slice.max;
   section.opacity = slice.opacity;
   section.contours = slice.contours;
+  section.lowAlpha = slice.lowAlpha;
+  section.lowThreshold = slice.lowThreshold;
 }
 function levelsOf(): number[] {
   return manifest.value?.grid.levels_m ?? domain.levels;
@@ -538,7 +584,9 @@ function updateSection(): void {
   boxStack.material.bind(b);
   boxStack.material.setVolumeComposited(false);
   boxStack.material.style(section);
-  boxStack.material.depthWrite = section.opacity >= 0.999;
+  boxStack.material.depthWrite = section.opacity >= 0.999 && !section.lowAlpha;
+  // A low-alpha stack is mostly see-through: don't let its depth-only twins hide the outline.
+  boxStack.depthTwins.visible = !section.lowAlpha;
   updateSliceFilter();
   updateComposite();
   syncSectionAnnotations();
@@ -609,10 +657,12 @@ function updateVolume(): void {
   } else if (volumeFilterVariable.value !== layers.volumeVar) {
     resetVolumeFilter(layers.volumeVar);
   }
-  const cmap = defaultColormap(layers.volumeVar);
-  const [lo, hi] = autoRange(layers.volumeVar, cmap);
-  volumeColorRange.value = [lo, hi];
-  volume.bind(b, cmap === "rdbu" ? "magma" : cmap, lo, hi);
+  if (section.variable === layers.volumeVar && section.autoRange) {
+    [section.min, section.max] = autoRange(section.variable, section.colormap);
+  }
+  const vs = volumeStyleFor(layers.volumeVar);
+  volumeColorRange.value = [vs.min, vs.max];
+  volume.bind(b, vs.colormap, vs.min, vs.max);
   volume.material.uniforms.uOpacity.value = layers.volumeOpacity;
   volume.material.uniforms.uThreshold.value = layers.volumeThreshold;
   updateVolumeFilter();
@@ -636,12 +686,14 @@ function syncVolumeSlices(): void {
     kind: "horizontal", binding: "slice", field: hb,
     min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
     filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
+    lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
     height: slice.heightM / 1000,
   };
   const s: CompositeSurface | null = (vertOn || polyOn) ? {
     kind: "vertical", binding: "section", field: vb,
     min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
     filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
+    lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
     normalX: section.kind === "lat" ? 0 : 1, normalZ: section.kind === "lat" ? 1 : 0,
     offset: section.offsetKm,
   } : null;
@@ -1241,6 +1293,9 @@ function exposeApi(): void {
     setView,
     setSection: (p: Partial<typeof section>) => {
       const prev = section.enabled ? section.kind : null;
+      // Assign the variable first: its (sync) watcher applies per-variable defaults,
+      // then explicit colormap / lowAlpha etc. in `p` override them.
+      if (p.variable !== undefined) section.variable = p.variable;
       Object.assign(section, { enabled: true }, p);
       if (p.kind && p.kind !== prev) leaveKind(prev);
       if (p.azimuthDeg !== undefined && p.kind === undefined && (section.kind === "lon" || section.kind === "lat" || prev === null)) {
@@ -1277,6 +1332,10 @@ function exposeApi(): void {
     },
     setCuts: (p: Partial<CutState>) => { if (p.x) cuts.x = [...p.x] as [number, number]; if (p.y) cuts.y = [...p.y] as [number, number]; if (p.z) cuts.z = [...p.z] as [number, number]; if (p.faces !== undefined) cuts.faces = p.faces; clampCuts(cuts); updateVolume(); },
     setSlice: (p: Partial<typeof slice>) => {
+      if (p.variable !== undefined) {
+        section.variable = p.variable;
+        syncStyleToSlice();
+      }
       Object.assign(slice, p);
       if (p.enabled === false) {
         if (section.kind === "height") {
@@ -1384,6 +1443,41 @@ function exposeApi(): void {
     sampleParticle: () => particles?.sample() ?? [],
     sampleHistory: () => particles?.sampleHistory() ?? [],
     hasData: (name: string) => Boolean(loaded(name)),
+    debugArgmax: (name: string) => {
+      const data = loaded(name)?.data;
+      const g = manifest.value?.grid;
+      if (!data || !g) return null;
+      let best = 0;
+      for (let i = 1; i < data.length; i += 1) if (data[i]! > data[best]!) best = i;
+      const n = g.nx * g.ny;
+      return { k: Math.floor(best / n), iy: Math.floor((best % n) / g.nx), ix: best % g.nx, value: data[best] };
+    },
+    /** Same voxel through the volume mapping and the section mapping (CPU, same LUT). */
+    debugCompare: (name: string, ix: number, iy: number, k: number) => {
+      const data = loaded(name)?.data;
+      const g = manifest.value?.grid;
+      if (!data || !g) return null;
+      const value = data[k * g.nx * g.ny + iy * g.nx + ix]!;
+      const bound = layers.volume && layers.volumeVar === name && volume?.bound ? volume.bound : volumeStyleFor(name);
+      const norm = (lo: number, hi: number) => THREE.MathUtils.clamp((value - lo) / Math.max(hi - lo, 1e-9), 0, 1);
+      const tv = norm(bound.min, bound.max);
+      const sameVar = section.variable === name;
+      const sec = sameVar
+        ? { colormap: section.colormap, min: section.min, max: section.max, lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold }
+        : { colormap: defaultColormap(name), ...(() => { const [min, max] = autoRange(name, defaultColormap(name)); return { min, max }; })(), lowAlpha: isSparseVar(name), lowThreshold: 0.15 };
+      const ts = norm(sec.min, sec.max);
+      const smooth = (e0: number, e1: number, x: number) => { const u = THREE.MathUtils.clamp((x - e0) / Math.max(e1 - e0, 1e-9), 0, 1); return u * u * (3 - 2 * u); };
+      const lowFactor = sec.lowAlpha ? smooth(sec.lowThreshold, Math.min(1, sec.lowThreshold + LOW_ALPHA_RAMP), ts) : 1;
+      const rgbV = colormapRGB(bound.colormap, tv);
+      const rgbS = colormapRGB(sec.colormap, ts);
+      return {
+        value,
+        heightM: g.levels_m[k],
+        volume: { ...bound, threshold: layers.volumeThreshold, t: tv, rgb: rgbV, visible: tv >= layers.volumeThreshold },
+        section: { ...sec, sectionVariable: section.variable, t: ts, rgb: rgbS, alpha: section.opacity * lowFactor },
+        match: Math.abs(tv - ts) < 1e-6 && rgbV.every((c, i) => Math.abs(c - rgbS[i]!) <= 2),
+      };
+    },
     status: () => ({
       ...window.__atmosStatus, fps: fps.value, drawCalls: drawCalls.value,
       volumeEnabled: layers.volume, volumeVisible: Boolean(volume?.mesh.visible),
@@ -1523,6 +1617,15 @@ watch(
   (name) => {
     section.colormap = defaultColormap(name);
     section.autoRange = true;
+    section.lowAlpha = isSparseVar(name);
+  },
+  { flush: "sync" },
+);
+// The volume follows the section's colour mapping when both show the same variable.
+watch(
+  () => [section.variable, section.colormap, section.min, section.max],
+  () => {
+    if (layers.volume && section.variable === layers.volumeVar) updateVolume();
   },
 );
 watch(() => slice.heightM, () => { if (section.kind === "height") updateSlice(); });
@@ -1536,6 +1639,8 @@ watch(
     section.max,
     section.opacity,
     section.contours,
+    section.lowAlpha,
+    section.lowThreshold,
   ],
   updateSection,
 );
@@ -2015,6 +2120,13 @@ onBeforeUnmount(() => {
         <label class="slider"
           >不透明度 {{ section.opacity.toFixed(2)
           }}<input v-model.number="section.opacity" type="range" min="0.1" max="1" step="0.01"
+        /></label>
+        <label class="row" title="按数值淡出低端：低于阈值完全透明，其上 25% 区间渐显（与体渲染阈值一致的思路）"
+          ><input v-model="section.lowAlpha" type="checkbox" />低值透明</label
+        >
+        <label v-if="section.lowAlpha" class="slider"
+          >透明阈值 {{ (section.lowThreshold * 100).toFixed(0) }}%
+          <input v-model.number="section.lowThreshold" type="range" min="0" max="0.6" step="0.01"
         /></label>
         <label class="slider"
           >等值线 {{ section.contours || "关"

@@ -27,7 +27,20 @@ export interface SliceStyle {
   max: number;
   opacity: number;
   contours: number; // 0 = off, else number of contour bands over [min, max]
+  /** Value-based alpha: normalized t below `lowThreshold` fades to transparent. */
+  lowAlpha?: boolean;
+  lowThreshold?: number;
 }
+
+/** Shared ramp width above the low-alpha threshold (normalized units). */
+export const LOW_ALPHA_RAMP = 0.25;
+/** Value-based alpha used by every section surface (GLSL). */
+export const GLSL_LOW_ALPHA = /* glsl */ `
+float lowAlphaFactor(float t, float on, float thr) {
+  if (on < 0.5) return 1.0;
+  return smoothstep(thr, min(1.0, thr + ${LOW_ALPHA_RAMP.toFixed(2)}), t);
+}
+`;
 
 const vertexShader = /* glsl */ `
 uniform mat4 uRootInverse;
@@ -56,6 +69,9 @@ uniform float uFilterEnable;
 uniform float uOpacity;
 uniform float uContours;
 uniform float uHighlight;
+uniform float uLowAlpha;
+uniform float uLowThreshold;
+${GLSL_LOW_ALPHA}
 in vec3 vLocal;
 out vec4 outColor;
 
@@ -73,12 +89,15 @@ void main() {
     color = mix(color, color * 0.35, line * 0.55);
   }
   color = mix(color, vec3(1.0), uHighlight * 0.12);
-  outColor = vec4(color, uOpacity);
+  float alpha = uOpacity * lowAlphaFactor(t, uLowAlpha, uLowThreshold);
+  if (alpha < 0.004) discard;
+  outColor = vec4(color, alpha);
 }
 `;
 
 export class SliceMaterial extends THREE.ShaderMaterial {
   private composited = false;
+  lowAlpha = false;
   constructor(domain: Domain) {
     super({
       glslVersion: THREE.GLSL3,
@@ -100,6 +119,8 @@ export class SliceMaterial extends THREE.ShaderMaterial {
         uOpacity: { value: 0.9 },
         uContours: { value: 0 },
         uHighlight: { value: 0 },
+        uLowAlpha: { value: 0 },
+        uLowThreshold: { value: 0.15 },
       },
       transparent: true,
       side: THREE.DoubleSide,
@@ -125,9 +146,14 @@ export class SliceMaterial extends THREE.ShaderMaterial {
     this.uniforms.uMax.value = style.max;
     this.uniforms.uOpacity.value = style.opacity;
     this.uniforms.uContours.value = style.contours;
+    this.uniforms.uLowAlpha.value = style.lowAlpha ? 1 : 0;
+    this.uniforms.uLowThreshold.value = style.lowThreshold ?? 0.15;
+    this.lowAlpha = Boolean(style.lowAlpha);
     // Slices always write depth: particles behind a slice are hidden by it (drawn later),
     // opaque buildings are drawn earlier and stay visible through translucent slices.
-    this.depthWrite = !this.composited;
+    // With value-based alpha, depth writes would let a mostly-transparent slab hide
+    // everything behind it; translucent surfaces rely on back-to-front sorting instead.
+    this.depthWrite = !this.composited && !this.lowAlpha;
     this.colorWrite = !this.composited;
   }
 
