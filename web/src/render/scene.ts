@@ -103,6 +103,8 @@ export class AtmosScene {
     colormap: string,
     theme: Theme,
     strength = 0.75,
+    /** Value window in physical units; cells outside fall back to the plain floor. */
+    filter: [number, number] | null = null,
   ): void {
     this.groundTexture?.dispose();
     this.groundTexture = null;
@@ -120,16 +122,29 @@ export class AtmosScene {
     const base = new THREE.Color(THEMES[theme].ground).convertLinearToSRGB();
     const bytes = new Uint8Array(nx * ny * 4);
     const fieldBytes = new Uint8Array(nx * ny * 4);
+    // Soft edge just outside the window (1.5% of the colour range) instead of a hard step.
+    const band = Math.max(Math.abs(range[1] - range[0]) * 0.015, 1e-9);
+    const smooth = (e0: number, e1: number, x: number) => {
+      const u = THREE.MathUtils.clamp((x - e0) / (e1 - e0), 0, 1);
+      return u * u * (3 - 2 * u);
+    };
     for (let i = 0; i < nx * ny; i += 1) {
-      const t = THREE.MathUtils.clamp((values(i) - range[0]) / (range[1] - range[0] || 1), 0, 1);
+      const value = values(i);
+      // Colour mapping stays on the fixed `range`; the filter only masks.
+      const t = THREE.MathUtils.clamp((value - range[0]) / (range[1] - range[0] || 1), 0, 1);
       const j = Math.round(t * 255) * 4;
+      const lowW = filter && Number.isFinite(filter[0]) ? smooth(filter[0] - band, filter[0], value) : 1;
+      const highW = filter && Number.isFinite(filter[1]) ? 1 - smooth(filter[1], filter[1] + band, value) : 1;
+      const w = lowW * highW;
+      const s = strength * w;
       fieldBytes[i * 4] = lut[j]!;
       fieldBytes[i * 4 + 1] = lut[j + 1]!;
       fieldBytes[i * 4 + 2] = lut[j + 2]!;
-      fieldBytes[i * 4 + 3] = 255;
-      bytes[i * 4] = base.r * 255 * (1 - strength) + lut[j] * strength;
-      bytes[i * 4 + 1] = base.g * 255 * (1 - strength) + lut[j + 1] * strength;
-      bytes[i * 4 + 2] = base.b * 255 * (1 - strength) + lut[j + 2] * strength;
+      // alpha = in-window weight: building tint fades out with it
+      fieldBytes[i * 4 + 3] = Math.round(w * 255);
+      bytes[i * 4] = base.r * 255 * (1 - s) + lut[j] * s;
+      bytes[i * 4 + 1] = base.g * 255 * (1 - s) + lut[j + 1] * s;
+      bytes[i * 4 + 2] = base.b * 255 * (1 - s) + lut[j + 2] * s;
       bytes[i * 4 + 3] = 255;
     }
     // row 0 = southernmost latitude = v 0 = +z after the plane rotation

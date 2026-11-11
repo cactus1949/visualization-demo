@@ -65,6 +65,8 @@ const VIEWS = [
   "v6_8-box-icing-lowalpha",
   "v6_8-hslice-icing",
   "v6_8-box-drag-labels",
+  "v6_9-ground-range-full",
+  "v6_9-ground-range-narrow",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -332,6 +334,17 @@ await page.evaluate((v) => {
     api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
     api.setSection({ variable: "speed", opacity: 0.55 });
     api.setCamera(v === "v6_7-box-back" ? [9.5, 6.5, -11] : [-9.5, 6.5, 11], [0, 0.5, 0]);
+  } else if (v.startsWith("v6_9-ground-range-")) {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSection({ enabled: false });
+    api.setLayer("ground", true);
+    api.setGroundVar("t2m");
+    api.setBuildingOpacity(1);
+    api.setBuildingTint({ enabled: true, strength: 0.6 });
+    api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
   } else if (v.startsWith("v6_8-")) {
     api.setLayer("particles", false);
     api.setLayer("buildings", true);
@@ -412,6 +425,17 @@ await page.evaluate((v) => {
 }, view);
 if (view.startsWith("v6_5-tint")) {
   await page.waitForFunction(() => window.__atmosApi.hasData("t2m") === true, null, { timeout: 90_000 });
+}
+if (view.startsWith("v6_9-ground-range-")) {
+  await page.waitForFunction(() => window.__atmosApi.hasData("t2m") === true, null, { timeout: 120_000 });
+  await page.waitForTimeout(500);
+  // ATMOS_GROUND_RANGE="lo,hi" overrides the narrow window (K) for quick checks.
+  const win = (process.env.ATMOS_GROUND_RANGE ?? "275,277").split(",").map(Number);
+  await page.evaluate(([narrow, lo, hi]) => {
+    const api = window.__atmosApi;
+    if (narrow) api.setGroundFilter({ min: lo, max: hi });
+    else api.setGroundFilter({ reset: true });
+  }, [view.endsWith("narrow"), win[0], win[1]]);
 }
 if (view.startsWith("v6_8-")) {
   await page.waitForFunction(() => window.__atmosApi.hasData("icing_index") === true, null, { timeout: 120_000 });

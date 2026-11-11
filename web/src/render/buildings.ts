@@ -68,10 +68,12 @@ export class Buildings {
           "#include <color_fragment>",
           `#include <color_fragment>
           if (uTintEnabled > 0.5 && uTintStrength > 0.0) {
-            vec4 fieldSample = texture2D(uFieldTexture, clamp(vFieldUv, 0.0, 1.0));
+            // LOD 0: mip levels average colours of masked-out cells with in-window ones,
+            // which tinted towers outside the ground value window pink.
+            vec4 fieldSample = textureLod(uFieldTexture, clamp(vFieldUv, 0.0, 1.0), 0.0);
             // Custom sampler2D is not auto-decoded; r187 GLSL helper is sRGBTransferEOTF (vec4).
             vec3 fieldColor = mix(pow(fieldSample.rgb * 0.9478672986 + vec3(0.0521327014), vec3(2.4)), fieldSample.rgb * 0.0773993808, vec3(lessThanEqual(fieldSample.rgb, vec3(0.04045))));
-            diffuseColor.rgb = mix(diffuseColor.rgb, fieldColor, clamp(uTintStrength, 0.0, 1.0));
+            diffuseColor.rgb = mix(diffuseColor.rgb, fieldColor, clamp(uTintStrength, 0.0, 1.0) * fieldSample.a);
           }
           float hMeters = vWorldY / max(uExag, 1e-3) * 1000.0;
           float ao = mix(0.42, 1.0, smoothstep(0.0, 28.0, hMeters));

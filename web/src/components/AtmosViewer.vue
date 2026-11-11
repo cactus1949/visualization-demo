@@ -99,6 +99,9 @@ const layers = reactive({
   buildingTintStrength: 0.6,
   ground: true,
   groundVar: "speed0",
+  /** 地面值域过滤 (physical units); NaN = reset to the variable's full range. */
+  groundFilterMin: Number.NaN,
+  groundFilterMax: Number.NaN,
   particles: true,
   volume: false,
   volumeVar: "tke",
@@ -608,6 +611,33 @@ function updateUnfolded(): void {
   });
 }
 
+/** Full data range of the current ground variable (slider bounds). */
+const groundBounds = ref<[number, number]>([0, 1]);
+const groundUnits = computed(() =>
+  layers.groundVar === "speed0" ? "m/s" : (manifest.value?.variables[layers.groundVar]?.units ?? ""),
+);
+
+function groundFilterFor(read: (i: number) => number): [number, number] {
+  const n = domain.nx * domain.ny;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < n; i += 1) {
+    const v = read(i);
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (!(hi > lo)) hi = lo + 1e-6;
+  groundBounds.value = [lo, hi];
+  if (!Number.isFinite(layers.groundFilterMin) || !Number.isFinite(layers.groundFilterMax)) {
+    layers.groundFilterMin = lo;
+    layers.groundFilterMax = hi;
+  }
+  const fmin = Math.min(layers.groundFilterMin, layers.groundFilterMax);
+  const fmax = Math.max(layers.groundFilterMin, layers.groundFilterMax);
+  // Covering the whole data range means "no filter" (keeps edge cells fully coloured).
+  return [fmin <= lo ? -Infinity : fmin, fmax >= hi ? Infinity : fmax];
+}
+
 function updateGround(): void {
   if (!atmos || !manifest.value) return;
   atmos.ground.visible = layers.ground;
@@ -624,7 +654,7 @@ function updateGround(): void {
     const read = (i: number) =>
       Math.hypot(u.data[i], v.data[i]);
     const range = displayRange("speed0") ?? displayRange(SPEED) ?? [0, 20];
-    atmos.setGroundField(read, range, "viridis", view.theme, 0.55);
+    atmos.setGroundField(read, range, "viridis", view.theme, 0.55, groundFilterFor(read));
     applyBuildings();
     return;
   }
@@ -633,7 +663,8 @@ function updateGround(): void {
   const meta = data.meta;
   const cmap = meta.colormap === "rdbu" ? "rdbu" : meta.colormap;
   const range: [number, number] = displayRange(name) ?? [meta.data_min, meta.data_max];
-  atmos.setGroundField(field2D(meta, data.data), range, cmap, view.theme, 0.55);
+  const read = field2D(meta, data.data);
+  atmos.setGroundField(read, range, cmap, view.theme, 0.55, groundFilterFor(read));
   applyBuildings();
 }
 
@@ -1367,6 +1398,16 @@ function exposeApi(): void {
       }
     },
     setGroundVar: (name: string) => { layers.groundVar = name; },
+    /** Ground value window in physical units; omit a side to keep it. */
+    setGroundFilter: (p: { min?: number; max?: number; reset?: boolean }) => {
+      if (p.reset) {
+        layers.groundFilterMin = groundBounds.value[0];
+        layers.groundFilterMax = groundBounds.value[1];
+      }
+      if (p.min !== undefined) layers.groundFilterMin = p.min;
+      if (p.max !== undefined) layers.groundFilterMax = p.max;
+    },
+    groundBounds: () => [...groundBounds.value],
     setLayer: (name: string, on: boolean) => {
       if (name in layers) (layers as Record<string, unknown>)[name] = on;
     },
@@ -1682,7 +1723,15 @@ watch(
 );
 watch(() => [section.kind, section.drawMode, section.points.length, section.box.x0, section.box.x1, section.box.z0, section.box.z1, section.box.heightMinM, section.box.heightMaxM, section.box.stepLevels, section.box.defined], updateSection);
 watch(() => [cuts.x[0], cuts.x[1], cuts.y[0], cuts.y[1], cuts.z[0], cuts.z[1], cuts.faces], () => { clampCuts(cuts); volume?.setCuts(cuts); syncVolumeSlices(); });
-watch(() => [layers.ground, layers.groundVar], updateGround);
+watch(
+  () => layers.groundVar,
+  () => {
+    layers.groundFilterMin = Number.NaN;
+    layers.groundFilterMax = Number.NaN;
+  },
+  { flush: "sync" },
+);
+watch(() => [layers.ground, layers.groundVar, layers.groundFilterMin, layers.groundFilterMax], updateGround);
 watch(
   () => [layers.volumeVar, layers.volumeOpacity, layers.volumeThreshold],
   updateVolume,
@@ -1918,6 +1967,23 @@ onBeforeUnmount(() => {
             <option v-for="v in variables2D" :key="v.name" :value="v.name">{{ v.label }}</option>
           </select></label
         >
+        <div
+          v-if="layers.ground && layers.groundVar !== 'none' && Number.isFinite(layers.groundFilterMin)"
+          class="slider range-label"
+          title="只显示该值域内的地面着色（色带映射不变）；白膜着色同步过滤"
+        >
+          <span>地面值域</span>
+          <RangeSlider
+            :min="groundBounds[0]"
+            :max="groundBounds[1]"
+            :min-value="layers.groundFilterMin"
+            :max-value="layers.groundFilterMax"
+            :unit="groundUnits"
+            :step="Math.max((groundBounds[1] - groundBounds[0]) / 200, 1e-6)"
+            @update:min-value="layers.groundFilterMin = $event"
+            @update:max-value="layers.groundFilterMax = $event"
+          />
+        </div>
         <label class="row"
           ><input v-model="layers.particles" type="checkbox" />风粒子（GPGPU 流线）</label
         >
