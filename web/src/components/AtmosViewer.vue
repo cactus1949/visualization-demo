@@ -395,7 +395,10 @@ function leaveKind(prev: SectionKind | null | undefined): void {
   if (prev === "polyline") clearPolyline();
   if (prev === "box") clearBox();
   if (prev === "height") hslice?.setHandleVisible(false);
-  if (prev === "lon" || prev === "lat") vsection?.setDragging(false);
+  if (prev === "lon" || prev === "lat") {
+    vsection?.setDragging(false);
+    vsection?.setHandleVisible(false);
+  }
   annotations?.removePrefixed("section-readout");
   annotations?.removePrefixed("height-readout");
 }
@@ -406,10 +409,8 @@ function updateSlice(): void {
   const on = section.enabled && section.kind === "height";
   slice.enabled = on;
   hslice.group.visible = on;
-  if (!on) {
-    hslice.setHandleVisible(false);
-    return;
-  }
+  hslice.setHandleVisible(on);
+  if (!on) return;
   const b = binding(section.variable);
   if (!b) {
     hslice.group.visible = false;
@@ -444,6 +445,7 @@ function updateSection(): void {
   const on = section.enabled;
   const kind = section.kind;
   vsection.group.visible = on && (kind === "lon" || kind === "lat");
+  vsection.setHandleVisible(on && (kind === "lon" || kind === "lat"));
   if (kind === "lon") {
     section.azimuthDeg = 0;
     vsection.azimuthDeg = 0;
@@ -491,6 +493,7 @@ function updateSection(): void {
   const b = binding(section.variable);
   if (!b) {
     vsection.group.visible = false;
+    vsection.setHandleVisible(false);
     polyline.group.visible = false;
     boxStack.group.visible = false;
     request(section.variable);
@@ -996,7 +999,8 @@ function processPointer(): void {
   const picked = annotations?.pick(pointerEvent.clientX, pointerEvent.clientY);
   const handle = Boolean(picked?.draggable);
   const overSection = (picked?.userData as { pickable?: string } | undefined)?.pickable === "section";
-  vsection?.setHighlight(overSection);
+  const sectionGripsOn = section.enabled && (section.kind === "lon" || section.kind === "lat");
+  vsection?.setHighlight(sectionGripsOn && overSection);
   if (drag.active || vertexIndex >= 0 || boxCorner >= 0 || boxDrawing) canvas.value!.style.cursor = "grabbing";
   else canvas.value!.style.cursor = handle ? "grab" : "";
   if (layers.probe && !section.drawMode) probeFromPointer(false);
@@ -1820,7 +1824,7 @@ onBeforeUnmount(() => {
         >
         <label v-else class="row">颜色 <input v-model="particleParams.color" type="color" /></label>
         <label class="slider"
-          >高度下限 {{ particleParams.heightMin }} m
+          >粒子高度下限 {{ particleParams.heightMin }} m
           <input
             v-model.number="particleParams.heightMin"
             type="range"
@@ -1829,7 +1833,7 @@ onBeforeUnmount(() => {
             step="10"
         /></label>
         <label class="slider"
-          >高度上限 {{ particleParams.heightMax }} m
+          >粒子高度上限 {{ particleParams.heightMax }} m
           <input
             v-model.number="particleParams.heightMax"
             type="range"

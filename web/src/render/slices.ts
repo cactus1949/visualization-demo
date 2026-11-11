@@ -157,6 +157,7 @@ export class HorizontalSlice {
   private layer: AnnotationLayer | null = null;
   private readonly handleId = "height-handle";
   private readonly readoutId = "height-readout";
+  private handlesOn = false;
 
   constructor(private readonly domain: Domain) {
     this.material = new SliceMaterial(domain);
@@ -189,8 +190,13 @@ export class HorizontalSlice {
   }
 
   setHandleVisible(on: boolean): void {
-    this.layer?.setVisible(this.handleId, on);
-    if (!on) this.layer?.setVisible(this.readoutId, false);
+    this.handlesOn = on;
+    if (!on) {
+      this.layer?.remove(this.handleId);
+      this.layer?.setVisible(this.readoutId, false);
+      return;
+    }
+    this.syncHandle();
   }
 
   setDragging(on: boolean, heightM?: number): void {
@@ -219,17 +225,21 @@ export class HorizontalSlice {
 
   private syncHandle(): void {
     if (!this.layer) return;
-    const visible = this.group.visible;
+    const visible = this.handlesOn && this.group.visible;
+    if (!visible) {
+      this.layer.remove(this.handleId);
+      this.layer.setVisible(this.readoutId, false);
+      return;
+    }
     this.layer.addHandle(this.handleId, {
       anchor: this.handleAnchor(),
       role: "fixed",
       variant: "grip",
       axis: "y",
       draggable: true,
-      visible,
+      visible: true,
       userData: { pickable: "height-handle" },
     });
-    if (!visible) this.layer.setVisible(this.readoutId, false);
   }
 
   dispose(): void {
@@ -260,6 +270,7 @@ export class VerticalSection {
   private readonly handleId = "section-handle";
   private readonly readoutId = "section-readout";
   private dragging = false;
+  private handlesOn = false;
 
   constructor(private readonly domain: Domain) {
     this.material = new SliceMaterial(domain);
@@ -342,7 +353,7 @@ export class VerticalSection {
     const top = this.domain.top;
     if (!chord) {
       this.group.visible = false;
-      this.layer?.setVisible(this.handleId, false);
+      this.clearHandle();
       return;
     }
     const [a, b] = chord;
@@ -363,6 +374,15 @@ export class VerticalSection {
 
   /** Screen-space handles ignore vertical exaggeration; kept as a no-op for callers. */
   setHandleScale(_exaggeration: number): void {}
+
+  setHandleVisible(on: boolean): void {
+    this.handlesOn = on;
+    if (!on) {
+      this.clearHandle();
+      return;
+    }
+    this.update();
+  }
 
   setHighlight(on: boolean): void {
     this.material.uniforms.uHighlight.value = on ? 1 : 0;
@@ -391,12 +411,21 @@ export class VerticalSection {
   }
 
   syncAnnotations(): void {
-    this.layer?.setVisible(this.handleId, this.group.visible);
-    if (!this.group.visible) this.layer?.setVisible(this.readoutId, false);
+    if (!this.handlesOn || !this.group.visible) this.clearHandle();
+    else this.update();
+  }
+
+  private clearHandle(): void {
+    this.layer?.remove(this.handleId);
+    this.layer?.setVisible(this.readoutId, false);
   }
 
   private syncHandle(x: number, y: number, z: number): void {
     if (!this.layer) return;
+    if (!this.handlesOn || !this.group.visible) {
+      this.clearHandle();
+      return;
+    }
     const lon = Math.abs(this.azimuthDeg % 180) < 45 || Math.abs(this.azimuthDeg % 180) > 135;
     this.layer.addHandle(this.handleId, {
       anchor: { x, y, z },
@@ -404,10 +433,9 @@ export class VerticalSection {
       variant: "grip",
       axis: lon ? "x" : "z",
       draggable: true,
-      visible: this.group.visible,
+      visible: true,
       userData: { pickable: "section" },
     });
-    if (!this.group.visible) this.layer.setVisible(this.readoutId, false);
   }
 
   dispose(): void {

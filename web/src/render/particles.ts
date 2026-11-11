@@ -50,8 +50,12 @@ export const DEFAULT_PARTICLES: ParticleParams = {
   colorMode: "speed",
   colormap: "glacier",
   color: "#8fe9ff",
+  // Spawn/live range in real metres (not view exaggeration). Default stays near the
+  // surface so the near-ground wind is dense; raise heightMax to fill the full column.
+  // Display height is still scaled by atmos.root.scale.y (视图垂直夸张).
   heightMin: 20,
   heightMax: 300,
+  // Scales the vertical wind component during advection only; not the view exaggeration.
   wExaggeration: 1,
   timeScale: 150,
   additive: false,

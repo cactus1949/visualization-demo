@@ -40,6 +40,10 @@ const VIEWS = [
   "v6_2-box-empty",
   "v6_2-box-40",
   "v6_2-box-exag",
+  "v6_3-unfolded",
+  "v6_3-box-drag",
+  "v6_3-particles-1x",
+  "v6_3-particles-exag",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -271,6 +275,34 @@ await page.evaluate((v) => {
     api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 0, heightMaxM: 1000, stepLevels: 1, defined: true });
     api.setSection({ variable: "speed", opacity: 0.75 });
     api.setCamera(v === "v6_2-box-exag" ? [-7.5, 3.6, 9.5] : [-6.5, 1.7, 8.5], [0, v === "v6_2-box-exag" ? 1.2 : 0.45, 0]);
+  } else if (v === "v6_3-unfolded") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSection({ variable: "tke", opacity: 0.85 });
+    api.selectPolylineVertex(1);
+    api.setCamera([-8, 5.2, 14], [0, 0.6, 0]);
+  } else if (v === "v6_3-box-drag") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    // Plant height + lon grips first, then switch to box: leftover grips must disappear.
+    api.setSlice({ variable: "speed", heightM: 250, opacity: 0.85, contours: 12 });
+    api.setSectionMode("lon");
+    api.setSection({ variable: "speed", offsetKm: -1.0, opacity: 0.6 });
+    api.setSectionMode("box");
+    api.setCamera([0, 18, 0.2], [0, 0, 0]);
+  } else if (v === "v6_3-particles-1x" || v === "v6_3-particles-exag") {
+    const hi = v === "v6_3-particles-exag";
+    api.setLayer("particles", true);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(hi ? 8 : 1);
+    api.setSectionMode("box");
+    api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
+    api.setSection({ variable: "speed", opacity: 0.55 });
+    api.setCamera(hi ? [-8.5, 5.2, 11] : [-8.5, 2.2, 11], [0, hi ? 1.6 : 0.35, 0]);
   } else {
     api.setView("overview");
   }
@@ -313,6 +345,10 @@ if (
     "v6_2-box-exag",
     "v6_2-height-handle",
     "v6_2-lon-handle",
+    "v6_3-unfolded",
+    "v6_3-box-drag",
+    "v6_3-particles-1x",
+    "v6_3-particles-exag",
   ].includes(view)
 ) {
   await page.evaluate(() => {
@@ -336,6 +372,31 @@ await page.evaluate(() => window.__atmosApi.advance(3, 1 / 60));
 const after = await page.evaluate(() => window.__atmosApi.sampleParticle());
 await page.waitForTimeout(2500);
 const status = await page.evaluate(() => window.__atmosApi.status());
+let gripInfo = null;
+if (view === "v6_3-box-drag") {
+  const canvas = page.locator("canvas.canvas");
+  const box = await canvas.boundingBox();
+  if (box) {
+    const x0 = box.x + box.width * 0.38;
+    const y0 = box.y + box.height * 0.42;
+    const x1 = box.x + box.width * 0.62;
+    const y1 = box.y + box.height * 0.62;
+    await page.mouse.move(x0, y0);
+    await page.waitForTimeout(200);
+    await page.mouse.down();
+    await page.mouse.move(x1, y1, { steps: 12 });
+    await page.waitForTimeout(400);
+  }
+  gripInfo = await page.evaluate(() => {
+    const grips = [...document.querySelectorAll(".anno-grip")];
+    const visible = grips.filter((el) => !el.classList.contains("anno-hidden") && el.style.display !== "none");
+    return {
+      total: grips.length,
+      visible: visible.length,
+      icons: visible.map((el) => el.textContent?.trim() ?? ""),
+    };
+  });
+}
 if (view === "v6_2-panel-section") {
   const panel = page.locator(".panel");
   await panel.evaluate((el) => {
@@ -359,6 +420,7 @@ console.log(
     particleMoved: before.some((v, i) => Math.abs(v - after[i]) > 1e-6),
     particleSampleBefore: before,
     particleSampleAfter: after,
+    gripInfo,
     consoleErrors: consoleErrors.slice(0, 10),
   }),
 );

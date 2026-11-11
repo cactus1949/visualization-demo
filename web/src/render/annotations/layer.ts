@@ -323,6 +323,7 @@ export class AnnotationLayer {
       item.height = d;
     }
     if (item.ring) item.ring.setAttribute("stroke", color);
+    if (desc.visible === false) item.el.classList.add("anno-hidden");
   }
 
   private projectToScreen(
