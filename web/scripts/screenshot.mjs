@@ -67,6 +67,8 @@ const VIEWS = [
   "v6_8-box-drag-labels",
   "v6_9-ground-range-full",
   "v6_9-ground-range-narrow",
+  "v6_10-volume-cuts",
+  "v6_10-section-v",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -334,6 +336,31 @@ await page.evaluate((v) => {
     api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
     api.setSection({ variable: "speed", opacity: 0.55 });
     api.setCamera(v === "v6_7-box-back" ? [9.5, 6.5, -11] : [-9.5, 6.5, 11], [0, 0.5, 0]);
+  } else if (v === "v6_10-volume-cuts") {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setExaggeration(3);
+    api.setSection({ enabled: false });
+    api.setVolume({ enabled: true, variable: "wind_shear", opacity: 2, threshold: 0, filterSlices: true });
+    api.setCuts({ y: [0.25, 0.75], z: [0.2, 0.8], faces: true });
+    api.setCamera([-12.5, 7.2, 11.5], [0.4, 0.6, -0.4]);
+  } else if (v === "v6_10-section-v") {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    // Reproduce the leftover-filter order: volume icing first, then a section of v.
+    api.setVolume({ enabled: true, variable: "icing_index", filterSlices: true });
+    api.setSectionMode("lon");
+    api.setSection({
+      variable: "v",
+      colormap: "glacier",
+      autoRange: false,
+      min: -15,
+      opacity: 1,
+      lowAlpha: false,
+      contours: 0,
+      offsetKm: -0.4,
+    });
+    api.setCamera([-14, 5.5, 2], [0.4, 0.7, -0.4]);
   } else if (v.startsWith("v6_9-ground-range-")) {
     api.setView("overview");
     api.setLayer("particles", false);
@@ -425,6 +452,13 @@ await page.evaluate((v) => {
 }, view);
 if (view.startsWith("v6_5-tint")) {
   await page.waitForFunction(() => window.__atmosApi.hasData("t2m") === true, null, { timeout: 90_000 });
+}
+if (view === "v6_10-volume-cuts") {
+  await page.waitForFunction(() => window.__atmosApi.hasData("wind_shear") === true, null, { timeout: 120_000 });
+  await page.waitForFunction(() => window.__atmosStatus?.volume === "wind_shear", null, { timeout: 120_000 });
+}
+if (view === "v6_10-section-v") {
+  await page.waitForFunction(() => window.__atmosApi.hasData("v") === true, null, { timeout: 120_000 });
 }
 if (view.startsWith("v6_9-ground-range-")) {
   await page.waitForFunction(() => window.__atmosApi.hasData("t2m") === true, null, { timeout: 120_000 });
@@ -543,6 +577,10 @@ await page.waitForTimeout(2500);
 const status = await page.evaluate(() => window.__atmosApi.status());
 let gripInfo = null;
 let debugCompare = null;
+let debugVisibility = null;
+if (view.startsWith("v6_10-")) {
+  debugVisibility = await page.evaluate(() => window.__atmosApi.debugVisibility());
+}
 let dragLabels = null;
 if (view.startsWith("v6_8-")) {
   debugCompare = await page.evaluate(() => {
@@ -632,6 +670,7 @@ console.log(
     particleSampleAfter: after,
     gripInfo,
     debugCompare,
+    debugVisibility,
     dragLabels,
     consoleErrors: consoleErrors.slice(0, 10),
   }),

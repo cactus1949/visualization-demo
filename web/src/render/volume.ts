@@ -200,7 +200,9 @@ void main() {
     float n = clamp((v - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
     if (n < uThreshold) continue;
     vec3 c = texture(uColormap, vec2(n, 0.5)).rgb;
-    float a = uOpacity * smoothstep(uThreshold, 1.0, n) * dt * 6.0;
+    // Same onset as sections' low-value alpha: transparent below the threshold,
+    // fully "on" 0.25 above it; higher values stay somewhat denser.
+    float a = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * dt * 6.0;
     acc.rgb += (1.0 - acc.a) * a * c;
     acc.a += (1.0 - acc.a) * a;
   }

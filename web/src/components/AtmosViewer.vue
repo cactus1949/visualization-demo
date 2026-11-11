@@ -26,6 +26,15 @@ import {
 } from "../render/particles";
 import { COLORMAPS, COLORMAP_LABELS, DIVERGING, colormapRGB } from "../render/colormaps";
 import { LOW_ALPHA_RAMP } from "../render/slices";
+import {
+  discardedFraction,
+  fallbackRange,
+  formatValue,
+  isSparseVar as sparseOf,
+  prettyUnit,
+  sanitizeRange,
+  thresholdPhysical,
+} from "../state/fieldStyle";
 import ColorLegend from "./ColorLegend.vue";
 import ProfileChart from "./ProfileChart.vue";
 import RangeSlider from "./RangeSlider.vue";
@@ -109,7 +118,11 @@ const layers = reactive({
   volumeThreshold: 0.2,
   volumeFilterMin: 0,
   volumeFilterMax: 1,
-  filterSlices: false,
+  /** When true, volume cut faces use the volume value window and transparent threshold. */
+  filterSlices: true,
+  /** Independent low-value alpha for volume cut faces (切面). */
+  cutLowAlpha: false,
+  cutLowThreshold: 0.15,
   probe: false,
   probeFollowMouse: false,
 });
@@ -232,40 +245,48 @@ function defaultColormap(name: string): string {
   return meta.colormap === "blues" ? "cividis" : meta.colormap;
 }
 
-const SPARSE_VARS = new Set(["icing_index", "icing_accum", "cloud", "cloud_low", "precip", "risk_level"]);
 const sparseCache = new Map<string, boolean>();
-/** Sparse, non-negative fields (mostly ~0) default to a transparent low end in sections. */
 function isSparseVar(name: string): boolean {
-  if (SPARSE_VARS.has(name)) return true;
-  if (name === SPEED) return false;
-  const meta = manifest.value?.variables[name];
-  if (!meta || meta.data_min < 0) return false;
-  const cached = sparseCache.get(name);
-  if (cached !== undefined) return cached;
-  const data = loaded(name)?.data;
-  if (!data) return false;
-  const [lo, hi] = displayRange(name) ?? [meta.data_min, meta.data_max];
-  const cut = lo + 0.02 * (hi - lo);
-  const step = Math.max(1, Math.floor(data.length / 200_000));
-  let low = 0;
-  let total = 0;
-  for (let i = 0; i < data.length; i += step) {
-    total += 1;
-    if (data[i]! <= cut) low += 1;
-  }
-  const sparse = total > 0 && low / total >= 0.5;
-  sparseCache.set(name, sparse);
-  return sparse;
+  return sparseOf(name, { manifest: manifest.value, data: loaded(name)?.data, cache: sparseCache });
+}
+
+function sectionFallback(name: string): [number, number] {
+  return displayRange(name) ?? fallbackRange(name, manifest.value?.variables[name]);
+}
+
+/** Keep section min/max finite and ordered; empty / NaN inputs fall back to display_range. */
+function commitSectionRange(): void {
+  const [lo, hi] = sanitizeRange(section.min, section.max, sectionFallback(section.variable));
+  if (section.min !== lo) section.min = lo;
+  if (section.max !== hi) section.max = hi;
 }
 
 /** Colour mapping the volume uses for `name`: follows the section style for the same variable. */
 function volumeStyleFor(name: string): { colormap: string; min: number; max: number } {
   if (section.variable === name) {
-    return { colormap: section.colormap, min: section.min, max: section.max };
+    const [min, max] = sanitizeRange(section.min, section.max, sectionFallback(name));
+    return { colormap: section.colormap, min, max };
   }
   const cmap = defaultColormap(name);
-  const [min, max] = autoRange(name, cmap);
+  const [lo, hi] = autoRange(name, cmap);
+  const [min, max] = sanitizeRange(lo, hi, sectionFallback(name));
   return { colormap: cmap === "rdbu" ? "magma" : cmap, min, max };
+}
+
+function cutFaceStyle(): Omit<CompositeSurface, "kind" | "binding" | "field" | "height" | "normalX" | "normalZ" | "offset" | "clipX0" | "clipX1" | "clipZ0" | "clipZ1"> {
+  const vs = volume?.bound ?? volumeStyleFor(layers.volumeVar);
+  const [min, max] = sanitizeRange(vs.min, vs.max, sectionFallback(layers.volumeVar));
+  const follow = Boolean(layers.filterSlices && volumeWanted());
+  // Sparse defaults keep cut faces from turning into opaque dark walls even when
+  // the volume threshold is 0; "follow" raises the cutoff to the volume threshold.
+  const lowAlpha = layers.cutLowAlpha || (follow && layers.volumeThreshold > 0);
+  const lowThreshold = follow ? Math.max(layers.cutLowThreshold, layers.volumeThreshold) : layers.cutLowThreshold;
+  return {
+    min, max, colormap: vs.colormap, opacity: 0.9, contours: 0,
+    filterMin: layers.volumeFilterMin, filterMax: layers.volumeFilterMax,
+    filterEnable: follow,
+    lowAlpha, lowThreshold,
+  };
 }
 
 function volumeFullRange(name: string): [number, number] {
@@ -294,11 +315,13 @@ function resetVolumeFilter(name: string): void {
 }
 
 function updateSliceFilter(): void {
-  const enabled = layers.filterSlices;
-  hslice?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
-  vsection?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
-  polyline?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
-  boxStack?.material.setFilter(layers.volumeFilterMin, layers.volumeFilterMax, enabled);
+  // Never leak the volume value window onto sections. A leftover window from a
+  // previous volume variable (e.g. icing 0–1) would discard a section of v.
+  // Cut faces read the window through cutFaceStyle() when 切面跟随 is on.
+  hslice?.material.setFilter(0, 1, false);
+  vsection?.material.setFilter(0, 1, false);
+  polyline?.material.setFilter(0, 1, false);
+  boxStack?.material.setFilter(0, 1, false);
 }
 
 function updateVolumeFilter(): void {
@@ -340,6 +363,29 @@ let raf = 0;
 let disposed = false;
 const requestedAt: Record<string, number> = {};
 const volumeColorRange = ref<[number, number]>([0, 1]);
+
+/** Physical value of the volume transparent threshold on the colour-mapping range. */
+const volumeThresholdPhysical = computed(() => {
+  const [lo, hi] = volumeColorRange.value;
+  return thresholdPhysical(lo, hi, layers.volumeThreshold);
+});
+const drawHint = computed(() => {
+  if (section.kind === "polyline")
+    return section.drawMode
+      ? `左键加点（已 ${section.points.length} 点）· 双击/回车/右键/「完成」结束 · 右键顶点删点 · Esc 取消`
+      : "查看模式：可拖动顶点 · 「编辑」继续加点 ·「重画」重新绘制";
+  if (section.kind === "box")
+    return section.drawMode
+      ? "按住左键拖拽框选，松开即完成 · Esc 取消"
+      : "查看模式：可拖动四角 ·「重画」重新框选 · 框选时暂停体渲染";
+  return "";
+});
+const volumeThresholdHint = computed(() => {
+  const unit = prettyUnit(unitsOf(layers.volumeVar));
+  const phys = formatValue(volumeThresholdPhysical.value);
+  return `${layers.volumeThreshold.toFixed(2)} → ${phys}${unit ? " " + unit : ""}`;
+});
+
 const volumeFilterVariable = ref("");
 const volumeFilterNeedsSpeedRange = ref(false);
 const depthOccluders: THREE.Object3D[] = [];
@@ -459,6 +505,15 @@ function clearBox(): void {
   boxStack?.clearAnnotations();
   boxStack?.update({ ...section.box, levels: levelsOf(), defined: false, drawing: false });
 }
+/** 清除 button: drop the drawn geometry and stay in view mode. */
+function clearDrawn(): void {
+  if (section.kind === "polyline") clearPolyline();
+  if (section.kind === "box") clearBox();
+  boxDrawing = false;
+  drawStart = null;
+  section.drawMode = false;
+  updateSection();
+}
 function leaveKind(prev: SectionKind | null | undefined): void {
   // Mode changes can also arrive through the API during a captured drag.
   if (pointerDown.id >= 0 && canvas.value?.hasPointerCapture(pointerDown.id)) canvas.value.releasePointerCapture(pointerDown.id);
@@ -499,6 +554,7 @@ function updateSlice(): void {
   }
   if (section.autoRange)
     [section.min, section.max] = autoRange(section.variable, section.colormap, slice.heightM);
+  commitSectionRange();
   syncStyleToSlice();
   hslice.material.bind(b);
   hslice.material.style(section);
@@ -580,6 +636,7 @@ function updateSection(): void {
     return;
   }
   if (section.autoRange) [section.min, section.max] = autoRange(section.variable, section.colormap);
+  commitSectionRange();
   syncStyleToSlice();
   vsection.material.bind(b);
   vsection.material.style(section);
@@ -735,7 +792,7 @@ function syncVolumeSlices(): void {
     cutBounds: cutBounds(domain, cuts),
     cutFaces: cuts.faces && volumeWanted(),
     volumeField: volumeWanted() ? binding(layers.volumeVar) : null,
-    volumeStyle: { min: volumeColorRange.value[0], max: volumeColorRange.value[1], opacity: 0.9, colormap: defaultColormap(layers.volumeVar) === "rdbu" ? "magma" : defaultColormap(layers.volumeVar), contours: 0, filterMin, filterMax, filterEnable: Boolean(volumeWanted()) },
+    volumeStyle: cutFaceStyle(),
   });
   if (polyOn && vb && s) {
     for (let i = 0; i < section.points.length - 1 && surfaces.length < 16; i += 1) {
@@ -989,7 +1046,92 @@ function groundPoint(): THREE.Vector3 | null {
   return p;
 }
 
+// ---------------------------------------------------------------- interaction arbiter
+// Who owns a plain left click on the map. Explicit drag handles (section grips,
+// height handle, polyline vertices, box corners) are always grabbed first; for
+// everything else: active drawing tool > probe (if enabled) > camera.
+type ClickOwner = "draw" | "probe" | "camera";
+function hasGeometry(kind: SectionKind = section.kind): boolean {
+  if (kind === "polyline") return section.points.length >= 2;
+  if (kind === "box") return Boolean(section.box.defined);
+  return true;
+}
+function clickOwner(): ClickOwner {
+  if (section.enabled && section.drawMode && (section.kind === "polyline" || section.kind === "box")) return "draw";
+  if (layers.probe) return "probe";
+  return "camera";
+}
+/** Start drawing the current polyline/box (keeps existing geometry unless `fresh`). */
+let drawBackup: { points: { x: number; z: number }[]; box: typeof section.box } | null = null;
+function startDrawing(fresh = false): void {
+  if (section.kind !== "polyline" && section.kind !== "box") return;
+  // Esc restores what was there before 编辑 / 重画.
+  drawBackup = { points: section.points.map((q) => ({ ...q })), box: { ...section.box } };
+  if (fresh) {
+    if (section.kind === "polyline") clearPolyline();
+    else clearBox();
+  }
+  section.enabled = true;
+  section.drawMode = true;
+  if (section.kind === "polyline") unfoldedVisible.value = true;
+  updateSection();
+}
+/** Leave the drawing state; geometry is kept, incomplete geometry is dropped. */
+function finishDrawing(): void {
+  if (!section.drawMode) return;
+  if (boxDrawing) {
+    boxDrawing = false;
+    drawStart = null;
+    if (controls) controls.enabled = true;
+    if (pointerDown.id >= 0 && canvas.value?.hasPointerCapture(pointerDown.id)) canvas.value.releasePointerCapture(pointerDown.id);
+    const area = Math.abs(section.box.x1 - section.box.x0) * Math.abs(section.box.z1 - section.box.z0);
+    section.box.defined = area > 0.01;
+  }
+  drawStart = null;
+  if (section.kind === "polyline") {
+    // A double-click lands two clicks on the same spot: drop the duplicate tail point.
+    const pts = section.points;
+    while (pts.length >= 2 && Math.hypot(pts[pts.length - 1]!.x - pts[pts.length - 2]!.x, pts[pts.length - 1]!.z - pts[pts.length - 2]!.z) < 0.05) pts.pop();
+    if (pts.length < 2) clearPolyline();
+  }
+  if (section.kind === "box" && !section.box.defined) clearBox();
+  drawBackup = null;
+  section.drawMode = false;
+  updateSection();
+}
+/** Esc: abort the drawing. An in-progress box drag is discarded; finished parts stay. */
+function cancelDrawing(): void {
+  if (!section.drawMode) return;
+  if (boxDrawing) {
+    boxDrawing = false;
+    section.box.defined = false;
+    if (controls) controls.enabled = true;
+    if (pointerDown.id >= 0 && canvas.value?.hasPointerCapture(pointerDown.id)) canvas.value.releasePointerCapture(pointerDown.id);
+    pointerDown.active = false;
+  }
+  const backup = drawBackup;
+  if (backup) {
+    section.points = backup.points;
+    Object.assign(section.box, backup.box);
+  }
+  finishDrawing();
+}
+function onDrawKey(e: KeyboardEvent): void {
+  const target = e.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA")) return;
+  if (!section.drawMode) return;
+  if (e.key === "Escape") { cancelDrawing(); e.preventDefault(); }
+  else if (e.key === "Enter") { finishDrawing(); e.preventDefault(); }
+}
+function onDoubleClick(event: MouseEvent): void {
+  if (clickOwner() !== "draw" || section.kind !== "polyline") return;
+  event.preventDefault();
+  finishDrawing();
+}
+
+const rightDown = { x: 0, y: 0, active: false };
 function onPointerDown(event: PointerEvent): void {
+  if (event.button === 2) { rightDown.x = event.clientX; rightDown.y = event.clientY; rightDown.active = true; }
   if (!manifest.value || event.button !== 0) return;
   setPointer(event);
   pointerDown.id = event.pointerId;
@@ -999,7 +1141,7 @@ function onPointerDown(event: PointerEvent): void {
   pointerDown.active = true;
   const picked = annotations?.pick(event.clientX, event.clientY);
   const pickedKind = (picked?.userData as { pickable?: string; index?: number } | undefined)?.pickable;
-  if (section.drawMode && section.kind === "polyline" && pickedKind === "polyline-vertex") {
+  if (section.enabled && section.kind === "polyline" && pickedKind === "polyline-vertex") {
     vertexIndex = (picked?.userData as { index?: number }).index ?? -1;
     if (picked) annotations?.setState(picked.id, "dragging");
     controls.enabled = false; canvas.value!.setPointerCapture(event.pointerId); event.preventDefault(); return;
@@ -1048,7 +1190,7 @@ function onPointerDown(event: PointerEvent): void {
     event.preventDefault();
     return;
   }
-  if (section.drawMode) {
+  if (clickOwner() === "draw") {
     const p = groundPoint();
     if (!p) return;
     if (section.kind === "polyline") {
@@ -1126,10 +1268,23 @@ function processPointer(): void {
   vsection?.setHighlight(sectionGripsOn && overSection);
   if (drag.active || vertexIndex >= 0 || boxCorner >= 0 || boxDrawing) canvas.value!.style.cursor = "grabbing";
   else canvas.value!.style.cursor = handle ? "grab" : "";
-  if (layers.probe && !section.drawMode) probeFromPointer(false);
+  if (clickOwner() === "probe") probeFromPointer(false);
 }
 
 function onPointerUp(event: PointerEvent): void {
+  if (event.button === 2) {
+    // A right *click* (not a right-drag orbit) while drawing a polyline:
+    // on a vertex deletes it, anywhere else finishes the polyline.
+    const still = rightDown.active && Math.hypot(event.clientX - rightDown.x, event.clientY - rightDown.y) <= 5;
+    rightDown.active = false;
+    if (still && clickOwner() === "draw" && section.kind === "polyline") {
+      const picked = annotations?.pick(event.clientX, event.clientY);
+      const ud = picked?.userData as { pickable?: string; index?: number } | undefined;
+      if (ud?.pickable === "polyline-vertex" && ud.index !== undefined) { section.points.splice(ud.index, 1); updateSection(); }
+      else finishDrawing();
+    }
+    return;
+  }
   const wasClick = pointerDown.active && !pointerDown.moved && !drag.active && event.button === 0;
   if (drag.active) {
     drag.active = false;
@@ -1150,6 +1305,8 @@ function onPointerUp(event: PointerEvent): void {
     controls.enabled = true;
     canvas.value!.releasePointerCapture(event.pointerId);
     pointerDown.active = false;
+    // Mouse-up finishes the box: back to view mode (corners stay draggable).
+    if (section.box.defined) section.drawMode = false;
     updateSection();
     return;
   }
@@ -1164,29 +1321,24 @@ function onPointerUp(event: PointerEvent): void {
     pointerDown.active = false;
     return;
   }
-  if (section.drawMode && section.kind === "polyline" && wasClick && drawStart) {
+  if (clickOwner() === "draw" && section.kind === "polyline" && wasClick && drawStart) {
     section.points = [...section.points, { x: drawStart.x, z: drawStart.z }].slice(-16);
     drawStart = null;
     unfoldedVisible.value = true;
     updateSection();
   }
   pointerDown.active = false;
-  if (wasClick && layers.probe) {
+  if (wasClick && clickOwner() === "probe") {
     setPointer(event);
     probeFromPointer(true);
   }
 }
 
 function onContextMenu(event: MouseEvent): void {
-  if (!section.drawMode) return;
+  if (clickOwner() !== "draw") return;
   event.preventDefault();
-  if (section.kind !== "polyline") return;
-  setPointer(event as unknown as PointerEvent);
-  const picked = annotations?.pick(event.clientX, event.clientY);
-  const i = (picked?.userData as { pickable?: string; index?: number } | undefined)?.pickable === "polyline-vertex"
-    ? (picked!.userData as { index: number }).index
-    : -1;
-  if (i >= 0 && section.points.length >= 1) { section.points.splice(i, 1); updateSection(); }
+  // Right-click handling (delete vertex / finish) happens on pointerup so a
+  // right-drag orbit is not mistaken for a click.
 }
 
 function setDrawOrbit(on: boolean): void {
@@ -1196,15 +1348,19 @@ function setDrawOrbit(on: boolean): void {
 }
 
 function selectKind(kind: SectionKind): void {
-  if ((kind === "polyline" || kind === "box") && section.kind === kind && section.enabled && section.drawMode) {
-    section.drawMode = false;
+  if ((kind === "polyline" || kind === "box") && section.kind === kind && section.enabled) {
+    // Clicking the active tool again toggles drawing <-> view.
+    if (section.drawMode) finishDrawing();
+    else startDrawing(false);
     return;
   }
   const prev = section.enabled ? section.kind : null;
   if (prev && prev !== kind) leaveKind(prev);
   section.kind = kind;
   section.enabled = true;
-  section.drawMode = kind === "polyline" || kind === "box";
+  // Entering a drawing tool with no geometry starts drawing; otherwise view mode.
+  section.drawMode = (kind === "polyline" || kind === "box") && !(prev === kind && hasGeometry(kind));
+  drawBackup = null;
   if (kind === "lon") section.azimuthDeg = 0;
   if (kind === "lat") section.azimuthDeg = 90;
   if (kind === "polyline") unfoldedVisible.value = true;
@@ -1335,19 +1491,28 @@ function exposeApi(): void {
       }
       if (section.kind === "lon") section.azimuthDeg = 0;
       if (section.kind === "lat") section.azimuthDeg = 90;
-      section.drawMode = section.kind === "polyline" || section.kind === "box";
+      if (p.drawMode === undefined) section.drawMode = (section.kind === "polyline" || section.kind === "box") && !hasGeometry();
       slice.enabled = section.kind === "height";
       updateSection();
     },
     setSectionMode: (kind: SectionKind) => { selectKind(kind); },
+    /** Drawing-state controls, mirroring the panel buttons / keys. */
+    drawAction: (action: "edit" | "redraw" | "clear" | "finish" | "cancel") => {
+      if (action === "edit") startDrawing(false);
+      else if (action === "redraw") startDrawing(true);
+      else if (action === "clear") clearDrawn();
+      else if (action === "finish") finishDrawing();
+      else cancelDrawing();
+    },
+    interactionState: () => ({ owner: clickOwner(), drawing: section.drawMode, kind: section.kind, points: section.points.length, boxDefined: Boolean(section.box.defined), probe: layers.probe, pinned: fixedCell.value ? { ...fixedCell.value } : null, box: { ...section.box } }),
     setPolyline: (points: { x: number; z: number }[]) => {
       if (section.kind !== "polyline") {
         if (section.enabled) leaveKind(section.kind);
       }
       section.kind = "polyline";
       section.enabled = true;
-      section.drawMode = true;
       section.points = points.slice(0, 16);
+      section.drawMode = section.points.length < 2;
       unfoldedVisible.value = true;
       updateSection();
     },
@@ -1355,10 +1520,10 @@ function exposeApi(): void {
       if (section.kind !== "box" && section.enabled) leaveKind(section.kind);
       section.kind = "box";
       section.enabled = true;
-      section.drawMode = true;
       Object.assign(section.box, p);
       const hasArea = Math.abs((section.box.x1 ?? 0) - (section.box.x0 ?? 0)) * Math.abs((section.box.z1 ?? 0) - (section.box.z0 ?? 0)) > 1e-6;
       section.box.defined = p.defined !== undefined ? Boolean(p.defined) : hasArea;
+      section.drawMode = !section.box.defined;
       updateSection();
     },
     setCuts: (p: Partial<CutState>) => { if (p.x) cuts.x = [...p.x] as [number, number]; if (p.y) cuts.y = [...p.y] as [number, number]; if (p.z) cuts.z = [...p.z] as [number, number]; if (p.faces !== undefined) cuts.faces = p.faces; clampCuts(cuts); updateVolume(); },
@@ -1419,6 +1584,8 @@ function exposeApi(): void {
       filterMin?: number;
       filterMax?: number;
       filterSlices?: boolean;
+      cutLowAlpha?: boolean;
+      cutLowThreshold?: number;
     }) => {
       if (p.variable !== undefined) {
         layers.volumeVar = p.variable;
@@ -1431,6 +1598,8 @@ function exposeApi(): void {
       if (p.filterMin !== undefined) layers.volumeFilterMin = p.filterMin;
       if (p.filterMax !== undefined) layers.volumeFilterMax = p.filterMax;
       if (p.filterSlices !== undefined) layers.filterSlices = p.filterSlices;
+      if (p.cutLowAlpha !== undefined) layers.cutLowAlpha = Boolean(p.cutLowAlpha);
+      if (p.cutLowThreshold !== undefined) layers.cutLowThreshold = Number(p.cutLowThreshold);
     },
     setCamera: (pos: [number, number, number], target: [number, number, number]) => {
       camera.position.set(...pos);
@@ -1483,7 +1652,74 @@ function exposeApi(): void {
     },
     sampleParticle: () => particles?.sample() ?? [],
     sampleHistory: () => particles?.sampleHistory() ?? [],
+    debugVisibility: () => {
+      const reasons: string[] = [];
+      const volOn = Boolean(layers.volume);
+      const secOn = Boolean(section.enabled);
+      const volBinding = volOn ? Boolean(binding(layers.volumeVar)) : false;
+      if (volOn && !volBinding) reasons.push("volume-no-data");
+      if (volOn && volume && !volume.mesh.visible) reasons.push("volume-mesh-hidden");
+      const vs = volume?.bound ?? (volOn ? volumeStyleFor(layers.volumeVar) : null);
+      if (volOn && vs && !Number.isFinite(vs.min + vs.max)) reasons.push("volume-range-nan");
+      const kind = section.kind;
+      const meshOn = !secOn ? false
+        : kind === "height" ? Boolean(hslice?.group.visible)
+        : kind === "lon" || kind === "lat" ? Boolean(vsection?.group.visible)
+        : kind === "polyline" ? Boolean(polyline?.group.visible) && section.points.length >= 2
+        : kind === "box" ? Boolean(boxStack?.group.visible)
+        : false;
+      const secBinding = secOn ? Boolean(binding(section.variable)) : false;
+      if (secOn && !secBinding) reasons.push("section-no-data");
+      // A polyline/box tool that is still waiting for its first geometry is not a bug.
+      const awaitingDraw = secOn && (kind === "polyline" || kind === "box") && section.drawMode && !hasGeometry();
+      const noGeometry = secOn && (kind === "polyline" || kind === "box") && !section.drawMode && !hasGeometry();
+      if (noGeometry) reasons.push("section-no-geometry");
+      else if (secOn && !meshOn && !awaitingDraw) reasons.push("section-mesh-hidden");
+      if (secOn && !Number.isFinite(Number(section.min) + Number(section.max))) reasons.push("section-range-nan");
+      let discarded = 0;
+      if (secOn && secBinding && !awaitingDraw && !noGeometry) {
+        const data = section.variable === SPEED ? fields.speedValues : loaded(section.variable)?.data;
+        if (data) {
+          discarded = discardedFraction(data, {
+            min: section.min, max: section.max,
+            lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
+          });
+          if (discarded > 0.995) reasons.push("section-all-discarded");
+        }
+      }
+      const ok = reasons.length === 0 && (volOn || secOn);
+      if (!volOn && !secOn) reasons.push("nothing-enabled");
+      return {
+        ok,
+        reasons,
+        volume: {
+          on: volOn, visible: Boolean(volume?.mesh.visible), variable: layers.volumeVar,
+          colormap: vs?.colormap ?? null, min: vs?.min ?? null, max: vs?.max ?? null,
+          threshold: layers.volumeThreshold, thresholdPhysical: volumeThresholdPhysical.value,
+          filterMin: layers.volumeFilterMin, filterMax: layers.volumeFilterMax,
+          filterSlices: layers.filterSlices, cutFaces: cuts.faces,
+          cutLowAlpha: layers.cutLowAlpha, cutLowThreshold: layers.cutLowThreshold,
+        },
+        section: {
+          on: secOn, kind, visible: meshOn, variable: section.variable,
+          colormap: section.colormap, min: section.min, max: section.max,
+          autoRange: section.autoRange, lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
+          opacity: section.opacity, discarded, awaitingDraw,
+        },
+      };
+    },
     hasData: (name: string) => Boolean(loaded(name)),
+    /** Percentiles of a loaded variable (subsampled), for checking what a threshold hides. */
+    debugStats: (name: string) => {
+      const data = name === SPEED ? fields.speedValues : loaded(name)?.data;
+      if (!data) return null;
+      const step = Math.max(1, Math.floor(data.length / 100_000));
+      const s: number[] = [];
+      for (let i = 0; i < data.length; i += step) s.push(data[i]!);
+      s.sort((a, b) => a - b);
+      const at = (q: number) => s[Math.min(s.length - 1, Math.floor(q * (s.length - 1)))];
+      return { p01: at(0.01), p10: at(0.1), p50: at(0.5), p90: at(0.9), p99: at(0.99), max: s[s.length - 1] };
+    },
     debugArgmax: (name: string) => {
       const data = loaded(name)?.data;
       const g = manifest.value?.grid;
@@ -1609,7 +1845,8 @@ async function start(): Promise<void> {
   el.addEventListener("pointermove", onPointerMove);
   el.addEventListener("pointerup", onPointerUp);
   el.addEventListener("contextmenu", onContextMenu);
-  window.addEventListener("keydown", (e) => { if (e.key === "Escape" && section.drawMode) section.drawMode = false; });
+  window.addEventListener("keydown", onDrawKey);
+  el.addEventListener("dblclick", onDoubleClick);
   exposeApi();
   updateGround();
   raf = requestAnimationFrame(frame);
@@ -1659,6 +1896,9 @@ watch(
     section.colormap = defaultColormap(name);
     section.autoRange = true;
     section.lowAlpha = isSparseVar(name);
+    const [lo, hi] = autoRange(name, section.colormap);
+    section.min = lo;
+    section.max = hi;
   },
   { flush: "sync" },
 );
@@ -1740,11 +1980,16 @@ watch(
   () => layers.volumeVar,
   (name) => {
     if (name !== volumeFilterVariable.value) resetVolumeFilter(name);
+    layers.cutLowAlpha = isSparseVar(name);
+    layers.cutLowThreshold = 0.15;
   },
 );
 watch(
-  () => [layers.volumeFilterMin, layers.volumeFilterMax, layers.filterSlices],
-  updateVolumeFilter,
+  () => [layers.volumeFilterMin, layers.volumeFilterMax, layers.filterSlices, layers.cutLowAlpha, layers.cutLowThreshold],
+  () => {
+    updateVolumeFilter();
+    if (layers.volume) syncVolumeSlices();
+  },
 );
 watch(
   () => layers.buildings,
@@ -1781,7 +2026,9 @@ watch(
 watch(probeVariable, () => {
   if (layers.probe && (fixedCell.value || probe.value)) refreshProbe();
 });
-watch(() => section.drawMode, (on) => { setDrawOrbit(on); if (on) layers.probe = false; });
+watch(() => section.drawMode, (on) => { setDrawOrbit(on); });
+// Turning the probe on while drawing ends the drawing (geometry is kept).
+watch(() => layers.probe, (on) => { if (on && section.drawMode) finishDrawing(); });
 watch(
   () => [layers.probe, layers.probeFollowMouse],
   ([enabled, follow]) => {
@@ -1858,6 +2105,7 @@ const legends = computed(() => {
 onMounted(() => void start());
 onBeforeUnmount(() => {
   disposed = true;
+  window.removeEventListener("keydown", onDrawKey);
   cancelAnimationFrame(raf);
   resizeObserver?.disconnect();
   store?.dispose();
@@ -1924,8 +2172,12 @@ onBeforeUnmount(() => {
 
     <div class="hint">
       拖动：旋转 · 右键：平移 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 ·
-      折线/框选绘制：左键放点或拖框，右键旋转，Esc 或再点同一模式退出 ·
+      折线：左键放点，双击/回车/右键完成；框选：拖拽松开即完成；Esc 取消 ·
       打开探针 → 悬停预览位置（不改读数）→ 单击（非拖动）固定并更新廓线；可选跟随鼠标
+    </div>
+
+    <div v-if="section.enabled && section.drawMode" class="draw-chip">
+      <span class="dot" />{{ section.kind === "polyline" ? "绘制折线" : "绘制框选" }} · {{ drawHint }}
     </div>
 
     <aside v-if="panelOpen" class="panel">
@@ -2007,8 +2259,10 @@ onBeforeUnmount(() => {
               max="2"
               step="0.05"
           /></label>
-          <label class="slider"
-            >阈值 {{ layers.volumeThreshold.toFixed(2)
+          <label
+            class="slider"
+            title="色带映射范围上的归一化位置（0–1）。低于此值的体素完全透明，之上逐渐显现。与「数值窗口」不同：窗口是硬裁剪，阈值只改透明度。"
+            >透明阈值 {{ volumeThresholdHint
             }}<input
               v-model.number="layers.volumeThreshold"
               type="range"
@@ -2020,8 +2274,19 @@ onBeforeUnmount(() => {
           <div class="slider range-label"><span>ycut</span><RangeSlider :min="0" :max="1" :min-value="cuts.y[0]" :max-value="cuts.y[1]" :step="0.01" @update:min-value="cuts.y[0] = $event" @update:max-value="cuts.y[1] = $event" /></div>
           <div class="slider range-label"><span>zcut</span><RangeSlider :min="0" :max="1" :min-value="cuts.z[0]" :max-value="cuts.z[1]" :step="0.01" @update:min-value="cuts.z[0] = $event" @update:max-value="cuts.z[1] = $event" /></div>
           <label class="row"><input v-model="cuts.faces" type="checkbox" />切面</label>
-          <div class="slider range-label">
-            <span>显示范围</span>
+          <template v-if="cuts.faces">
+            <label
+              class="row"
+              title="切面上低值按阈值渐隐，避免稀疏场（如风切变、结冰指数）画出不透明的黑墙"
+              ><input v-model="layers.cutLowAlpha" type="checkbox" />切面低值透明</label
+            >
+            <label v-if="layers.cutLowAlpha" class="slider"
+              >切面透明阈值 {{ (layers.cutLowThreshold * 100).toFixed(0) }}%
+              <input v-model.number="layers.cutLowThreshold" type="range" min="0" max="0.6" step="0.01"
+            /></label>
+          </template>
+          <div class="slider range-label" title="只渲染落在此区间内的体素（硬裁剪）。色带的映射范围不变。">
+            <span>数值窗口</span>
             <RangeSlider
               :min="volumeBounds[0]"
               :max="volumeBounds[1]"
@@ -2033,8 +2298,10 @@ onBeforeUnmount(() => {
               @update:max-value="layers.volumeFilterMax = $event"
             />
           </div>
-          <label class="row"
-            ><input v-model="layers.filterSlices" type="checkbox" />截面同步过滤</label
+          <label
+            class="row"
+            title="切面同时使用体渲染的数值窗口和透明阈值。剖面模式不会套用此窗口，避免换变量后整面被裁掉。"
+            ><input v-model="layers.filterSlices" type="checkbox" />切面跟随体渲染过滤</label
           >
         </template>
       </details>
@@ -2168,20 +2435,22 @@ onBeforeUnmount(() => {
             </option>
           </select></label
         >
-        <label class="row"
-          ><input v-model="section.autoRange" type="checkbox" />自动范围
+        <label class="row" title="自动范围使用变量的 display_range，不随时次变化。手填时若某一端为空或非数字，会回退到该变量的默认范围。">
+          <input v-model="section.autoRange" type="checkbox" />自动范围
           <input
             v-model.number="section.min"
             class="num"
             type="number"
             step="any"
-            :disabled="section.autoRange" />–
+            :disabled="section.autoRange"
+            @blur="commitSectionRange" />–
           <input
             v-model.number="section.max"
             class="num"
             type="number"
             step="any"
             :disabled="section.autoRange"
+            @blur="commitSectionRange"
         /></label>
         <label class="slider"
           >不透明度 {{ section.opacity.toFixed(2)
@@ -2206,15 +2475,22 @@ onBeforeUnmount(() => {
           >位置偏移 {{ section.offsetKm.toFixed(2) }} km
           <input v-model.number="section.offsetKm" type="range" min="-12" max="12" step="0.01"
         /></label>
-        <div v-if="section.kind === 'polyline'" class="section-tools">
-          <div class="mode-picks">
-            <button type="button" @click="clearPolyline()">清除折线</button>
-            <button type="button" :class="{ on: unfoldedVisible }" @click="unfoldedVisible = !unfoldedVisible">{{ unfoldedVisible ? "隐藏展开图" : "显示展开图" }}</button>
+        <div v-if="section.enabled && (section.kind === 'polyline' || section.kind === 'box')" class="section-tools">
+          <div class="mode-picks draw-actions">
+            <template v-if="section.drawMode">
+              <button v-if="section.kind === 'polyline'" type="button" class="on" :disabled="section.points.length < 2" @click="finishDrawing()">完成</button>
+              <button type="button" @click="cancelDrawing()">取消</button>
+            </template>
+            <template v-else>
+              <button type="button" :disabled="!hasGeometry()" @click="startDrawing(false)">编辑</button>
+              <button type="button" @click="startDrawing(true)">重画</button>
+              <button type="button" :disabled="!hasGeometry()" @click="clearDrawn()">清除</button>
+            </template>
+            <button v-if="section.kind === 'polyline'" type="button" :class="{ on: unfoldedVisible }" @click="unfoldedVisible = !unfoldedVisible">{{ unfoldedVisible ? "隐藏展开图" : "显示展开图" }}</button>
           </div>
-          <div class="hint-line">左键加点，右键删点，Esc 退出</div>
+          <div class="hint-line">{{ drawHint }}</div>
         </div>
         <template v-if="section.kind === 'box'">
-          <div class="hint-line">拖拽地面框选范围 · 框选时暂停体渲染</div>
           <div class="slider range-label">
             <span>高度范围 {{ section.box.heightMinM.toFixed(0) }}–{{ section.box.heightMaxM.toFixed(0) }} m</span>
             <RangeSlider :min="0" :max="1000" :min-value="section.box.heightMinM" :max-value="section.box.heightMaxM" :step="12.5" @update:min-value="section.box.heightMinM = $event" @update:max-value="section.box.heightMaxM = $event" />
@@ -2349,6 +2625,25 @@ onBeforeUnmount(() => {
   left: 16px;
   top: 60px;
 }
+.draw-chip {
+  position: absolute;
+  z-index: 6;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(10, 22, 34, 0.86);
+  border: 1px solid rgba(92, 225, 255, 0.55);
+  color: #d8f6ff;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.draw-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: #5ce1ff; box-shadow: 0 0 6px #5ce1ff; }
 .hint {
   position: absolute;
   z-index: 5;

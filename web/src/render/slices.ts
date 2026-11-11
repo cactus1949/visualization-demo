@@ -142,8 +142,10 @@ export class SliceMaterial extends THREE.ShaderMaterial {
 
   style(style: SliceStyle): void {
     this.uniforms.uColormap.value = colormapTexture(style.colormap);
-    this.uniforms.uMin.value = style.min;
-    this.uniforms.uMax.value = style.max;
+    const lo = Number.isFinite(style.min) ? style.min : 0;
+    const hi = Number.isFinite(style.max) && style.max !== lo ? style.max : lo + 1;
+    this.uniforms.uMin.value = Math.min(lo, hi);
+    this.uniforms.uMax.value = Math.max(lo, hi);
     this.uniforms.uOpacity.value = style.opacity;
     this.uniforms.uContours.value = style.contours;
     this.uniforms.uLowAlpha.value = style.lowAlpha ? 1 : 0;
