@@ -23,6 +23,7 @@ export class AtmosScene {
   private readonly grid: THREE.LineSegments;
   private readonly frame: THREE.LineSegments;
   private groundTexture: THREE.DataTexture | null = null;
+  private groundFieldTexture: THREE.DataTexture | null = null;
 
   constructor(readonly domain: Domain) {
     this.root.name = "atmos-root";
@@ -105,6 +106,8 @@ export class AtmosScene {
   ): void {
     this.groundTexture?.dispose();
     this.groundTexture = null;
+    this.groundFieldTexture?.dispose();
+    this.groundFieldTexture = null;
     const material = this.ground.material;
     if (!values) {
       material.map = null;
@@ -116,9 +119,14 @@ export class AtmosScene {
     const lut = colormapBytes(colormap);
     const base = new THREE.Color(THEMES[theme].ground).convertLinearToSRGB();
     const bytes = new Uint8Array(nx * ny * 4);
+    const fieldBytes = new Uint8Array(nx * ny * 4);
     for (let i = 0; i < nx * ny; i += 1) {
       const t = THREE.MathUtils.clamp((values(i) - range[0]) / (range[1] - range[0] || 1), 0, 1);
       const j = Math.round(t * 255) * 4;
+      fieldBytes[i * 4] = lut[j]!;
+      fieldBytes[i * 4 + 1] = lut[j + 1]!;
+      fieldBytes[i * 4 + 2] = lut[j + 2]!;
+      fieldBytes[i * 4 + 3] = 255;
       bytes[i * 4] = base.r * 255 * (1 - strength) + lut[j] * strength;
       bytes[i * 4 + 1] = base.g * 255 * (1 - strength) + lut[j + 1] * strength;
       bytes[i * 4 + 2] = base.b * 255 * (1 - strength) + lut[j + 2] * strength;
@@ -133,9 +141,22 @@ export class AtmosScene {
     texture.anisotropy = 8;
     texture.needsUpdate = true;
     this.groundTexture = texture;
+    const fieldTexture = new THREE.DataTexture(fieldBytes, nx, ny, THREE.RGBAFormat);
+    fieldTexture.colorSpace = THREE.SRGBColorSpace;
+    fieldTexture.magFilter = THREE.LinearFilter;
+    fieldTexture.minFilter = THREE.LinearMipmapLinearFilter;
+    fieldTexture.generateMipmaps = true;
+    fieldTexture.anisotropy = 8;
+    fieldTexture.needsUpdate = true;
+    this.groundFieldTexture = fieldTexture;
     material.map = texture;
     material.color.set(0xffffff);
     material.needsUpdate = true;
+  }
+
+  /** Pure colormap texture, without the theme-ground blend used by the floor. */
+  getGroundFieldTexture(): THREE.DataTexture | null {
+    return this.groundFieldTexture;
   }
 
   setShadows(on: boolean): void {

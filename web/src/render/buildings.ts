@@ -24,6 +24,19 @@ export class Buildings {
   meta: BuildingsMeta | null = null;
   available = false;
   private readonly exaggeration = { value: 3 };
+  private readonly tint = {
+    texture: null as THREE.Texture | null,
+    domain: new THREE.Vector2(1, 1),
+    enabled: 0,
+    strength: 0.6,
+  };
+  private tintUniforms: {
+    uFieldTexture: { value: THREE.Texture | null };
+    uFieldDomain: { value: THREE.Vector2 };
+    uTintEnabled: { value: number };
+    uTintStrength: { value: number };
+  } | null = null;
+  private shadows = true;
 
   constructor() {
     this.group.name = "buildings";
@@ -38,24 +51,43 @@ export class Buildings {
     this.material.onBeforeCompile = (shader) => {
       shader.uniforms.uExag = this.exaggeration;
       shader.vertexShader = shader.vertexShader
-        .replace("#include <common>", "#include <common>\nvarying float vWorldY;")
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying float vWorldY;\nvarying vec2 vFieldUv;\nuniform vec2 uFieldDomain;",
+        )
         .replace(
           "#include <worldpos_vertex>",
-          "#include <worldpos_vertex>\nvWorldY = (modelMatrix * vec4(transformed, 1.0)).y;",
+          "#include <worldpos_vertex>\nvec3 rootPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvWorldY = rootPosition.y;\nvFieldUv = vec2(rootPosition.x / max(uFieldDomain.x, 1e-3) + 0.5, 0.5 - rootPosition.z / max(uFieldDomain.y, 1e-3));",
         );
       shader.fragmentShader = shader.fragmentShader
         .replace(
           "#include <common>",
-          "#include <common>\nvarying float vWorldY;\nuniform float uExag;",
+          "#include <common>\nvarying float vWorldY;\nvarying vec2 vFieldUv;\nuniform float uExag;\nuniform sampler2D uFieldTexture;\nuniform float uTintEnabled;\nuniform float uTintStrength;",
         )
         .replace(
           "#include <color_fragment>",
           `#include <color_fragment>
+          if (uTintEnabled > 0.5 && uTintStrength > 0.0) {
+            vec4 fieldSample = texture2D(uFieldTexture, clamp(vFieldUv, 0.0, 1.0));
+            // Custom sampler2D is not auto-decoded; r187 GLSL helper is sRGBTransferEOTF (vec4).
+            vec3 fieldColor = mix(pow(fieldSample.rgb * 0.9478672986 + vec3(0.0521327014), vec3(2.4)), fieldSample.rgb * 0.0773993808, vec3(lessThanEqual(fieldSample.rgb, vec3(0.04045))));
+            diffuseColor.rgb = mix(diffuseColor.rgb, fieldColor, clamp(uTintStrength, 0.0, 1.0));
+          }
           float hMeters = vWorldY / max(uExag, 1e-3) * 1000.0;
           float ao = mix(0.42, 1.0, smoothstep(0.0, 28.0, hMeters));
           diffuseColor.rgb *= ao;
           diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.86, 0.9, 1.0), diffuseColor.rgb, ao);`,
         );
+      shader.uniforms.uFieldTexture = { value: this.tint.texture };
+      shader.uniforms.uFieldDomain = { value: this.tint.domain };
+      shader.uniforms.uTintEnabled = { value: this.tint.enabled };
+      shader.uniforms.uTintStrength = { value: this.tint.strength };
+      this.tintUniforms = {
+        uFieldTexture: shader.uniforms.uFieldTexture,
+        uFieldDomain: shader.uniforms.uFieldDomain,
+        uTintEnabled: shader.uniforms.uTintEnabled,
+        uTintStrength: shader.uniforms.uTintStrength,
+      };
     };
   }
 
@@ -89,12 +121,42 @@ export class Buildings {
   }
 
   setOpacity(opacity: number): void {
-    this.material.opacity = opacity;
-    this.material.transparent = opacity < 0.999;
+    const value = THREE.MathUtils.clamp(Number(opacity) || 0, 0, 1);
+    this.material.opacity = value;
+    // Hashed alpha keeps depth testing/writing stable for a very large mesh and avoids
+    // the sorting artifacts of blended transparency.
+    this.material.alphaHash = value < 0.999;
+    this.material.transparent = false;
     this.material.depthWrite = true;
+    this.material.needsUpdate = true;
+    this.updateShadowFlags();
+  }
+
+  setTint(
+    texture: THREE.Texture | null,
+    domain: { sx: number; sz: number },
+    enabled: boolean,
+    strength: number,
+  ): void {
+    this.tint.texture = texture;
+    this.tint.domain.set(domain.sx, domain.sz);
+    this.tint.enabled = enabled && texture !== null ? 1 : 0;
+    this.tint.strength = THREE.MathUtils.clamp(strength, 0, 1);
+    if (this.tintUniforms) {
+      this.tintUniforms.uFieldTexture.value = texture;
+      this.tintUniforms.uFieldDomain.value = this.tint.domain;
+      this.tintUniforms.uTintEnabled.value = this.tint.enabled;
+      this.tintUniforms.uTintStrength.value = this.tint.strength;
+    }
   }
 
   setShadows(on: boolean): void {
+    this.shadows = on;
+    this.updateShadowFlags();
+  }
+
+  private updateShadowFlags(): void {
+    const on = this.shadows && this.material.opacity >= 0.999;
     this.group.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (mesh.isMesh) mesh.castShadow = on;

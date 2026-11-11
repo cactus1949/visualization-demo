@@ -94,6 +94,8 @@ const view = reactive({ exaggeration: 3, theme: "dark" as Theme, shadows: true }
 const layers = reactive({
   buildings: true,
   buildingOpacity: 1,
+  buildingTintEnabled: false,
+  buildingTintStrength: 0.6,
   ground: true,
   groundVar: "speed0",
   particles: true,
@@ -542,8 +544,9 @@ function updateGround(): void {
   if (!atmos || !manifest.value) return;
   atmos.ground.visible = layers.ground;
   const name = layers.groundVar;
-  if (name === "none") {
+  if (!layers.ground || name === "none") {
     atmos.setGroundField(null, [0, 1], "viridis", view.theme);
+    applyBuildings();
     return;
   }
   if (name === "speed0") {
@@ -554,6 +557,7 @@ function updateGround(): void {
       Math.hypot(u.data[i], v.data[i]);
     const range = displayRange("speed0") ?? displayRange(SPEED) ?? [0, 20];
     atmos.setGroundField(read, range, "viridis", view.theme, 0.55);
+    applyBuildings();
     return;
   }
   const data = loaded(name);
@@ -562,6 +566,7 @@ function updateGround(): void {
   const cmap = meta.colormap === "rdbu" ? "rdbu" : meta.colormap;
   const range: [number, number] = displayRange(name) ?? [meta.data_min, meta.data_max];
   atmos.setGroundField(field2D(meta, data.data), range, cmap, view.theme, 0.55);
+  applyBuildings();
 }
 
 function updateVolume(): void {
@@ -1264,6 +1269,18 @@ function exposeApi(): void {
     },
     setSliceEnabled: (on: boolean) => { if (on) selectKind("height"); else if (section.kind === "height") { section.enabled = false; leaveKind("height"); updateSection(); } },
     setParticles: (p: Partial<ParticleParams>) => Object.assign(particleParams, p),
+    setBuildingOpacity: (value: number) => {
+      layers.buildingOpacity = THREE.MathUtils.clamp(Number(value) || 0, 0, 1);
+    },
+    setBuildingTint: (p: { enabled?: boolean; strength?: number }) => {
+      if (p.enabled !== undefined) layers.buildingTintEnabled = Boolean(p.enabled);
+      if (p.strength !== undefined) {
+        const value = Number(p.strength);
+        // Accept either the UI/API 0..1 form or a convenient 0..100 percentage.
+        layers.buildingTintStrength = THREE.MathUtils.clamp(value > 1 ? value / 100 : value, 0, 1);
+      }
+    },
+    setGroundVar: (name: string) => { layers.groundVar = name; },
     setLayer: (name: string, on: boolean) => {
       if (name in layers) (layers as Record<string, unknown>)[name] = on;
     },
@@ -1456,6 +1473,12 @@ function applyBuildings(): void {
   if (!buildings) return;
   buildings.group.visible = layers.buildings;
   buildings.setOpacity(layers.buildingOpacity);
+  buildings.setTint(
+    atmos?.getGroundFieldTexture() ?? null,
+    domain,
+    layers.ground && layers.groundVar !== "none" && layers.buildingTintEnabled,
+    layers.buildingTintStrength,
+  );
   buildings.setExaggeration(view.exaggeration);
   buildings.setShadows(view.shadows);
 }
@@ -1541,7 +1564,14 @@ watch(
   (on) => annotations?.setOcclusionEnabled(Boolean(on)),
 );
 watch(
-  () => [layers.buildings, layers.buildingOpacity, view.exaggeration, view.shadows],
+  () => [
+    layers.buildings,
+    layers.buildingOpacity,
+    layers.buildingTintEnabled,
+    layers.buildingTintStrength,
+    view.exaggeration,
+    view.shadows,
+  ],
   applyBuildings,
 );
 watch(
@@ -1724,8 +1754,22 @@ onBeforeUnmount(() => {
         >
         <label v-if="layers.buildings" class="slider"
           >建筑不透明度 {{ layers.buildingOpacity.toFixed(2) }}
-          <input v-model.number="layers.buildingOpacity" type="range" min="0.2" max="1" step="0.05"
+          <input v-model.number="layers.buildingOpacity" type="range" min="0" max="1" step="0.05"
         /></label>
+        <label v-if="layers.buildings" class="row"
+          ><input v-model="layers.buildingTintEnabled" type="checkbox" :disabled="!layers.ground || layers.groundVar === 'none'" />白膜着色</label
+        >
+        <label v-if="layers.buildings" class="slider"
+          >着色程度 {{ Math.round(layers.buildingTintStrength * 100) }}%
+          <input
+            v-model.number="layers.buildingTintStrength"
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            :disabled="!layers.ground || layers.groundVar === 'none'"
+          />
+        </label>
         <label class="row"
           ><input v-model="layers.ground" type="checkbox" />地面
           <select v-model="layers.groundVar">

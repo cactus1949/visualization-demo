@@ -48,6 +48,11 @@ const VIEWS = [
   "v6_4-box-fixed",
   "v6_4-panel-volume",
   "v6_4-panel-section",
+  "v6_5-opacity-02",
+  "v6_5-opacity-10",
+  "v6_5-tint-off",
+  "v6_5-tint-50",
+  "v6_5-tint-100",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -314,6 +319,28 @@ await page.evaluate((v) => {
     api.setLayer("particles", false);
     api.setVolume({ enabled: false });
     api.setSectionMode("polyline");
+  } else if (v === "v6_5-opacity-02" || v === "v6_5-opacity-10") {
+    api.setView("overview");
+    api.setLayer("particles", true);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSection({ enabled: false });
+    api.setBuildingOpacity(v === "v6_5-opacity-02" ? 0.2 : 1);
+    api.setBuildingTint({ enabled: false });
+    api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
+  } else if (v === "v6_5-tint-off" || v === "v6_5-tint-50" || v === "v6_5-tint-100") {
+    api.setView("overview");
+    api.setLayer("particles", true);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSection({ enabled: false });
+    api.setGroundVar("t2m");
+    api.setBuildingOpacity(1);
+    api.setBuildingTint({
+      enabled: v !== "v6_5-tint-off",
+      strength: v === "v6_5-tint-100" ? 100 : 50,
+    });
+    api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
   } else if (v === "v6_3-particles-1x" || v === "v6_3-particles-exag") {
     const hi = v === "v6_3-particles-exag";
     api.setLayer("particles", true);
