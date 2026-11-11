@@ -11,8 +11,11 @@ export const ANNOTATION_TOKENS = Object.freeze({
     labelBorder: "rgba(255, 255, 255, 0.18)",
     stem: "rgba(244, 251, 255, 0.70)",
     focus: "#FFFFFF",
+    outlineHalo: "rgba(8, 14, 22, 0.90)",
   }),
   sizes: Object.freeze({
+    boxOutlinePx: 2,
+    boxHaloPx: 5,
     markerPx: 8,
     handlePx: 11,
     hitTargetPx: 20,
@@ -33,6 +36,7 @@ export const ANNOTATION_TOKENS = Object.freeze({
     gripHitPx: 28,
   }),
   opacity: Object.freeze({
+    boxFill: 0.12,
     idle: 1,
     preview: 0.85,
     occluded: 0.35,

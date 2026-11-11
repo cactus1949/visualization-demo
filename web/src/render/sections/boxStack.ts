@@ -13,22 +13,16 @@ export interface BoxStackParams {
 
 const LABEL_PREFIX = "box-label-";
 const HANDLE_PREFIX = "box-corner-";
-const outlineMaterial = new THREE.LineBasicMaterial({
-  color: 0x5ce1ff,
-  transparent: true,
-  opacity: 0.9,
-  depthTest: true,
-});
+const OUTLINE_ID = "box-outline";
 
 export class BoxStack {
   readonly group = new THREE.Group();
   readonly slabs = new THREE.Group();
-  readonly outline: THREE.Line;
   readonly domain: Domain;
   readonly material: SliceMaterial;
   params: BoxStackParams;
   private layer: AnnotationLayer | null = null;
-  private readonly outlinePos = new Float32Array(15);
+  private outlineVisible = false;
 
   constructor(domain: Domain, levels: number[]) {
     this.domain = domain;
@@ -38,19 +32,14 @@ export class BoxStack {
       levels, heightMinM: 0, heightMaxM: 1000, stepLevels: 1,
       defined: false, drawing: false,
     };
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute("position", new THREE.BufferAttribute(this.outlinePos, 3));
-    this.outline = new THREE.Line(geom, outlineMaterial);
-    this.outline.frustumCulled = false;
-    this.outline.visible = false;
-    this.group.add(this.slabs, this.outline);
+    this.group.add(this.slabs);
     this.group.name = "box-stack";
   }
 
   setAnnotationLayer(layer: AnnotationLayer | null): void {
+    this.clearAnnotations();
     this.layer = layer;
-    this.syncLabels();
-    this.syncCorners();
+    this.syncAnnotations();
   }
 
   /** Sort translucent slabs back-to-front in root-local space. */
@@ -76,7 +65,7 @@ export class BoxStack {
     const area = Math.abs(this.params.x1 - this.params.x0) * Math.abs(this.params.z1 - this.params.z0);
     this.syncOutline(ready && area > 1e-6);
     if (!this.params.defined || area < 1e-6) {
-      this.group.visible = this.outline.visible;
+      this.group.visible = this.outlineVisible;
       this.layer?.removePrefixed(LABEL_PREFIX);
       this.syncCorners();
       return;
@@ -101,28 +90,34 @@ export class BoxStack {
       m.userData.pickable = "box-stack";
       this.slabs.add(m);
     }
-    this.group.visible = this.slabs.children.length > 0 || this.outline.visible;
+    this.group.visible = this.slabs.children.length > 0 || this.outlineVisible;
     this.syncLabels();
     this.syncCorners();
   }
 
   syncAnnotations(): void {
+    this.syncOutline(this.outlineVisible);
     this.syncLabels();
     this.syncCorners();
   }
 
   clearAnnotations(): void {
+    this.layer?.remove(OUTLINE_ID);
     this.layer?.removePrefixed(LABEL_PREFIX);
     this.layer?.removePrefixed(HANDLE_PREFIX);
   }
 
   private syncOutline(on: boolean): void {
     const { x0, z0, x1, z1 } = this.params;
-    const pts = [x0, 0, z0, x1, 0, z0, x1, 0, z1, x0, 0, z1, x0, 0, z0];
-    this.outlinePos.set(pts);
-    this.outline.geometry.attributes.position.needsUpdate = true;
-    this.outline.geometry.computeBoundingSphere();
-    this.outline.visible = on;
+    this.outlineVisible = on;
+    if (!on) {
+      this.layer?.remove(OUTLINE_ID);
+      return;
+    }
+    this.layer?.addPolygon(OUTLINE_ID, [
+      { x: x0, y: 0, z: z0 }, { x: x1, y: 0, z: z0 },
+      { x: x1, y: 0, z: z1 }, { x: x0, y: 0, z: z1 },
+    ], this.params.drawing ? "preview" : "fixed");
   }
 
   private layersInRange(): number[] {
@@ -161,7 +156,7 @@ export class BoxStack {
 
   private syncCorners(): void {
     if (!this.layer) return;
-    const visible = Boolean(this.params.defined && Math.abs(this.params.x1 - this.params.x0) * Math.abs(this.params.z1 - this.params.z0) > 1e-6);
+    const visible = Boolean((this.params.defined || this.params.drawing) && Math.abs(this.params.x1 - this.params.x0) * Math.abs(this.params.z1 - this.params.z0) > 1e-6);
     const corners = [
       { x: this.params.x0, z: this.params.z0 },
       { x: this.params.x1, z: this.params.z0 },
@@ -175,7 +170,7 @@ export class BoxStack {
     corners.forEach((c, i) => {
       this.layer!.addHandle(`${HANDLE_PREFIX}${i}`, {
         anchor: { x: c.x, y: 0, z: c.z },
-        role: "preview",
+        role: this.params.drawing ? "preview" : "fixed",
         draggable: Boolean(this.params.defined),
         visible: true,
         userData: { pickable: "box-corner", index: i },
@@ -186,8 +181,6 @@ export class BoxStack {
   dispose(): void {
     this.material.dispose();
     this.slabs.traverse((o) => { if (o instanceof THREE.Mesh) o.geometry.dispose(); });
-    this.outline.geometry.dispose();
-    this.layer?.removePrefixed(LABEL_PREFIX);
-    this.layer?.removePrefixed(HANDLE_PREFIX);
+    this.clearAnnotations();
   }
 }

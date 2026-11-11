@@ -346,11 +346,8 @@ function autoRange(name: string, colormap: string, heightM?: number): [number, n
   return [lo, hi];
 }
 
-function isBoxMode(): boolean {
-  return section.enabled && section.kind === "box";
-}
 function volumeWanted(): boolean {
-  return layers.volume && !isBoxMode();
+  return layers.volume;
 }
 function syncStyleToSlice(): void {
   slice.variable = section.variable;
@@ -392,6 +389,17 @@ function clearBox(): void {
   boxStack?.update({ ...section.box, levels: levelsOf(), defined: false, drawing: false });
 }
 function leaveKind(prev: SectionKind | null | undefined): void {
+  // Mode changes can also arrive through the API during a captured drag.
+  if (pointerDown.id >= 0 && canvas.value?.hasPointerCapture(pointerDown.id)) canvas.value.releasePointerCapture(pointerDown.id);
+  pointerDown.active = false;
+  drag.active = false;
+  drag.kind = "";
+  boxDrawing = false;
+  boxCorner = vertexIndex = -1;
+  drawStart = null;
+  if (controls) controls.enabled = true;
+  if (canvas.value) canvas.value.style.cursor = "";
+  hslice?.setDragging(false);
   if (prev === "polyline") clearPolyline();
   if (prev === "box") clearBox();
   if (prev === "height") hslice?.setHandleVisible(false);
@@ -841,7 +849,7 @@ const drag = {
   startOffset: 0,
   startHeight: 0,
 };
-const pointerDown = { x: 0, y: 0, moved: false, active: false };
+const pointerDown = { id: -1, x: 0, y: 0, moved: false, active: false };
 const tmp = new THREE.Vector3();
 let drawStart: THREE.Vector3 | null = null;
 let boxDrawing = false;
@@ -870,6 +878,7 @@ function groundPoint(): THREE.Vector3 | null {
 function onPointerDown(event: PointerEvent): void {
   if (!manifest.value || event.button !== 0) return;
   setPointer(event);
+  pointerDown.id = event.pointerId;
   pointerDown.x = event.clientX;
   pointerDown.y = event.clientY;
   pointerDown.moved = false;
@@ -1326,7 +1335,13 @@ function exposeApi(): void {
     },
     sampleParticle: () => particles?.sample() ?? [],
     sampleHistory: () => particles?.sampleHistory() ?? [],
-    status: () => ({ ...window.__atmosStatus, fps: fps.value, drawCalls: drawCalls.value }),
+    status: () => ({
+      ...window.__atmosStatus, fps: fps.value, drawCalls: drawCalls.value,
+      volumeEnabled: layers.volume, volumeVisible: Boolean(volume?.mesh.visible),
+      sectionEnabled: section.enabled, sectionKind: section.kind,
+      sectionDrawing: section.drawMode, boxDefined: section.box.defined,
+      polylinePoints: section.points.length, unfoldedVisible: unfoldedVisible.value,
+    }),
     timings: () => window.__atmosTimings ?? publishTimings(),
   };
 }
@@ -1471,12 +1486,25 @@ watch(
 watch(
   () => section.enabled,
   (on, was) => {
-    if (!on && was) {
+    if (on) layers.volume = false;
+    else if (was) {
       leaveKind(section.kind);
       section.drawMode = false;
+      unfolded.value = null;
+      unfoldedVisible.value = false;
       updateSection();
     }
   },
+  { flush: "sync" },
+);
+// Last activation wins, including consecutive API calls in the same Vue tick.
+watch(
+  () => layers.volume,
+  (on) => {
+    if (on) section.enabled = false;
+    updateVolume();
+  },
+  { flush: "sync" },
 );
 watch(
   () => [section.offsetKm, section.azimuthDeg],
@@ -1492,11 +1520,10 @@ watch(
   },
 );
 watch(() => [section.kind, section.drawMode, section.points.length, section.box.x0, section.box.x1, section.box.z0, section.box.z1, section.box.heightMinM, section.box.heightMaxM, section.box.stepLevels, section.box.defined], updateSection);
-watch(() => isBoxMode(), () => { updateVolume(); });
 watch(() => [cuts.x[0], cuts.x[1], cuts.y[0], cuts.y[1], cuts.z[0], cuts.z[1], cuts.faces], () => { clampCuts(cuts); volume?.setCuts(cuts); syncVolumeSlices(); });
 watch(() => [layers.ground, layers.groundVar], updateGround);
 watch(
-  () => [layers.volume, layers.volumeVar, layers.volumeOpacity, layers.volumeThreshold],
+  () => [layers.volumeVar, layers.volumeOpacity, layers.volumeThreshold],
   updateVolume,
 );
 watch(

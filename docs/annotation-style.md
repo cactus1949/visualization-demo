@@ -14,6 +14,7 @@ const layer = new AnnotationLayer(overlayParent, atmos.root);
 layer.addMarker(id, { anchor, role: "preview" | "fixed", stemTo?, ring? });
 layer.addLabel(id, { anchor, text, leader?, awayFrom?, priority? });
 layer.addHandle(id, { anchor, role?, draggable, userData });
+layer.addPolygon(id, corners, "preview" | "fixed"); // root 局部坐标，框选四角
 
 layer.set(id, patch);
 layer.setState(id, "idle" | "hover" | "active" | "dragging" | "disabled" | "selected");
@@ -87,6 +88,10 @@ layer.dispose();
 - **层高标签**：HTML 胶囊，短引线连到该层在屏幕上的角点（用拉伸和层间距之后的显示高度）。不要 canvas 贴图 Sprite。
 - **手柄 / 折线顶点**：11 px 的 HTML 圆，20 px 热区。不要三维球体。
 - **剖面拖动柄（grip）**：28×14 px 的圆角胶囊，带双箭头图标（水平 ↔ 或垂直 ↕），热区约 28 px。颜色、状态和缩放仍用同一套 token。经度 / 纬度柄放在墙顶边中点，高度柄放在水平切片边缘，只能沿各自轴向拖动。拖动时在柄旁用标签显示读数（偏移 km 或高度 m）。不要靠点墙或点地面来移动剖面。
+
+## 框选覆盖层
+
+框选预览和固定边界使用标注层 SVG polygon：2 px 语义色描边、5 px 深色底描边（halo）、12% 透明填充，参数来自 `ANNOTATION_TOKENS`。拖动预览为青色，提交后为琥珀色，四角手柄采用相同语义色。覆盖层与手柄始终在建筑上方，不做遮挡淡化；近远裁剪面裁剪多边形，屏幕边缘由覆盖层裁剪。缩放及垂直夸张不改变描边和手柄的 CSS 像素尺寸。
 
 ## 状态
 

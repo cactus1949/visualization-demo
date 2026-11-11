@@ -43,6 +43,15 @@ export interface AnnotationHit {
   draggable: boolean;
 }
 
+interface PolygonItem {
+  anchors: readonly Vec3[];
+  el: SVGGElement;
+  halo: SVGPolygonElement;
+  face: SVGPolygonElement;
+  points: string;
+  visible: boolean;
+}
+
 interface Item {
   id: string;
   desc: AnnotationDesc;
@@ -90,6 +99,10 @@ export class AnnotationLayer {
   private readonly svg: SVGSVGElement;
   private readonly root: THREE.Object3D;
   private readonly items = new Map<string, Item>();
+  private readonly polygons = new Map<string, PolygonItem>();
+  private readonly polygonMatrix = new THREE.Matrix4();
+  private readonly clipA = Array.from({ length: 8 }, () => new THREE.Vector4());
+  private readonly clipB = Array.from({ length: 8 }, () => new THREE.Vector4());
   private occluder: HeightOccluder | null = null;
   private occluderEnabled = true;
   private frame = 0;
@@ -127,6 +140,30 @@ export class AnnotationLayer {
     this.upsert(id, { ...desc, kind: "handle" });
   }
 
+  /** Ground selection overlay, always above the scene, with CSS-pixel strokes. */
+  addPolygon(id: string, anchors: readonly Vec3[], role: AnnotationRole): void {
+    let item = this.polygons.get(id);
+    if (!item) {
+      const el = document.createElementNS(this.svg.namespaceURI, "g") as SVGGElement;
+      el.classList.add("anno-polygon");
+      const halo = this.makeRing();
+      halo.setAttribute("stroke", T.colors.outlineHalo);
+      halo.setAttribute("stroke-width", String(T.sizes.boxHaloPx));
+      const face = this.makeRing();
+      face.setAttribute("stroke-width", String(T.sizes.boxOutlinePx));
+      face.setAttribute("fill-opacity", String(T.opacity.boxFill));
+      for (const polygon of [halo, face]) polygon.setAttribute("stroke-linejoin", "round");
+      el.append(halo, face);
+      this.svg.prepend(el);
+      item = { anchors, el, halo, face, points: "", visible: true };
+      this.polygons.set(id, item);
+    }
+    item.anchors = anchors;
+    const color = roleColor(role, "idle");
+    item.face.setAttribute("stroke", color);
+    item.face.setAttribute("fill", color);
+  }
+
   set(id: string, patch: Partial<AnnotationDesc>): void {
     const item = this.items.get(id);
     if (!item) return;
@@ -142,10 +179,14 @@ export class AnnotationLayer {
   }
 
   setVisible(id: string, visible: boolean): void {
+    const polygon = this.polygons.get(id);
+    if (polygon) polygon.visible = visible;
     this.set(id, { visible });
   }
 
   remove(id: string): void {
+    this.polygons.get(id)?.el.remove();
+    this.polygons.delete(id);
     const item = this.items.get(id);
     if (!item) return;
     item.el.remove();
@@ -155,13 +196,13 @@ export class AnnotationLayer {
   }
 
   removePrefixed(prefix: string): void {
-    for (const id of [...this.items.keys()]) {
+    for (const id of [...this.items.keys(), ...this.polygons.keys()]) {
       if (id.startsWith(prefix)) this.remove(id);
     }
   }
 
   dispose(): void {
-    for (const id of [...this.items.keys()]) this.remove(id);
+    for (const id of [...this.items.keys(), ...this.polygons.keys()]) this.remove(id);
     this.element.remove();
   }
 
@@ -214,6 +255,9 @@ export class AnnotationLayer {
       this.root.worldToLocal(this.camLocal);
     }
 
+    this.polygonMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(this.root.matrixWorld);
+    for (const polygon of this.polygons.values()) this.projectPolygon(polygon, rect);
+
     const labels: Item[] = [];
     for (const item of this.items.values()) {
       this.projectItem(item, camera, rect, checkOcc);
@@ -221,6 +265,43 @@ export class AnnotationLayer {
     }
     this.decimateClusters(labels);
     this.resolveOverlap(labels.filter((item) => item.onScreen && item.desc.visible !== false));
+  }
+
+  private projectPolygon(item: PolygonItem, rect: DOMRect): void {
+    let input = this.clipA;
+    let output = this.clipB;
+    let count = Math.min(item.anchors.length, 4);
+    for (let i = 0; i < count; i += 1) {
+      const p = item.anchors[i]!;
+      input[i]!.set(p.x, p.y, p.z, 1).applyMatrix4(this.polygonMatrix);
+    }
+    // Clip near/far in homogeneous space so zooming through a corner does not
+    // hide the entire rectangle. The overlay viewport clips its screen edges.
+    for (const sign of [1, -1]) {
+      let nextCount = 0;
+      for (let i = 0; i < count; i += 1) {
+        const a = input[(i + count - 1) % count]!;
+        const b = input[i]!;
+        const da = a.w + sign * a.z;
+        const db = b.w + sign * b.z;
+        if ((da >= 0) !== (db >= 0)) output[nextCount++]!.copy(a).lerp(b, da / (da - db));
+        if (db >= 0) output[nextCount++]!.copy(b);
+      }
+      count = nextCount;
+      [input, output] = [output, input];
+    }
+    item.el.style.display = item.visible && count >= 3 ? "" : "none";
+    if (!item.visible || count < 3) return;
+    let points = "";
+    for (let i = 0; i < count; i += 1) {
+      const p = input[i]!;
+      points += `${(rect.width * (p.x / p.w + 1) / 2).toFixed(1)},${(rect.height * (1 - p.y / p.w) / 2).toFixed(1)} `;
+    }
+    if (points !== item.points) {
+      item.halo.setAttribute("points", points);
+      item.face.setAttribute("points", points);
+      item.points = points;
+    }
   }
 
   private upsert(id: string, desc: AnnotationDesc): void {

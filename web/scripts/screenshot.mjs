@@ -44,6 +44,10 @@ const VIEWS = [
   "v6_3-box-drag",
   "v6_3-particles-1x",
   "v6_3-particles-exag",
+  "v6_4-box-drag",
+  "v6_4-box-fixed",
+  "v6_4-panel-volume",
+  "v6_4-panel-section",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -293,6 +297,23 @@ await page.evaluate((v) => {
     api.setSection({ variable: "speed", offsetKm: -1.0, opacity: 0.6 });
     api.setSectionMode("box");
     api.setCamera([0, 18, 0.2], [0, 0, 0]);
+  } else if (["v6_4-box-drag", "v6_4-box-fixed"].includes(v)) {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setView("top");
+    api.setSectionMode("box");
+    if (v === "v6_4-box-fixed") {
+      api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
+    }
+    api.setCamera([0, 26, 0.01], [0, 0, 0]);
+  } else if (v === "v6_4-panel-volume") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+  } else if (v === "v6_4-panel-section") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("polyline");
   } else if (v === "v6_3-particles-1x" || v === "v6_3-particles-exag") {
     const hi = v === "v6_3-particles-exag";
     api.setLayer("particles", true);
@@ -325,6 +346,7 @@ if (
     "v6-lat-1",
     "v6_1-lon",
     "v6_2-lon-handle",
+    "v6_4-panel-volume",
   ].includes(view)
 ) {
   await page.waitForFunction(() => window.__atmosStatus?.volume === "tke", null, {
@@ -349,6 +371,10 @@ if (
     "v6_3-box-drag",
     "v6_3-particles-1x",
     "v6_3-particles-exag",
+    "v6_4-box-drag",
+    "v6_4-box-fixed",
+    "v6_4-panel-volume",
+    "v6_4-panel-section",
   ].includes(view)
 ) {
   await page.evaluate(() => {
@@ -373,7 +399,7 @@ const after = await page.evaluate(() => window.__atmosApi.sampleParticle());
 await page.waitForTimeout(2500);
 const status = await page.evaluate(() => window.__atmosApi.status());
 let gripInfo = null;
-if (view === "v6_3-box-drag") {
+if (view === "v6_3-box-drag" || view === "v6_4-box-drag") {
   const canvas = page.locator("canvas.canvas");
   const box = await canvas.boundingBox();
   if (box) {
@@ -397,12 +423,13 @@ if (view === "v6_3-box-drag") {
     };
   });
 }
-if (view === "v6_2-panel-section") {
+if (["v6_2-panel-section", "v6_4-panel-volume", "v6_4-panel-section"].includes(view)) {
   const panel = page.locator(".panel");
   await panel.evaluate((el) => {
     for (const d of el.querySelectorAll("details")) {
       const text = d.querySelector("summary")?.textContent ?? "";
-      if (text.includes("剖面") && !text.includes("粒子")) d.setAttribute("open", "");
+      // Open 图层 (contains 体渲染) and 剖面 together so mutual exclusion is visible.
+      if (text.includes("图层") || (text.includes("剖面") && !text.includes("粒子"))) d.setAttribute("open", "");
       else d.removeAttribute("open");
     }
     el.scrollTop = 0;
