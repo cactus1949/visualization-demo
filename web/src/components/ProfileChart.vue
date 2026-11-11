@@ -1,140 +1,287 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-/** Vertical profile at the probe: selected variable (line) + horizontal wind speed (dashed). */
+export type ProbeVariableOption = { name: string; label: string };
+
 const props = defineProps<{
   lon: number;
   lat: number;
   pinned: boolean;
   levels: number[];
   values: number[];
-  speed: number[];
-  direction: number[];
   label: string;
   units: string;
-  showVariable: boolean;
+  signed: boolean;
+  variable: string;
+  variables: ProbeVariableOption[];
 }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; "update:variable": [name: string] }>();
 
-const W = 248;
-const H = 150;
-const PAD = { l: 34, r: 10, t: 8, b: 20 };
-const TABLE_LEVELS = [12.5, 62.5, 112.5, 187.5, 262.5, 362.5, 562.5, 787.5, 987.5];
+const W = 268;
+const H = 176;
+const PAD = { l: 40, r: 12, t: 22, b: 28 };
 
-function scale(series: number[]) {
+function niceTicks(min: number, max: number, count: number): number[] {
+  const span = Math.max(1e-9, max - min);
+  const raw = span / Math.max(1, count - 1);
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const err = raw / pow;
+  const step = (err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1) * pow;
+  const start = Math.ceil((min - 1e-9) / step) * step;
+  const out: number[] = [];
+  for (let v = start; v <= max + 1e-9; v += step) out.push(Number(v.toFixed(8)));
+  const gap = step * 0.55;
+  if (!out.length || out[0]! - min > gap) out.unshift(min);
+  if (!out.length || max - out[out.length - 1]! > gap) out.push(max);
+  return out;
+}
+
+function prettyUnit(units: string): string {
+  const map: Record<string, string> = {
+    "m s-1": "m/s",
+    "m2 s-2": "m²/s²",
+    "s-1": "s⁻¹",
+    "deg/m": "°/m",
+    "kg/kg": "kg/kg",
+    Pa: "Pa",
+    "mm/h": "mm/h",
+    mm: "mm",
+    "0-1": "",
+    level: "",
+    "%": "%",
+  };
+  return map[units] ?? units;
+}
+
+function fmt(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 10) return v.toFixed(1);
+  if (a >= 1) return v.toFixed(2);
+  return v.toFixed(3);
+}
+
+function thicknesses(levels: number[]): number[] {
+  return levels.map((h, i) => {
+    const lo = i === 0 ? Math.max(0, h - ((levels[1] ?? h + 25) - h) / 2) : (levels[i - 1]! + h) / 2;
+    const hi = i === levels.length - 1 ? h + (h - levels[i - 1]!) / 2 : (h + levels[i + 1]!) / 2;
+    return Math.max(1e-6, hi - lo);
+  });
+}
+
+function circularMean(values: number[], weights: number[]): number {
+  let xs = 0;
+  let ys = 0;
+  for (let i = 0; i < values.length; i += 1) {
+    const w = weights[i] ?? 1;
+    const r = ((values[i] ?? 0) * Math.PI) / 180;
+    xs += w * Math.sin(r);
+    ys += w * Math.cos(r);
+  }
+  return ((Math.atan2(xs, ys) * 180) / Math.PI + 360) % 360;
+}
+
+const unitText = computed(() => prettyUnit(props.units));
+
+const scale = computed(() => {
+  const series = props.values.filter((v) => Number.isFinite(v));
+  if (!series.length) return { lo: -1, hi: 1 };
   let lo = Math.min(...series);
   let hi = Math.max(...series);
+  if (props.signed) {
+    lo = Math.min(lo, 0);
+    hi = Math.max(hi, 0);
+  }
   if (hi - lo < 1e-6) {
     lo -= 1;
     hi += 1;
   }
   const pad = (hi - lo) * 0.08;
   return { lo: lo - pad, hi: hi + pad };
+});
+
+const yMax = computed(() => {
+  const top = props.levels[props.levels.length - 1] ?? 1000;
+  return Math.max(1000, Math.ceil(top / 50) * 50);
+});
+
+const xTicks = computed(() => niceTicks(scale.value.lo, scale.value.hi, 5));
+const yTicks = computed(() => niceTicks(0, yMax.value, 5));
+
+function xOf(v: number): number {
+  const { lo, hi } = scale.value;
+  return PAD.l + ((v - lo) / (hi - lo)) * (W - PAD.l - PAD.r);
+}
+function yOf(h: number): number {
+  return H - PAD.b - (h / yMax.value) * (H - PAD.t - PAD.b);
 }
 
-function path(series: number[]): string {
-  if (!series.length) return "";
-  const { lo, hi } = scale(series);
-  const top = props.levels[props.levels.length - 1] + 12.5;
-  return series
-    .map((v, i) => {
-      const x = PAD.l + ((v - lo) / (hi - lo)) * (W - PAD.l - PAD.r);
-      const y = H - PAD.b - (props.levels[i] / top) * (H - PAD.t - PAD.b);
-      return `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
+const linePath = computed(() => {
+  if (props.values.length < 2 || props.levels.length !== props.values.length) return "";
+  return props.values
+    .map((v, i) => `${i ? "L" : "M"}${xOf(v).toFixed(1)},${yOf(props.levels[i]!).toFixed(1)}`)
     .join("");
-}
+});
 
-const variablePath = computed(() => (props.showVariable ? path(props.values) : ""));
-const speedPath = computed(() => path(props.speed));
-const speedScale = computed(() => scale(props.speed));
-const variableScale = computed(() => scale(props.values));
-const rows = computed(() =>
-  TABLE_LEVELS.map((level) => {
-    const i = props.levels.findIndex((l) => Math.abs(l - level) < 1);
-    return {
-      level,
-      speed: props.speed[i],
-      dir: props.direction[i],
-      value: props.values[i],
-    };
-  }).filter((r) => r.speed !== undefined),
-);
-const fmt = (v: number) =>
-  Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) < 1 ? v.toFixed(3) : v.toFixed(2);
+const zeroX = computed(() => {
+  if (!props.signed || scale.value.lo >= 0 || scale.value.hi <= 0) return null;
+  return xOf(0);
+});
+
+const extrema = computed(() => {
+  const { values, levels } = props;
+  if (!values.length || values.length !== levels.length) return { max: null, min: null };
+  let iMax = 0;
+  let iMin = 0;
+  for (let i = 1; i < values.length; i += 1) {
+    if (values[i]! > values[iMax]!) iMax = i;
+    if (values[i]! < values[iMin]!) iMin = i;
+  }
+  return {
+    max: { i: iMax, value: values[iMax]!, level: levels[iMax]! },
+    min: { i: iMin, value: values[iMin]!, level: levels[iMin]! },
+  };
+});
+
+const stats = computed(() => {
+  const { values, levels } = props;
+  const empty = !values.length || values.length !== levels.length;
+  const near = empty ? null : { value: values[0]!, level: levels[0]! };
+  const top = empty ? null : { value: values[values.length - 1]!, level: levels[levels.length - 1]! };
+  let mean: number | null = null;
+  if (!empty) {
+    const w = thicknesses(levels);
+    if (props.variable === "direction") mean = circularMean(values, w);
+    else {
+      let acc = 0;
+      let den = 0;
+      for (let i = 0; i < values.length; i += 1) {
+        acc += values[i]! * w[i]!;
+        den += w[i]!;
+      }
+      mean = acc / den;
+    }
+  }
+  const signed = props.signed && extrema.value.max && extrema.value.min && extrema.value.max.i !== extrema.value.min.i;
+  return { near, top, mean, signed, max: extrema.value.max, min: extrema.value.min };
+});
+
+const xTitle = computed(() => (unitText.value ? `${props.label} (${unitText.value})` : props.label));
 </script>
 
 <template>
   <div class="profile">
     <div class="head">
-      <b>{{ pinned ? "📍 固定探针" : "探针" }}</b>
+      <b>{{ pinned ? "固定探针" : "探针" }}</b>
       <span>{{ lon.toFixed(4) }}°E {{ lat.toFixed(4) }}°N</span>
-      <button v-if="pinned" class="x" @click="emit('close')">×</button>
+      <button v-if="pinned" class="x" type="button" title="关闭" @click="emit('close')">×</button>
     </div>
-    <svg :width="W" :height="H" class="chart">
+    <label class="var-row">
+      变量
+      <select :value="variable" @change="emit('update:variable', ($event.target as HTMLSelectElement).value)">
+        <option v-for="opt in variables" :key="opt.name" :value="opt.name">{{ opt.label }}</option>
+      </select>
+    </label>
+    <svg :width="W" :height="H" class="chart" aria-label="垂直廓线">
+      <text class="y-title" :x="PAD.l" :y="11" text-anchor="start">高度 (m)</text>
+      <g class="grid">
+        <line
+          v-for="t in yTicks"
+          :key="'yg' + t"
+          :x1="PAD.l"
+          :x2="W - PAD.r"
+          :y1="yOf(t)"
+          :y2="yOf(t)"
+        />
+        <line
+          v-for="t in xTicks"
+          :key="'xg' + t"
+          :x1="xOf(t)"
+          :x2="xOf(t)"
+          :y1="PAD.t"
+          :y2="H - PAD.b"
+        />
+      </g>
+      <line
+        v-if="zeroX !== null"
+        class="zero"
+        :x1="zeroX"
+        :x2="zeroX"
+        :y1="PAD.t"
+        :y2="H - PAD.b"
+      />
       <g class="axis">
         <line :x1="PAD.l" :y1="H - PAD.b" :x2="W - PAD.r" :y2="H - PAD.b" />
         <line :x1="PAD.l" :y1="PAD.t" :x2="PAD.l" :y2="H - PAD.b" />
         <text
-          v-for="h in [0, 250, 500, 750, 1000]"
-          :key="h"
-          :x="PAD.l - 4"
-          :y="H - PAD.b - (h / 1000) * (H - PAD.t - PAD.b) + 3"
+          v-for="t in yTicks"
+          :key="'y' + t"
+          :x="PAD.l - 5"
+          :y="yOf(t) + 3"
           text-anchor="end"
-        >
-          {{ h }}
-        </text>
-        <text :x="W - PAD.r" :y="H - 6" text-anchor="end" class="speed-label">
-          风速 {{ speedScale.lo.toFixed(1) }}–{{ speedScale.hi.toFixed(1) }} m/s
-        </text>
-        <text v-if="showVariable" :x="PAD.l + 2" :y="H - 6" class="var-label">
-          {{ label }} {{ fmt(variableScale.lo) }}–{{ fmt(variableScale.hi) }}
-        </text>
+        >{{ t >= 100 || t === 0 ? t.toFixed(0) : fmt(t) }}</text>
+        <text
+          v-for="t in xTicks"
+          :key="'x' + t"
+          :x="xOf(t)"
+          :y="H - PAD.b + 12"
+          text-anchor="middle"
+        >{{ fmt(t) }}</text>
       </g>
-      <path :d="speedPath" class="speed" />
-      <path v-if="showVariable" :d="variablePath" class="variable" />
+      <text class="x-title" :x="(PAD.l + W - PAD.r) / 2" :y="H - 4" text-anchor="middle">{{ xTitle }}</text>
+      <path v-if="linePath" :d="linePath" class="series" />
+      <g v-if="stats.max" class="peak">
+        <circle :cx="xOf(stats.max.value)" :cy="yOf(stats.max.level)" r="3" />
+      </g>
+      <g v-if="stats.signed && stats.min" class="peak is-min">
+        <circle :cx="xOf(stats.min.value)" :cy="yOf(stats.min.level)" r="3" />
+      </g>
     </svg>
-    <table>
-      <thead>
-        <tr>
-          <th>高度 m</th>
-          <th>风速 m/s</th>
-          <th>风向 °</th>
-          <th v-if="showVariable">{{ label }} {{ units }}</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="r in rows" :key="r.level">
-          <td>{{ r.level }}</td>
-          <td>{{ r.speed.toFixed(2) }}</td>
-          <td>{{ r.dir.toFixed(0) }}</td>
-          <td v-if="showVariable">{{ fmt(r.value) }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="stats">
+      <div class="stat">
+        <span class="k">近地面 <small v-if="stats.near">{{ stats.near.level.toFixed(1) }} m</small></span>
+        <span class="v">{{ stats.near ? `${fmt(stats.near.value)} ${unitText}` : "—" }}</span>
+      </div>
+      <div class="stat">
+        <span class="k">顶层 <small v-if="stats.top">{{ stats.top.level.toFixed(1) }} m</small></span>
+        <span class="v">{{ stats.top ? `${fmt(stats.top.value)} ${unitText}` : "—" }}</span>
+      </div>
+      <div class="stat">
+        <span class="k">{{ stats.signed ? "峰值最大" : "峰值" }} <small v-if="stats.max">@ {{ stats.max.level.toFixed(1) }} m</small></span>
+        <span class="v">{{ stats.max ? `${fmt(stats.max.value)} ${unitText}` : "—" }}</span>
+      </div>
+      <div v-if="stats.signed" class="stat">
+        <span class="k">峰值最小 <small v-if="stats.min">@ {{ stats.min.level.toFixed(1) }} m</small></span>
+        <span class="v">{{ stats.min ? `${fmt(stats.min.value)} ${unitText}` : "—" }}</span>
+      </div>
+      <div class="stat">
+        <span class="k">整柱平均</span>
+        <span class="v">{{ stats.mean !== null ? `${fmt(stats.mean)} ${unitText}` : "—" }}</span>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .profile {
-  width: 268px;
-  padding: 10px;
+  width: 288px;
+  padding: 10px 10px 8px;
   border-radius: 12px;
   background: var(--card);
   border: 1px solid var(--line);
   backdrop-filter: blur(12px);
   font-size: 11px;
   color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 .head {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 .head span {
   color: var(--muted);
-  font-variant-numeric: tabular-nums;
 }
 .x {
   margin-left: auto;
@@ -142,46 +289,88 @@ const fmt = (v: number) =>
   background: transparent;
   color: var(--muted);
   font-size: 16px;
+  line-height: 1;
   cursor: pointer;
 }
+.var-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+.var-row select {
+  flex: 1;
+  min-width: 0;
+  max-width: 210px;
+  background: rgba(8, 14, 22, 0.7);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font: inherit;
+}
+.chart .grid line {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+}
 .chart .axis line {
-  stroke: var(--line);
+  stroke: rgba(255, 255, 255, 0.28);
+}
+.chart .zero {
+  stroke: rgba(255, 194, 71, 0.55);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
 }
 .chart text {
-  fill: var(--muted);
+  fill: #9ab2bf;
   font-size: 9px;
 }
-.chart .speed-label {
-  fill: #7fdcff;
+.chart .y-title,
+.chart .x-title {
+  fill: #9ab2bf;
+  font-size: 10px;
 }
-.chart .var-label {
-  fill: #ffc36b;
-}
-.speed {
+.series {
   fill: none;
-  stroke: #7fdcff;
-  stroke-width: 1.6;
-  stroke-dasharray: 4 3;
-}
-.variable {
-  fill: none;
-  stroke: #ffc36b;
+  stroke: #5ce1ff;
   stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
 }
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
+.peak circle {
+  fill: #ffc247;
+  stroke: #08141c;
+  stroke-width: 1;
 }
-th {
-  font-weight: 500;
+.peak.is-min circle {
+  fill: #5ce1ff;
+}
+.stats {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+}
+.stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgba(8, 14, 22, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.stat .k {
   color: var(--muted);
-  text-align: right;
-  padding: 2px 3px;
 }
-td {
-  text-align: right;
-  padding: 1px 3px;
-  border-top: 1px solid var(--line);
+.stat .k small {
+  margin-left: 4px;
+}
+.stat .v {
+  color: var(--text);
+  white-space: nowrap;
 }
 </style>

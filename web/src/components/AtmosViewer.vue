@@ -174,6 +174,24 @@ const variables3D = computed(() => {
   }
   return list;
 });
+const probeVariables = computed(() => {
+  const list: { name: string; label: string }[] = [
+    { name: SPEED, label: "水平风速 |V|" },
+    { name: "direction", label: "风向" },
+  ];
+  for (const [name, meta] of Object.entries(manifest.value?.variables ?? {})) {
+    if (meta.dims.length !== 3) continue;
+    const destagger = meta.staggered_from ? "，已去交错" : "";
+    list.push({ name, label: `${meta.label_zh} (${name}${destagger})` });
+  }
+  return list;
+});
+const probeVariable = ref(SPEED);
+function probeSigned(name: string): boolean {
+  if (name === SPEED || name === "direction") return false;
+  const meta = manifest.value?.variables[name];
+  return !!meta && meta.data_min < 0 && meta.data_max > 0;
+}
 const variables2D = computed(() => {
   const list: { name: string; label: string }[] = [
     { name: "none", label: "无（纯色底图）" },
@@ -189,10 +207,12 @@ const variables2D = computed(() => {
 
 function labelOf(name: string): string {
   if (name === SPEED) return "水平风速";
+  if (name === "direction") return "风向";
   return manifest.value?.variables[name]?.label_zh ?? name;
 }
 function unitsOf(name: string): string {
   if (name === SPEED) return "m/s";
+  if (name === "direction") return "°";
   return manifest.value?.variables[name]?.units ?? "";
 }
 function defaultColormap(name: string): string {
@@ -745,8 +765,9 @@ function refreshProbe(
   const source = cell ?? previewCell;
   const { ix, iy } = source;
   const g = manifest.value.grid;
-  const name = profileVariable();
-  const data = name === SPEED ? null : loaded(name);
+  const name = probeVariable.value;
+  const data = name === SPEED || name === "direction" ? null : loaded(name);
+  if (name !== SPEED && name !== "direction" && !data) request(name);
   const speed: number[] = [];
   const direction: number[] = [];
   const values: number[] = [];
@@ -757,8 +778,13 @@ function refreshProbe(
     speed.push(Math.hypot(uu, vv));
     // meteorological direction: where the wind comes from, clockwise from north
     direction.push((THREE.MathUtils.radToDeg(Math.atan2(-uu, -vv)) + 360) % 360);
-    values.push(data ? data.data[i] : Math.hypot(uu, vv));
+    if (name === "direction") values.push(direction[direction.length - 1]!);
+    else if (data) values.push(data.data[i]);
+    else values.push(speed[speed.length - 1]!);
   }
+  // If the requested 3D field has not arrived yet, leave values empty so the chart
+  // does not briefly show speed under another variable's label.
+  if (name !== SPEED && name !== "direction" && !data) values.length = 0;
   probe.value = {
     lon: THREE.MathUtils.lerp(g.lon_min, g.lon_max, ix / (g.nx - 1)),
     lat: THREE.MathUtils.lerp(g.lat_min, g.lat_max, iy / (g.ny - 1)),
@@ -1334,6 +1360,10 @@ function exposeApi(): void {
       }
       updateMarker();
     },
+    setProbeVariable: (name: string) => {
+      probeVariable.value = name;
+      if (layers.probe && (fixedCell.value || probe.value)) refreshProbe();
+    },
     setProbeFollowMouse: (on: boolean) => {
       layers.probeFollowMouse = on;
       if (on && layers.probe && probe.value) refreshProbe(false, previewCell);
@@ -1352,6 +1382,7 @@ function exposeApi(): void {
     },
     sampleParticle: () => particles?.sample() ?? [],
     sampleHistory: () => particles?.sampleHistory() ?? [],
+    hasData: (name: string) => Boolean(loaded(name)),
     status: () => ({
       ...window.__atmosStatus, fps: fps.value, drawCalls: drawCalls.value,
       volumeEnabled: layers.volume, volumeVisible: Boolean(volume?.mesh.visible),
@@ -1591,6 +1622,9 @@ watch(
     if (layers.probe && probe.value) refreshProbe();
   },
 );
+watch(probeVariable, () => {
+  if (layers.probe && (fixedCell.value || probe.value)) refreshProbe();
+});
 watch(() => section.drawMode, (on) => { setDrawOrbit(on); if (on) layers.probe = false; });
 watch(
   () => [layers.probe, layers.probeFollowMouse],
@@ -1722,11 +1756,12 @@ onBeforeUnmount(() => {
       :pinned="probe.pinned"
       :levels="manifest?.grid.levels_m ?? []"
       :values="probe.values"
-      :speed="probe.speed"
-      :direction="probe.direction"
-      :label="labelOf(profileVariable())"
-      :units="unitsOf(profileVariable())"
-      :show-variable="profileVariable() !== 'speed'"
+      :label="labelOf(probeVariable)"
+      :units="unitsOf(probeVariable)"
+      :signed="probeSigned(probeVariable)"
+      :variable="probeVariable"
+      :variables="probeVariables"
+      @update:variable="probeVariable = $event"
       @close="probe = null; fixedCell = null; updateMarker()"
     />
     <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />

@@ -53,6 +53,9 @@ const VIEWS = [
   "v6_5-tint-off",
   "v6_5-tint-50",
   "v6_5-tint-100",
+  "v6_6-probe-speed",
+  "v6_6-probe-tke",
+  "v6_6-probe-w",
 ];
 const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
 const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
@@ -341,6 +344,17 @@ await page.evaluate((v) => {
       strength: v === "v6_5-tint-100" ? 100 : 50,
     });
     api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
+  } else if (v === "v6_6-probe-speed" || v === "v6_6-probe-tke" || v === "v6_6-probe-w") {
+    const name = v === "v6_6-probe-speed" ? "speed" : v === "v6_6-probe-tke" ? "tke" : "w";
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSection({ enabled: false });
+    api.setProbeEnabled(true);
+    api.probeAt(140, 170);
+    api.setProbeVariable(name);
+    api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
   } else if (v === "v6_3-particles-1x" || v === "v6_3-particles-exag") {
     const hi = v === "v6_3-particles-exag";
     api.setLayer("particles", true);
@@ -355,6 +369,23 @@ await page.evaluate((v) => {
     api.setView("overview");
   }
 }, view);
+if (view.startsWith("v6_5-tint")) {
+  await page.waitForFunction(() => window.__atmosApi.hasData("t2m") === true, null, { timeout: 90_000 });
+}
+if (view.startsWith("v6_6-probe-")) {
+  const name = view === "v6_6-probe-speed" ? "speed" : view === "v6_6-probe-tke" ? "tke" : "w";
+  if (name !== "speed") {
+    await page.waitForFunction((n) => window.__atmosApi.hasData(n) === true, name, { timeout: 90_000 });
+  }
+  await page.waitForFunction((n) => {
+    const title = document.querySelector(".profile .x-title")?.textContent ?? "";
+    const path = document.querySelector(".profile path.series");
+    if (!path) return false;
+    if (n === "speed") return title.includes("水平风速") || title.includes("m/s");
+    if (n === "tke") return title.toLowerCase().includes("tke") || title.includes("湍");
+    return title.includes("垂直") || /\bw\b/.test(title) || title.includes("w");
+  }, name, { timeout: 90_000 });
+}
 if (
   [
     "embedded",
