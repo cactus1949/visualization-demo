@@ -46,6 +46,9 @@ const VIEWS = [
   "v6_3-particles-exag",
   "v6_4-box-drag",
   "v6_4-box-fixed",
+  "v6_7-box-front",
+  "v6_7-box-back",
+  "v6_7-box-particles",
   "v6_4-panel-volume",
   "v6_4-panel-section",
   "v6_5-opacity-02",
@@ -315,6 +318,14 @@ await page.evaluate((v) => {
       api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
     }
     api.setCamera([0, 26, 0.01], [0, 0, 0]);
+  } else if (["v6_7-box-front", "v6_7-box-back", "v6_7-box-particles"].includes(v)) {
+    api.setLayer("particles", v === "v6_7-box-particles");
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("box");
+    api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
+    api.setSection({ variable: "speed", opacity: 0.55 });
+    api.setCamera(v === "v6_7-box-back" ? [9.5, 6.5, -11] : [-9.5, 6.5, 11], [0, 0.5, 0]);
   } else if (v === "v6_4-panel-volume") {
     api.setLayer("particles", false);
     api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
@@ -431,6 +442,8 @@ if (
     "v6_3-particles-exag",
     "v6_4-box-drag",
     "v6_4-box-fixed",
+    "v6_7-box-front",
+    "v6_7-box-back",
     "v6_4-panel-volume",
     "v6_4-panel-section",
   ].includes(view)

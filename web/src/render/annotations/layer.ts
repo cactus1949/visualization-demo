@@ -34,6 +34,8 @@ export interface AnnotationDesc {
   axis?: "x" | "y" | "z" | "h" | "v";
   /** Optional group id used to decimate overlapping labels (e.g. box height labels). */
   cluster?: string;
+  /** Optional analytic test for handle occlusion in root-local coordinates. */
+  occlusionTest?: (camLocal: THREE.Vector3, anchor: THREE.Vector3) => boolean;
 }
 
 export interface AnnotationHit {
@@ -245,14 +247,23 @@ export class AnnotationLayer {
     this.frame += 1;
     const rect = this.element.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return;
+    let hasAnalyticOcclusion = false;
+    if (this.occluderEnabled) {
+      for (const item of this.items.values()) {
+        if (item.desc.occlusionTest) {
+          hasAnalyticOcclusion = true;
+          break;
+        }
+      }
+    }
     const checkOcc =
       this.occluderEnabled &&
       this.occluder !== null &&
       (this.frame % 4 === 1 || camera.position.distanceToSquared(this.lastCam) > 1e-6);
-    if (checkOcc) {
-      this.lastCam.copy(camera.position);
+    if (this.occluderEnabled && (this.occluder !== null || hasAnalyticOcclusion)) {
       this.camLocal.copy(camera.position);
       this.root.worldToLocal(this.camLocal);
+      if (checkOcc) this.lastCam.copy(camera.position);
     }
 
     this.polygonMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(this.root.matrixWorld);
@@ -442,18 +453,20 @@ export class AnnotationLayer {
     item.sx = tmpA.x;
     item.sy = tmpA.y;
 
-    if (checkOcc && this.occluder) {
-      // Handles are interaction affordances and stay fully visible.
-      if (desc.kind === "handle") {
-        item.occluded = false;
-      } else {
-        fill(tmpAnchor, desc.anchor);
-        // For a stem, test mid-height so a blocked ground point does not hide the mast.
-        if (desc.stemTo) {
-          tmpAnchor.y = (desc.anchor.y + desc.stemTo.y) * 0.35;
-        }
-        item.occluded = this.occluder.blocked(this.camLocal, tmpAnchor);
+    fill(tmpAnchor, desc.anchor);
+    // For a stem, test mid-height so a blocked ground point does not hide the mast.
+    if (desc.stemTo) {
+      tmpAnchor.y = (desc.anchor.y + desc.stemTo.y) * 0.35;
+    }
+    if (desc.kind === "handle") {
+      item.occluded = Boolean(
+        this.occluderEnabled && desc.occlusionTest?.(this.camLocal, tmpAnchor),
+      );
+      if (checkOcc && this.occluder && desc.occlusionTest) {
+        item.occluded = item.occluded || this.occluder.blocked(this.camLocal, tmpAnchor);
       }
+    } else if (checkOcc && this.occluder) {
+      item.occluded = this.occluder.blocked(this.camLocal, tmpAnchor);
     }
 
     const state = desc.state ?? "idle";

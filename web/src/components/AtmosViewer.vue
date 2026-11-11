@@ -1230,6 +1230,7 @@ function resize(): void {
   const h = canvas.value.clientHeight;
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
   renderer.setSize(w, h, false);
+  boxStack?.setResolution(w, h);
   volume?.resize(renderer);
   camera.aspect = w / Math.max(1, h);
   camera.updateProjectionMatrix();
@@ -1444,6 +1445,7 @@ async function start(): Promise<void> {
   vsection = new AxisSection(domain, "lon");
   polyline = new PolylineSection(domain);
   boxStack = new BoxStack(domain, manifest.value.grid.levels_m);
+  boxStack.setResolution(canvas.value!.clientWidth, canvas.value!.clientHeight);
   volume = new VolumeLayer(domain);
   hslice.group.visible = false;
   vsection.group.visible = false;
