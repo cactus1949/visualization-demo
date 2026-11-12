@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { colormapCss } from "../render/colormaps";
+import { formatLegendValue, markerFraction } from "../state/legendRange";
 
 const props = defineProps<{
   title: string;
@@ -13,6 +14,10 @@ const props = defineProps<{
   /** current frame has values below / above the colour range: light the end arrow */
   overLow?: boolean;
   overHigh?: boolean;
+  dataMin?: number;
+  dataMax?: number;
+  hint?: string | null;
+  warn?: string | null;
 }>();
 
 const gradient = computed(() => colormapCss(props.colormap));
@@ -27,6 +32,9 @@ const windowRight = computed(
     `${Math.max(0, Math.min(100, ((windowMax.value - props.min) / (props.max - props.min || 1)) * 100))}%`,
 );
 const hasWindow = computed(() => props.windowMin !== undefined && props.windowMax !== undefined);
+const hasData = computed(() => Number.isFinite(props.dataMin) && Number.isFinite(props.dataMax));
+const dataMinMarker = computed(() => hasData.value ? markerFraction(props.dataMin!, props.min, props.max) : null);
+const dataMaxMarker = computed(() => hasData.value ? markerFraction(props.dataMax!, props.min, props.max) : null);
 const ticks = computed(() => {
   const out: string[] = [];
   for (let i = 0; i <= 4; i += 1) {
@@ -50,12 +58,19 @@ const ticks = computed(() => {
     <div class="legend-bar" :style="{ background: gradient }">
       <span v-if="hasWindow" class="legend-dim left" :style="{ width: windowLeft }" />
       <span v-if="hasWindow" class="legend-dim right" :style="{ left: windowRight }" />
+      <template v-if="hasData && !hint">
+        <span class="data-marker data-marker-min" :class="{ clipped: dataMinMarker?.clipped }" :style="{ left: `${(dataMinMarker?.f ?? 0) * 100}%` }" />
+        <span class="data-marker data-marker-max" :class="{ clipped: dataMaxMarker?.clipped }" :style="{ left: `${(dataMaxMarker?.f ?? 0) * 100}%` }" />
+      </template>
     </div>
     <span class="over high" :class="{ lit: overHigh }" :title="overHigh ? '当前时刻有高于色带上限的值' : ''" />
     </div>
     <div class="legend-ticks">
       <span v-for="(tick, i) in ticks" :key="i">{{ tick }}</span>
     </div>
+    <div v-if="hint" class="legend-hint">{{ hint }}</div>
+    <div v-else-if="hasData" class="legend-data">当前 {{ formatLegendValue(dataMin!) }} – {{ formatLegendValue(dataMax!) }} {{ units }}</div>
+    <div v-if="warn" class="legend-warn">{{ warn }}</div>
     <div v-if="hasWindow" class="legend-window">
       窗口 {{ windowMin.toPrecision(4) }} – {{ windowMax.toPrecision(4) }} {{ units }}
     </div>
@@ -92,6 +107,21 @@ const ticks = computed(() => {
   flex: 1;
   height: 10px;
   border-radius: 5px;
+}
+.data-marker {
+  position: absolute;
+  top: -7px;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid #ffc247;
+  filter: drop-shadow(0 0 0.5px #08101a);
+  z-index: 2;
+}
+.data-marker.clipped {
+  filter: drop-shadow(0 0 0.5px #08101a) brightness(1.15);
 }
 /* end arrows: dim outline normally, fixed-amber when the frame exceeds the colour range */
 .over {
@@ -144,4 +174,14 @@ const ticks = computed(() => {
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
+.legend-data,
+.legend-hint,
+.legend-warn {
+  margin-top: 3px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.legend-data { color: var(--text, #f4fbff); }
+.legend-hint,
+.legend-warn { color: #ffc247; font-size: 11px; }
 </style>
