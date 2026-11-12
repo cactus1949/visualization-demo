@@ -24,7 +24,7 @@ export type StoreEvent = { name: string; frame: number };
 /**
  * Main-thread side of the data worker. Variables are keyed by `name@frame`; schema-3 data
  * is frame 0. The main thread and the worker both keep only the sliding window of frames
- * (⌊t⌋ and ⌊t⌋+1 by default). Half-float payloads go straight to the GPU slot uploader.
+ * (⌊t⌋, ⌊t⌋+1 and ⌊t⌋+2 by default). Half-float payloads go straight to the GPU slot uploader.
  */
 export class DataStore {
   manifest: Manifest | null = null;
@@ -35,7 +35,7 @@ export class DataStore {
   readonly halves = new Map<string, Uint16Array>();
   /** encoded bytes present in the worker window cache (`${name}@${frame}`) */
   readonly cached = new Set<string>();
-  /** frames whose in-flight fetches were aborted after a seek (cleared by the caller) */
+  /** recent in-flight fetches aborted after a seek (capped; exposed for debugging) */
   readonly aborted: string[] = [];
   /** jobs sent to the worker that have not reported back yet */
   readonly pending = new Set<string>();
@@ -92,6 +92,7 @@ export class DataStore {
     if (m.type === "aborted") {
       this.cached.delete(DataStore.key(m.name, m.frame));
       this.aborted.push(DataStore.key(m.name, m.frame));
+      if (this.aborted.length > 32) this.aborted.splice(0, this.aborted.length - 32);
       this.notify("aborted", m.frame);
       return;
     }

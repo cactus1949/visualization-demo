@@ -36,10 +36,7 @@ interface Job {
 }
 
 const post = (message: unknown, transfer: Transferable[] = []) =>
-  (self as unknown as { postMessage(m: unknown, t: Transferable[]): void }).postMessage(
-    message,
-    transfer,
-  );
+  (self as unknown as { postMessage(m: unknown, t: Transferable[]): void }).postMessage(message, transfer);
 let manifest: Manifest;
 let dataRoot = "";
 let dirs: string[] = [""];
@@ -61,30 +58,17 @@ const SHIFT = new Uint32Array(512);
 for (let i = 0; i < 256; i += 1) {
   const e = i - 127;
   if (e < -27) {
-    BASE[i] = 0x0000;
-    BASE[i | 0x100] = 0x8000;
-    SHIFT[i] = 24;
-    SHIFT[i | 0x100] = 24;
+    BASE[i] = 0x0000; BASE[i | 0x100] = 0x8000; SHIFT[i] = 24; SHIFT[i | 0x100] = 24;
   } else if (e < -14) {
-    BASE[i] = 0x0400 >> (-e - 14);
-    BASE[i | 0x100] = (0x0400 >> (-e - 14)) | 0x8000;
-    SHIFT[i] = -e - 1;
-    SHIFT[i | 0x100] = -e - 1;
+    BASE[i] = 0x0400 >> (-e - 14); BASE[i | 0x100] = (0x0400 >> (-e - 14)) | 0x8000;
+    SHIFT[i] = -e - 1; SHIFT[i | 0x100] = -e - 1;
   } else if (e <= 15) {
-    BASE[i] = (e + 15) << 10;
-    BASE[i | 0x100] = ((e + 15) << 10) | 0x8000;
-    SHIFT[i] = 13;
-    SHIFT[i | 0x100] = 13;
+    BASE[i] = (e + 15) << 10; BASE[i | 0x100] = ((e + 15) << 10) | 0x8000;
+    SHIFT[i] = 13; SHIFT[i | 0x100] = 13;
   } else if (e < 128) {
-    BASE[i] = 0x7c00;
-    BASE[i | 0x100] = 0xfc00;
-    SHIFT[i] = 24;
-    SHIFT[i | 0x100] = 24;
+    BASE[i] = 0x7c00; BASE[i | 0x100] = 0xfc00; SHIFT[i] = 24; SHIFT[i | 0x100] = 24;
   } else {
-    BASE[i] = 0x7c00;
-    BASE[i | 0x100] = 0xfc00;
-    SHIFT[i] = 13;
-    SHIFT[i | 0x100] = 13;
+    BASE[i] = 0x7c00; BASE[i | 0x100] = 0xfc00; SHIFT[i] = 13; SHIFT[i | 0x100] = 13;
   }
 }
 function toHalfArray(src: Float32Array, out: Uint16Array, stride = 1, channel = 0): void {
@@ -135,12 +119,7 @@ async function ensureRaw(name: string, frame: number): Promise<Payload> {
     const t0 = performance.now();
     const payload = await codecOf(meta).load(dataRoot + (dirs[frame] ?? ""), meta, name, signal);
     performance.mark(`atmos:fetch:${k}:end`);
-    postMessage({
-      type: "cached",
-      name,
-      frame,
-      timing: { fetchMs: performance.now() - t0, bytes: payload.bytes.byteLength },
-    });
+    postMessage({ type: "cached", name, frame, timing: { fetchMs: performance.now() - t0, bytes: payload.bytes.byteLength } });
     return payload;
   });
 }
@@ -174,17 +153,9 @@ async function run(job: Job): Promise<void> {
       const meta = manifest.variables[names[c]]!;
       const fast = codecOf(meta).half?.(payloads[c]!, meta);
       if (fast) for (let i = 0; i < n; i += 1) packed[i * 4 + c] = fast[i]!;
-      else
-        toHalfArray(
-          await codecOf(meta).decode(payloads[c]!, meta, envFor(job.frame)),
-          packed,
-          4,
-          c,
-        );
+      else toHalfArray(await codecOf(meta).decode(payloads[c]!, meta, envFor(job.frame)), packed, 4, c);
     }
-    post({ type: "wind", frame: job.frame, half: packed.buffer, packMs: performance.now() - t0 }, [
-      packed.buffer,
-    ]);
+    post({ type: "wind", frame: job.frame, half: packed.buffer, packMs: performance.now() - t0 }, [packed.buffer]);
     return;
   }
   const meta = manifest.variables[job.name];
@@ -247,19 +218,13 @@ self.onmessage = async (event: MessageEvent) => {
       manifest = (await response.json()) as Manifest;
       dirs = manifest.times?.length ? manifest.times.map((t) => t.dir) : [""];
       performance.mark("atmos:fetch:manifest:end");
-      postMessage({
-        type: "manifest",
-        manifest,
-        timing: { fetchMs: performance.now() - tManifest },
-      });
+      postMessage({ type: "manifest", manifest, timing: { fetchMs: performance.now() - tManifest } });
     } else if (event.data.type === "want") {
       const frames = Array.isArray(event.data.frames) ? (event.data.frames as number[]) : [];
       applyWindow(frames);
       // Highest priority first; jobs for frames no longer in the window are dropped.
       // In-flight fetches for those frames are aborted by applyWindow.
-      queue = (event.data.jobs as Job[]).filter(
-        (j) => !running.has(jobKey(j)) && frames.includes(j.frame),
-      );
+      queue = (event.data.jobs as Job[]).filter((j) => !running.has(jobKey(j)) && frames.includes(j.frame));
       pump();
     }
   } catch (error) {

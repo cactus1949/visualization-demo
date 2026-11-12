@@ -46,7 +46,7 @@ describe("window byte cache", () => {
       }
       return empty();
     });
-    // The new window after a jump from t=0 to t=5 is frames 5 and 6.
+    // A seek that leaves frame 0 outside the new window.
     const { aborted, evicted } = cache.retainFrames([5, 6]);
     assert.deepEqual(aborted, ["u@0"]);
     assert.deepEqual(evicted, []);
@@ -94,5 +94,29 @@ describe("window byte cache", () => {
     assert.equal(loads, 1);
     assert.equal(payload.bytes.byteLength, 4);
     assert.equal(cache.has("u@0"), true);
+  });
+
+  it("after a seek to a 3-frame window, drops jobs outside it and never writes aborted results", async () => {
+    const cache = new WindowByteCache();
+    await cache.load("u@0", async () => empty());
+    const late = deferred<CachedPayload>();
+    const stale = cache.load("u@1", async (signal) => {
+      const payload = await late.promise;
+      if (signal.aborted) {
+        const err = new Error("The operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      return payload;
+    });
+    // Seek from t=0 (window [0, 1, 2]) to t=5 with looping: window is [5, 6, 0].
+    const { evicted, aborted } = cache.retainFrames([5, 6, 0]);
+    assert.deepEqual(evicted.sort(), []);
+    assert.deepEqual(aborted, ["u@1"]);
+    assert.equal(cache.has("u@0"), true, "frame 0 stays because the new window wraps to it");
+    late.resolve(empty());
+    await assert.rejects(stale, (e: unknown) => isAbortError(e));
+    assert.equal(cache.has("u@1"), false);
+    assert.deepEqual(cache.keys().sort(), ["u@0"]);
   });
 });

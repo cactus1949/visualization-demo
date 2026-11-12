@@ -1004,8 +1004,8 @@ function updateDepthOccluders(): void {
 function onData(name: string, frame: number): void {
   if (name === "manifest" || name === "error") return;
   wantsDirty = true;
-  if (name === "cached" || name === "wind") {
-    if (name === "cached") updateReadyTicks();
+  if (name === "cached" || name === "wind" || name === "aborted") {
+    if (name === "cached" || name === "aborted") updateReadyTicks();
     return;
   }
   if (frame === 0 && requestedAt[name] !== undefined && loadMs[name] === undefined)

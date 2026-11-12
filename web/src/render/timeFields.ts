@@ -5,9 +5,9 @@ import type { Domain } from "./fields";
  * Time-dependent 3D fields on the GPU.
  *
  * Every resource (the packed wind, each scalar in use) owns up to SLOTS half-float
- * `DataArrayTexture`s holding whole frames. With the default fetch window of
- * [⌊t⌋, ⌊t⌋+1] only two slots are filled; the third is left unused so a later
- * larger window can reuse it. ONE `WebGL3DRenderTarget` is what all consumers
+ * `DataArrayTexture`s holding whole frames. The default fetch window
+ * [⌊t⌋, ⌊t⌋+1, ⌊t⌋+2] fills all three slots (current, next, prefetch). ONE
+ * `WebGL3DRenderTarget` is what all consumers
  * sample. A blend pass writes
  * mix(A, B, s) into that target, layer by layer, only when (A, B, s) changes, so
  * particles, volume, slices, sections, polyline walls, box stacks and cut faces all see
