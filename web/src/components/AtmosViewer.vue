@@ -19,6 +19,7 @@ import {
   RATES,
 } from "../state/timeline";
 import { FETCH_WINDOW_AHEAD, windowFrames } from "../state/fetchWindow";
+import { canShowFrames, planOf, type LayerNeed } from "../state/openVariables";
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
 import { VolumeLayer } from "../render/volume";
 import { DEFAULT_CUTS, clampCuts, cutBounds, type CutState } from "../render/cuts";
@@ -1034,32 +1035,33 @@ let wantsDirty = true;
 let lastWantsAt = 0;
 let gpuWasValid = new Set<string>();
 
+function currentNeed(): LayerNeed {
+  return {
+    particles: layers.particles,
+    ground: layers.ground,
+    groundVar: layers.groundVar,
+    volume: layers.volume,
+    volumeVar: layers.volumeVar,
+    section: section.enabled,
+    sectionVar: section.variable,
+    probe: layers.probe,
+    probeVar: probeVariable.value,
+  };
+}
+
+function currentPlan() {
+  return planOf(currentNeed(), manifest.value?.variables ?? {});
+}
+
 /** 3D variables whose blended texture is in use right now (+ whether the speed target is). */
 function gpuActive(): { scalars: string[]; speed: boolean } {
-  const vars = manifest.value?.variables ?? {};
-  const names = new Set<string>();
-  let speed = false;
-  const use = (n: string) => {
-    if (n === SPEED) speed = true;
-    else if (vars[n]?.dims.length === 3) names.add(n);
-  };
-  if (layers.volume) use(layers.volumeVar);
-  if (section.enabled) use(section.variable);
-  return { scalars: [...names], speed };
+  const plan = currentPlan();
+  return { scalars: plan.gpuScalars, speed: plan.needSpeed };
 }
 
 /** Names whose Float32 the CPU readers need at frames a / b. */
 function cpuNames(): string[] {
-  const vars = manifest.value?.variables ?? {};
-  const out = new Set<string>(["u", "v"]);
-  const add = (n: string) => {
-    if (vars[n]) out.add(n);
-  };
-  if (layers.ground && layers.groundVar !== "none" && layers.groundVar !== "speed0") add(layers.groundVar);
-  if (layers.probe && probeVariable.value !== SPEED && probeVariable.value !== "direction") add(probeVariable.value);
-  if (section.enabled) add(section.variable);
-  if (layers.volume) add(layers.volumeVar);
-  return [...out];
+  return currentPlan().cpuNames;
 }
 
 /** Frames in the sliding fetch / decode / GPU window: ⌊t⌋ and the next FETCH_WINDOW_AHEAD frames. */
@@ -1071,9 +1073,10 @@ function windowNow(): number[] {
 function feedSlots(): void {
   if (!timeFields || !store) return;
   const want = windowNow();
-  const active = gpuActive().scalars;
+  const plan = currentPlan();
+  const active = plan.gpuScalars;
   for (const f of want) {
-    if (!timeFields.wind.holds(f)) {
+    if (plan.queueWind && !timeFields.wind.holds(f)) {
       const h = store.takeHalf("wind", f);
       if (h) timeFields.wind.offer(f, h, want);
     }
@@ -1086,12 +1089,16 @@ function feedSlots(): void {
       }
     }
   }
-  timeFields.wind.releaseOutside(want);
+  timeFields.wind.releaseOutside(plan.queueWind ? want : []);
   for (const r of timeFields.scalars.values()) r.releaseOutside(want);
   for (const k of [...store.halves.keys()]) {
     const at = k.lastIndexOf("@");
     const name = k.slice(0, at);
     const f = Number(k.slice(at + 1));
+    if (name === "wind" && !plan.queueWind) {
+      store.halves.delete(k);
+      continue;
+    }
     const res = name === "wind" ? timeFields.wind : timeFields.scalars.get(name);
     // nobody wants it, or a duplicate of a frame a slot already holds
     if (!want.includes(f) || !res || res.holds(f)) store.halves.delete(k);
@@ -1113,12 +1120,15 @@ function syncWants(now: number): void {
   if (!wantsDirty && now - lastWantsAt < 250) return;
   wantsDirty = false;
   lastWantsAt = now;
-  const jobs: { kind: "fetch" | "decode" | "wind"; name: string; frame: number; half?: boolean }[] = [];
+  const jobs: { kind: "fetch" | "decode" | "wind"; name: string; frame: number; half?: boolean; includeW?: boolean }[] = [];
   const frames = windowNow();
-  const { scalars } = gpuActive();
-  const cpu = cpuNames();
+  const plan = currentPlan();
+  const { gpuScalars: scalars, cpuNames: cpu } = plan;
+  if (windPackNeedsRebuild(plan.includeW, frames)) wantsDirty = true;
   for (const f of frames) {
-    if (!timeFields.wind.holds(f) && !store.halves.has(`wind@${f}`)) jobs.push({ kind: "wind", name: "wind", frame: f });
+    if (plan.queueWind && !timeFields.wind.holds(f) && !store.halves.has(`wind@${f}`)) {
+      jobs.push({ kind: "wind", name: "wind", frame: f, includeW: plan.includeW });
+    }
     for (const n of scalars) {
       const r = timeFields.scalars.get(n);
       const needHalf = !r?.holds(f) && !store.halves.has(`${n}@${f}`);
@@ -1131,15 +1141,24 @@ function syncWants(now: number): void {
     }
   }
   store.want(jobs, frames);
-  store.retain((name, f) => frames.includes(f) && (name === "wind" || openNames().includes(name)));
+  store.retain((name, f) => frames.includes(f) && (name === "wind" ? plan.queueWind : plan.names.includes(name)));
 }
 
-/** Variables currently open: wind components plus any 3D / CPU field in use. */
+/** Variables currently open: only those the visible layers actually use. */
 function openNames(): string[] {
-  const vars = manifest.value?.variables ?? {};
-  const names = new Set(["u", "v", "w", ...gpuActive().scalars]);
-  for (const n of cpuNames()) names.add(n);
-  return [...names].filter((n) => vars[n]);
+  return currentPlan().names;
+}
+
+/** When particles turn on, drop u/v-only wind packs so the worker rebuilds them with w. */
+let lastWindIncludeW: boolean | undefined;
+function windPackNeedsRebuild(includeW: boolean, frames: number[]): boolean {
+  if (lastWindIncludeW === includeW) return false;
+  const was = lastWindIncludeW;
+  lastWindIncludeW = includeW;
+  if (was === undefined || !includeW || !timeFields || !store) return false;
+  timeFields.wind.releaseOutside([]);
+  for (const f of frames) store.halves.delete(`wind@${f}`);
+  return true;
 }
 
 function updateReadyTicks(): void {
@@ -1149,11 +1168,14 @@ function updateReadyTicks(): void {
   if (ready.some((r, i) => r !== tl.ready[i])) tl.ready = ready;
 }
 
-/** Are frames a and b resident on the GPU for every layer in use? */
+/** Are frames a and b ready for every layer in use? */
 function canShow(a: number, b: number): boolean {
-  if (!timeFields) return false;
-  const res: TimeResource[] = [timeFields.wind, ...gpuActive().scalars.map((n) => timeFields!.scalar(n))];
-  return res.every((r) => r.resident(a) && r.resident(b));
+  if (!timeFields || !store) return false;
+  return canShowFrames(a, b, currentPlan(), {
+    wind: (f) => timeFields!.wind.resident(f),
+    scalar: (name, f) => timeFields!.scalar(name).resident(f),
+    cpu: (name, f) => Boolean(store!.get(name, f)),
+  });
 }
 
 const timeStats = { blendMs: 0, blends: 0, switchMs: [] as number[], lastSwitchStart: 0, shownT: -1 };
@@ -1173,8 +1195,12 @@ function stepTime(now: number, dt: number): void {
   if (changed && timeStats.lastSwitchStart === 0) timeStats.lastSwitchStart = now;
   feedSlots();
   timeFields.pump();
-  const active = gpuActive();
-  const res: TimeResource[] = [timeFields.wind, ...active.scalars.map((n) => timeFields!.scalar(n))];
+  const plan = currentPlan();
+  const active = { scalars: plan.gpuScalars, speed: plan.needSpeed };
+  const res: TimeResource[] = [
+    ...(plan.queueWind ? [timeFields.wind] : []),
+    ...active.scalars.map((n) => timeFields!.scalar(n)),
+  ];
   const shown = timeFields.blend(cur.a, cur.b, cur.s, res, active.speed);
   if (shown && timeStats.lastSwitchStart) {
     timeStats.switchMs.push(performance.now() - timeStats.lastSwitchStart);
@@ -2462,6 +2488,22 @@ watch(
     layers.groundFilterMax = Number.NaN;
   },
   { flush: "sync" },
+);
+watch(
+  () => [
+    layers.particles,
+    layers.ground,
+    layers.groundVar,
+    layers.volume,
+    layers.volumeVar,
+    section.enabled,
+    section.variable,
+    layers.probe,
+    probeVariable.value,
+  ],
+  () => {
+    wantsDirty = true;
+  },
 );
 watch(() => [layers.ground, layers.groundVar, layers.groundFilterMin, layers.groundFilterMax], updateGround);
 watch(
