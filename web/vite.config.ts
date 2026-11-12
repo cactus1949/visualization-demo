@@ -8,10 +8,12 @@ import vue from "@vitejs/plugin-vue";
 const dataRoot = path.resolve(__dirname, "../data/web");
 const dataApi = process.env.DATA_API ?? "http://127.0.0.1:8000";
 
+/** Same rule as services/cache_headers.py: frame payloads and t000/*.json index files only. */
 function cacheControlFor(file: string): string | undefined {
   const name = path.basename(file);
   if (name === "manifest.json") return "no-cache";
-  if (name.endsWith(".bin.br") || name.endsWith(".sz3pack") || name.endsWith(".json")) {
+  const inFrameDir = /^t\d{3}$/.test(path.basename(path.dirname(file)));
+  if (name.endsWith(".bin.br") || name.endsWith(".sz3pack") || (name.endsWith(".json") && inFrameDir)) {
     return "public, max-age=31536000, immutable";
   }
   return undefined;

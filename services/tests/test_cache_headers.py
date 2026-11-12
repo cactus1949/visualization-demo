@@ -22,8 +22,14 @@ def test_cache_control_for_distinguishes_manifest_from_immutable_frames():
     assert cache_control_for("/data/current/202611/20261111/manifest.json") == MANIFEST_CACHE
     assert cache_control_for("t000/u.bin.br") == IMMUTABLE_CACHE
     assert cache_control_for("t000/u.sz3pack") == IMMUTABLE_CACHE
-    assert cache_control_for("t000/u.json") == IMMUTABLE_CACHE
+    assert cache_control_for("/data/sz3/202611/20261111/t003/u.json") == IMMUTABLE_CACHE
     assert cache_control_for("readme.txt") is None
+
+
+def test_json_outside_frame_directories_is_not_immutable():
+    assert cache_control_for("/data/buildings/buildings.json") is None
+    assert cache_control_for("/data/current/202611/20261111/other.json") is None
+    assert cache_control_for("/data/web/lowair_atmos/t0/u.json") is None
 
 
 def _tree(root: Path) -> None:
@@ -34,6 +40,9 @@ def _tree(root: Path) -> None:
     (frame / "u.bin.br").write_bytes(b"br")
     (frame / "u.sz3pack").write_bytes(b"sz")
     (frame / "u.json").write_text('{"index": []}', encoding="utf-8")
+    buildings = root / "buildings"
+    buildings.mkdir()
+    (buildings / "buildings.json").write_text('{"features": []}', encoding="utf-8")
 
 
 def test_payload_files_set_cache_headers_and_keep_content_encoding():
@@ -65,6 +74,10 @@ def test_payload_files_set_cache_headers_and_keep_content_encoding():
         assert manifest.status_code == 200
         assert manifest.headers["cache-control"] == MANIFEST_CACHE
         assert "immutable" not in manifest.headers["cache-control"]
+
+        bld = client.head("/data/buildings/buildings.json")
+        assert bld.status_code == 200
+        assert "immutable" not in bld.headers.get("cache-control", "")
 
         missing = client.head("/data/current/202611/20261111/t000/missing.bin.br")
         assert missing.status_code == 404
