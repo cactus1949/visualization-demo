@@ -21,12 +21,12 @@ interface DeriveSpec {
 const codec: Codec = {
   id: "sz3",
   encodings: ["sz3", "derived"],
-  async load(base, meta) {
+  async load(base, meta, _name, signal) {
     if (meta.encoding === "derived") return { bytes: new ArrayBuffer(0) };
     const indexName = meta.index_file || meta.file.replace(/\.sz3pack$/, ".json");
     const [bytes, index] = await Promise.all([
-      fetchBytes(base + meta.file),
-      fetch(base + indexName).then((r) => {
+      fetchBytes(base + meta.file, signal),
+      fetch(base + indexName, signal ? { signal } : undefined).then((r) => {
         if (!r.ok) throw new Error(`无法加载 ${base + indexName}: ${r.status}`);
         return r.json() as Promise<Sz3Index>;
       }),

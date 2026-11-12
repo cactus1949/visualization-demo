@@ -22,8 +22,8 @@ for (let h = 0; h < 65536; h += 1) {
 const codec: Codec = {
   id: "current",
   encodings: ["f16", "u8_linear", "u8_log10", "u8_int", "u8_signed_sqrt", "u16_linear", "u16_log10", "u16_signed_sqrt", "u8_log1p", "u16_log1p"],
-  async load(base, meta) {
-    return { bytes: await fetchBytes(base + meta.file) };
+  async load(base, meta, _name, signal) {
+    return { bytes: await fetchBytes(base + meta.file, signal) };
   },
   decode({ bytes }, meta) {
     const n = count(meta);

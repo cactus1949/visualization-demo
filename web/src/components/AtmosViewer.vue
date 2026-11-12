@@ -14,11 +14,11 @@ import {
   bracket,
   clockOf,
   createTimeline,
-  prefetchFrame,
   setTime as setTimelineTime,
   stepFrame as stepTimelineFrame,
   RATES,
 } from "../state/timeline";
+import { FETCH_WINDOW_AHEAD, windowFrames } from "../state/fetchWindow";
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
 import { VolumeLayer } from "../render/volume";
 import { DEFAULT_CUTS, clampCuts, cutBounds, type CutState } from "../render/cuts";
@@ -1004,8 +1004,8 @@ function updateDepthOccluders(): void {
 function onData(name: string, frame: number): void {
   if (name === "manifest" || name === "error") return;
   wantsDirty = true;
-  if (name === "cached" || name === "wind") {
-    if (name === "cached") updateReadyTicks();
+  if (name === "cached" || name === "wind" || name === "aborted") {
+    if (name === "cached" || name === "aborted") updateReadyTicks();
     return;
   }
   if (frame === 0 && requestedAt[name] !== undefined && loadMs[name] === undefined)
@@ -1062,43 +1062,32 @@ function cpuNames(): string[] {
   return [...out];
 }
 
-/** Frames that get a GPU slot: a = ⌊t⌋, b = a + 1 and the prefetch frame c (3 slots). */
-function gpuFrames(): number[] {
-  return [...new Set([cur.a, cur.b, prefetchFrame(tl, cur.b)])];
-}
-
-/**
- * gpuFrames plus `prefetch_extra` frames further ahead (SZ3: 1). Those are decoded to half
- * floats early and wait in the store until a slot frees up; they never take a GPU slot
- * themselves, otherwise 4 frames would fight over 3 slots and the upload never settles.
- */
-function desiredFrames(): number[] {
-  const frames = gpuFrames();
-  let next = frames[frames.length - 1]!;
-  for (let k = 0; k < (manifest.value?.prefetch_extra ?? 0); k += 1) frames.push((next = prefetchFrame(tl, next)));
-  return [...new Set(frames)];
+/** Frames in the sliding fetch / decode / GPU window: ⌊t⌋ and the next FETCH_WINDOW_AHEAD frames. */
+function windowNow(): number[] {
+  return windowFrames(tl.t, tl.frames, { ahead: FETCH_WINDOW_AHEAD, loop: tl.loop });
 }
 
 /** Hand arrived half-float frames to their GPU slots; drop ones nobody wants any more. */
 function feedSlots(): void {
   if (!timeFields || !store) return;
-  const want = desiredFrames();
-  const keep = [cur.a, cur.b];
+  const want = windowNow();
   const active = gpuActive().scalars;
-  for (const f of gpuFrames()) {
+  for (const f of want) {
     if (!timeFields.wind.holds(f)) {
       const h = store.takeHalf("wind", f);
-      if (h) timeFields.wind.offer(f, h, keep);
+      if (h) timeFields.wind.offer(f, h, want);
     }
     for (const n of active) {
       const r = timeFields.scalar(n);
       r.lastUsed = performance.now();
       if (!r.holds(f)) {
         const h = store.takeHalf(n, f);
-        if (h) r.offer(f, h, keep);
+        if (h) r.offer(f, h, want);
       }
     }
   }
+  timeFields.wind.releaseOutside(want);
+  for (const r of timeFields.scalars.values()) r.releaseOutside(want);
   for (const k of [...store.halves.keys()]) {
     const at = k.lastIndexOf("@");
     const name = k.slice(0, at);
@@ -1118,17 +1107,16 @@ function feedSlots(): void {
   }
 }
 
-/** Rebuild the worker's wish list (current frames first, then background prefetch). */
+/** Rebuild the worker's wish list for the current sliding window only. */
 function syncWants(now: number): void {
   if (!store || !manifest.value || !timeFields) return;
   if (!wantsDirty && now - lastWantsAt < 250) return;
   wantsDirty = false;
   lastWantsAt = now;
   const jobs: { kind: "fetch" | "decode" | "wind"; name: string; frame: number; half?: boolean }[] = [];
-  const frames = desiredFrames();
+  const frames = windowNow();
   const { scalars } = gpuActive();
   const cpu = cpuNames();
-  if (!ready) cpu.push(...["tke", "t2m"].filter((n) => manifest.value!.variables[n]));
   for (const f of frames) {
     if (!timeFields.wind.holds(f) && !store.halves.has(`wind@${f}`)) jobs.push({ kind: "wind", name: "wind", frame: f });
     for (const n of scalars) {
@@ -1142,20 +1130,12 @@ function syncWants(now: number): void {
       jobs.push({ kind: "decode", name: n, frame: f });
     }
   }
-  // Background: encoded bytes of every frame, in playback order from the current one.
-  if (ready) {
-    const names = prefetchNames();
-    for (let k = 1; k <= tl.frames; k += 1) {
-      const f = (cur.a + k) % tl.frames;
-      for (const n of names) if (!store.isCached(n, f)) jobs.push({ kind: "fetch", name: n, frame: f });
-    }
-  }
-  store.want(jobs);
-  // CPU copies outside the window are dropped; the worker still caches their bytes.
-  store.retain((_, f) => frames.includes(f));
+  store.want(jobs, frames);
+  store.retain((name, f) => frames.includes(f) && (name === "wind" || openNames().includes(name)));
 }
 
-function prefetchNames(): string[] {
+/** Variables currently open: wind components plus any 3D / CPU field in use. */
+function openNames(): string[] {
   const vars = manifest.value?.variables ?? {};
   const names = new Set(["u", "v", "w", ...gpuActive().scalars]);
   for (const n of cpuNames()) names.add(n);
@@ -1164,7 +1144,7 @@ function prefetchNames(): string[] {
 
 function updateReadyTicks(): void {
   if (!store || !manifest.value) return;
-  const names = prefetchNames();
+  const names = openNames();
   const ready = Array.from({ length: tl.frames }, (_, f) => names.every((n) => store.isCached(n, f)));
   if (ready.some((r, i) => r !== tl.ready[i])) tl.ready = ready;
 }
@@ -2221,6 +2201,9 @@ function exposeApi(): void {
       if (!r || !p) return null;
       return { gpu: timeFields.readTexel(r.target, ix, iy, k)[0], cpu: mixAt(p, i), a: cur.a, b: cur.b, s: cur.s };
     },
+    fetchWindow: () => windowNow(),
+    abortedFetches: () => [...(store?.aborted ?? [])],
+    cachedKeys: () => [...(store?.cached ?? [])],
     timeStats: () => ({
       blendMs: timeStats.blendMs,
       blends: timeStats.blends,
@@ -2286,8 +2269,8 @@ async function start(): Promise<void> {
   Object.assign(cur, b0);
   resetVolumeFilter(layers.volumeVar);
   store.on(onData);
-  // First wish list: the current frame's wind (u, v, w), then tke, t2m — as in v6.10.
-  for (const n of ["u", "v", "w", "tke", "t2m"]) {
+  // Timing bookmarks for the variables the first window will request (wind = u, v, w).
+  for (const n of ["u", "v", "w"]) {
     if (requestedAt[n] === undefined) requestedAt[n] = performance.now();
   }
 
