@@ -49,6 +49,15 @@ import {
   sanitizeRange,
   thresholdPhysical,
 } from "../state/fieldStyle";
+import {
+  blendRange,
+  emptyHint,
+  FrameRangeCache,
+  formatLegendValue,
+  rangeOfArray,
+  thresholdHidesAll,
+  type DataRange,
+} from "../state/legendRange";
 import ColorLegend from "./ColorLegend.vue";
 import ProfileChart from "./ProfileChart.vue";
 import RangeSlider from "./RangeSlider.vue";
@@ -463,6 +472,9 @@ let raf = 0;
 let disposed = false;
 const requestedAt: Record<string, number> = {};
 const volumeColorRange = ref<[number, number]>([0, 1]);
+const legendRanges = new FrameRangeCache();
+/** Bumped when a CPU frame on screen arrives: the legend data ranges read non-reactive store data. */
+const legendDataTick = ref(0);
 
 /** Physical value of the volume transparent threshold on the colour-mapping range. */
 const volumeThresholdPhysical = computed(() => {
@@ -505,6 +517,85 @@ function cpuPair(name: string): { A: Float32Array; B: Float32Array | null; s: nu
 }
 const mixAt = (p: { A: Float32Array; B: Float32Array | null; s: number }, i: number) =>
   p.B ? p.A[i]! + (p.B[i]! - p.A[i]!) * p.s : p.A[i]!;
+
+function manifestRangeAt(name: string, frame: number): DataRange | null {
+  const meta = manifest.value?.variables[name];
+  if (!meta) return null;
+  const stats = meta.frames?.[frame] ?? meta;
+  return Number.isFinite(stats.data_min) && Number.isFinite(stats.data_max)
+    ? { min: stats.data_min, max: stats.data_max }
+    : null;
+}
+
+function speedRangeAt(frame: number, level?: number): DataRange | null {
+  const u = store?.get("u", frame)?.data;
+  const v = store?.get("v", frame)?.data;
+  if (!u || !v) return null;
+  const n = domain.nx * domain.ny;
+  const start = level === undefined ? 0 : Math.max(0, Math.min(domain.nz - 1, level)) * n;
+  const end = level === undefined ? Math.min(u.length, v.length) : Math.min(start + n, u.length, v.length);
+  const key = `speed@${frame}${level === undefined ? "" : `@k${level}`}`;
+  return legendRanges.get(key, () => {
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = start; i < end; i += 1) {
+      const value = Math.hypot(u[i]!, v[i]!);
+      if (value < min) min = value;
+      if (value > max) max = value;
+    }
+    return { min, max };
+  });
+}
+
+function sectionLevel(): number | undefined {
+  if (!manifest.value || section.kind !== "height") return undefined;
+  const levels = manifest.value.grid.levels_m;
+  const dz = levels[1] - levels[0];
+  return THREE.MathUtils.clamp(Math.round((slice.heightM - levels[0]) / dz), 0, manifest.value.grid.nz - 1);
+}
+
+function frameRange(name: string, frame: number, level?: number): DataRange | null {
+  if (name === SPEED) return speedRangeAt(frame, level);
+  if (level === undefined) return manifestRangeAt(name, frame);
+  const data = store?.get(name, frame)?.data;
+  if (!data) return manifestRangeAt(name, frame);
+  const n = domain.nx * domain.ny;
+  return legendRanges.get(`${name}@${frame}@k${level}`, () => rangeOfArray(data, level * n, (level + 1) * n));
+}
+
+function currentDataRange(name: string, level?: number): DataRange | null {
+  void legendDataTick.value;
+  const { a, b, s } = bracket(tl);
+  const first = frameRange(name, a, level);
+  if (!first) return null;
+  const second = s > 0 ? frameRange(name, b, level) : null;
+  return blendRange(first, second, s);
+}
+
+function groundStyle(name: string): { colormap: string; range: [number, number] } {
+  if (name === "speed0") return { colormap: "viridis", range: displayRange("speed0") ?? displayRange(SPEED) ?? [0, 20] };
+  const meta = manifest.value?.variables[name];
+  return {
+    colormap: meta?.colormap === "rdbu" ? "rdbu" : (meta?.colormap ?? "viridis"),
+    range: displayRange(name) ?? (meta ? [meta.data_min, meta.data_max] : [0, 1]),
+  };
+}
+
+const volumeDataRange = computed(() => currentDataRange(layers.volumeVar));
+const volumeDataHint = computed(() => emptyHint(layers.volumeVar, volumeDataRange.value));
+const volumeThresholdWarning = computed(() => {
+  const range = volumeDataRange.value;
+  if (!range || volumeDataHint.value || !thresholdHidesAll(volumeThresholdPhysical.value, range)) return null;
+  const unit = prettyUnit(unitsOf(layers.volumeVar));
+  const u = unit ? ` ${unit}` : "";
+  return `阈值 ${formatLegendValue(volumeThresholdPhysical.value)}${u} 高于当前最大值 ${formatLegendValue(range.max)}${u}，体渲染全透明，调低阈值可见`;
+});
+const volumeCurrentMaxHint = computed(() => {
+  const range = volumeDataRange.value;
+  if (!range || !Number.isFinite(range.max)) return "";
+  const unit = prettyUnit(unitsOf(layers.volumeVar));
+  return ` · 当前最大 ${formatLegendValue(range.max)}${unit ? ` ${unit}` : ""}`;
+});
 /** Horizontal wind at index i, magnitude-preserving blend (same rule as the GPU pass). */
 function windAt(
   u: { A: Float32Array; B: Float32Array | null; s: number },
@@ -853,8 +944,8 @@ function updateGround(): void {
     const v = cpuPair("v");
     if (!u || !v) return request("speed0");
     const read = (i: number) => windAt(u, v, i)[2];
-    const range = displayRange("speed0") ?? displayRange(SPEED) ?? [0, 20];
-    atmos.setGroundField(read, range, "viridis", view.theme, 0.55, groundFilterFor(read));
+    const style = groundStyle(name);
+    atmos.setGroundField(read, style.range, style.colormap, view.theme, 0.55, groundFilterFor(read));
     applyBuildings();
     return;
   }
@@ -862,10 +953,10 @@ function updateGround(): void {
   const pair = cpuPair(name);
   if (!data || !pair) return request(name);
   const meta = data.meta;
-  const cmap = meta.colormap === "rdbu" ? "rdbu" : meta.colormap;
-  const range: [number, number] = displayRange(name) ?? [meta.data_min, meta.data_max];
+  const style = groundStyle(name);
+  const range = style.range;
   const read = pair.B ? (i: number) => mixAt(pair, i) : field2D(meta, pair.A);
-  atmos.setGroundField(read, range, cmap, view.theme, 0.55, groundFilterFor(read));
+  atmos.setGroundField(read, range, style.colormap, view.theme, 0.55, groundFilterFor(read));
   applyBuildings();
 }
 
@@ -1014,6 +1105,7 @@ function onData(name: string, frame: number): void {
   publishTimings();
   // CPU readers only care about the frames on screen.
   if (frame !== cur.a && frame !== cur.b) return;
+  legendDataTick.value += 1;
   if (
     name === layers.groundVar ||
     ((name === "u" || name === "v") && layers.groundVar === "speed0")
@@ -1189,6 +1281,7 @@ function stepTime(now: number, dt: number): void {
   const br = bracket(tl);
   const changed = br.a !== cur.a || br.b !== cur.b || br.s !== cur.s;
   if (br.a !== cur.a || br.b !== cur.b) wantsDirty = true;
+  if (br.a !== cur.a || br.b !== cur.b) legendRanges.retainFrames(windowNow());
   cur.a = br.a;
   cur.b = br.b;
   cur.s = br.s;
@@ -2228,6 +2321,13 @@ function exposeApi(): void {
       return { gpu: timeFields.readTexel(r.target, ix, iy, k)[0], cpu: mixAt(p, i), a: cur.a, b: cur.b, s: cur.s };
     },
     fetchWindow: () => windowNow(),
+    /** Legend colour ranges plus the current-instant data range, empty hint and threshold warning. */
+    legendState: () =>
+      legends.value.map((l) => ({
+        key: l.key, min: l.min, max: l.max,
+        dataMin: l.dataMin ?? null, dataMax: l.dataMax ?? null,
+        hint: l.hint ?? null, warn: l.warn ?? null,
+      })),
     abortedFetches: () => [...(store?.aborted ?? [])],
     cachedKeys: () => [...(store?.cached ?? [])],
     timeStats: () => ({
@@ -2588,8 +2688,13 @@ const legends = computed(() => {
     windowMax?: number;
     overLow?: boolean;
     overHigh?: boolean;
+    dataMin?: number;
+    dataMax?: number;
+    hint?: string | null;
+    warn?: string | null;
   }[] = [];
-  if (section.enabled)
+  if (section.enabled) {
+    const dataRange = currentDataRange(section.variable, sectionLevel());
     out.push({
       key: "section",
       title: section.kind === "height"
@@ -2599,8 +2704,12 @@ const legends = computed(() => {
       colormap: section.colormap,
       min: section.min,
       max: section.max,
+      dataMin: dataRange?.min,
+      dataMax: dataRange?.max,
+      hint: emptyHint(section.variable, dataRange),
       ...overRange(section.variable, section.min, section.max),
     });
+  }
   if (layers.particles && particleParams.colorMode !== "single") {
     const name =
       particleParams.colorMode === "w"
@@ -2625,6 +2734,7 @@ const legends = computed(() => {
     });
   }
   if (volumeWanted()) {
+    const dataRange = volumeDataRange.value;
     out.push({
       key: "volume",
       title: `体渲染 · ${labelOf(layers.volumeVar)}`,
@@ -2635,7 +2745,28 @@ const legends = computed(() => {
       max: volumeColorRange.value[1],
       windowMin: layers.volumeFilterMin,
       windowMax: layers.volumeFilterMax,
+      dataMin: dataRange?.min,
+      dataMax: dataRange?.max,
+      hint: volumeDataHint.value,
+      warn: volumeThresholdWarning.value,
       ...overRange(layers.volumeVar, volumeColorRange.value[0], volumeColorRange.value[1]),
+    });
+  }
+  if (layers.ground && layers.groundVar !== "none") {
+    const name = layers.groundVar;
+    const dataRange = currentDataRange(name === "speed0" ? SPEED : name, name === "speed0" ? 0 : undefined);
+    const style = groundStyle(name);
+    out.push({
+      key: "ground",
+      title: `地面 · ${name === "speed0" ? "近地面风速" : labelOf(name)}`,
+      units: name === "speed0" ? "m/s" : unitsOf(name),
+      colormap: style.colormap,
+      min: style.range[0],
+      max: style.range[1],
+      dataMin: dataRange?.min,
+      dataMax: dataRange?.max,
+      hint: emptyHint(name, dataRange),
+      ...overRange(name, style.range[0], style.range[1]),
     });
   }
   return out;
@@ -2706,6 +2837,10 @@ onBeforeUnmount(() => {
         :window-max="l.windowMax"
         :over-low="l.overLow"
         :over-high="l.overHigh"
+        :data-min="l.dataMin"
+        :data-max="l.dataMax"
+        :hint="l.hint"
+        :warn="l.warn"
       />
     </div>
 
@@ -2821,7 +2956,7 @@ onBeforeUnmount(() => {
           <label
             class="slider"
             title="色带映射范围上的归一化位置（0–1）。低于此值的体素完全透明，之上逐渐显现。与「数值窗口」不同：窗口是硬裁剪，阈值只改透明度。"
-            >透明阈值 {{ volumeThresholdHint
+            >透明阈值 {{ volumeThresholdHint }}{{ volumeCurrentMaxHint
             }}<input
               v-model.number="layers.volumeThreshold"
               type="range"
@@ -2829,6 +2964,7 @@ onBeforeUnmount(() => {
               max="0.95"
               step="0.01"
           /></label>
+          <div v-if="volumeDataHint || volumeThresholdWarning" class="panel-warn">{{ volumeDataHint ?? volumeThresholdWarning }}</div>
           <div class="slider range-label"><span>xcut</span><RangeSlider :min="0" :max="1" :min-value="cuts.x[0]" :max-value="cuts.x[1]" :step="0.01" @update:min-value="cuts.x[0] = $event" @update:max-value="cuts.x[1] = $event" /></div>
           <div class="slider range-label"><span>ycut</span><RangeSlider :min="0" :max="1" :min-value="cuts.y[0]" :max-value="cuts.y[1]" :step="0.01" @update:min-value="cuts.y[0] = $event" @update:max-value="cuts.y[1] = $event" /></div>
           <div class="slider range-label"><span>zcut</span><RangeSlider :min="0" :max="1" :min-value="cuts.z[0]" :max-value="cuts.z[1]" :step="0.01" @update:min-value="cuts.z[0] = $event" @update:max-value="cuts.z[1] = $event" /></div>
@@ -3168,6 +3304,12 @@ onBeforeUnmount(() => {
 }
 .muted {
   color: var(--muted);
+}
+.panel-warn {
+  margin: -2px 0 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #ffc247;
 }
 .legends {
   position: absolute;
