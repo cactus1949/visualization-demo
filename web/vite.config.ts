@@ -3,7 +3,10 @@ import path from "node:path";
 import { defineConfig, type Connect, type Plugin } from "vite";
 import vue from "@vitejs/plugin-vue";
 
+// Repo sample cases (data/web/<case>/) are served here; anything else under /data and /api
+// (the dated exports in $WEB_ROOT/<format>/yyyymm/yyyymmdd/) is proxied to the FastAPI service.
 const dataRoot = path.resolve(__dirname, "../data/web");
+const dataApi = process.env.DATA_API ?? "http://127.0.0.1:8000";
 
 function serveData(
   request: Connect.IncomingMessage,
@@ -47,5 +50,17 @@ export default defineConfig({
   publicDir: false,
   assetsInclude: ["**/*.wasm"],
   worker: { format: "es" },
-  server: { host: "0.0.0.0" },
+  server: {
+    host: "0.0.0.0",
+    proxy: {
+      "/api": { target: dataApi, changeOrigin: true },
+      "/data": { target: dataApi, changeOrigin: true },
+    },
+  },
+  preview: {
+    proxy: {
+      "/api": { target: dataApi, changeOrigin: true },
+      "/data": { target: dataApi, changeOrigin: true },
+    },
+  },
 });

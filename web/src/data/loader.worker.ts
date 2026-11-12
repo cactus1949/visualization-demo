@@ -1,6 +1,6 @@
 /**
- * Data worker: fetches `<frame dir>/<name>.bin.br` (the browser undoes Brotli via
- * Content-Encoding), keeps the still-encoded bytes in an LRU cache and decodes on demand.
+ * Data worker: fetches each variable's encoded file for a frame through its codec
+ * (codecs/*.ts), keeps the still-encoded payloads in an LRU cache and decodes on demand.
  *
  * Jobs (the main thread replaces the queue with its current wish list):
  *  - fetch  : only make sure the encoded bytes of name@frame are cached (background prefetch)
@@ -11,7 +11,19 @@
  * floats (copied as-is), others go through a table-based float→half conversion.
  */
 import type { Manifest, VariableMeta } from "./manifest";
-import { decodeSz3, ensureSz3, type Sz3Index } from "./sz3Decode";
+import type { Codec, CodecEnv, Payload } from "./codecs/types";
+
+// Codec plug-ins: every codecs/*.ts file (current.ts, sz3.ts, ...). Deleting one removes it.
+const codecs: Codec[] = Object.values(
+  import.meta.glob<{ default: Codec }>("./codecs/*.ts", { eager: true }),
+)
+  .map((m) => m.default)
+  .filter((c): c is Codec => !!c && Array.isArray(c.encodings));
+function codecOf(meta: VariableMeta): Codec {
+  const c = codecs.find((x) => x.encodings.includes(meta.encoding));
+  if (!c) throw new Error(`没有 ${meta.encoding} 编码的解码器（codecs/ 里缺对应文件）`);
+  return c;
+}
 
 type JobKind = "fetch" | "decode" | "wind";
 interface Job {
@@ -27,11 +39,9 @@ let manifest: Manifest;
 let dataRoot = "";
 let dirs: string[] = [""];
 const RAW_BUDGET = 220 * 1024 * 1024;
-const raw = new Map<string, ArrayBuffer>(); // insertion order = LRU order
+const raw = new Map<string, Payload>(); // insertion order = LRU order
 let rawBytes = 0;
-const fetching = new Map<string, Promise<ArrayBuffer>>();
-const sz3Index = new Map<string, Sz3Index>();
-const isSz3 = (meta: VariableMeta | undefined) => meta?.encoding === "sz3";
+const fetching = new Map<string, Promise<Payload>>();
 let queue: Job[] = [];
 const running = new Set<string>();
 const CONCURRENCY = 2;
@@ -40,21 +50,7 @@ let active = 0;
 const key = (name: string, frame: number) => `${name}@${frame}`;
 const jobKey = (j: Job) => `${j.kind}:${j.name}@${j.frame}${j.half ? "+h" : ""}`;
 
-// ---------------------------------------------------------------- half-float tables
-const HALF_TO_FLOAT = new Float32Array(65536);
-for (let h = 0; h < 65536; h += 1) {
-  const sign = h & 0x8000 ? -1 : 1;
-  const exp = (h >>> 10) & 0x1f;
-  const frac = h & 0x3ff;
-  HALF_TO_FLOAT[h] =
-    exp === 0
-      ? sign * Math.pow(2, -14) * (frac / 1024)
-      : exp === 31
-        ? frac
-          ? NaN
-          : sign * Infinity
-        : sign * Math.pow(2, exp - 15) * (1 + frac / 1024);
-}
+// ---------------------------------------------------------------- float -> half table
 // float -> half (round-to-nearest on the mantissa), tables as in three's DataUtils
 const BASE = new Uint32Array(512);
 const SHIFT = new Uint32Array(512);
@@ -92,50 +88,28 @@ function count(meta: VariableMeta): number {
   return meta.shape.reduce((a, b) => a * b, 1);
 }
 
-function decode(buffer: ArrayBuffer, meta: VariableMeta, frame = 0, name = ""): Float32Array {
-  if (isSz3(meta)) {
-    const idx = sz3Index.get(key(name, frame));
-    if (!idx) throw new Error(`缺少 SZ3 索引 ${name}@${frame}`);
-    return decodeSz3(new Uint8Array(buffer), idx);
-  }
-  const n = count(meta);
-  const out = new Float32Array(n);
-  if (meta.dtype === "float16") {
-    const h = new Uint16Array(buffer, 0, n);
-    for (let i = 0; i < n; i += 1) out[i] = HALF_TO_FLOAT[h[i]!]!;
-    return out;
-  }
-  const q = meta.dtype === "uint16" ? new Uint16Array(buffer, 0, n) : new Uint8Array(buffer, 0, n);
-  const perLevel = meta.range_scope === "per_level" && meta.shape.length >= 3;
-  const levels = perLevel ? meta.shape[0]! : 1;
-  const stride = perLevel ? n / levels : n;
-  const tr = meta.transform;
-  for (let z = 0; z < levels; z += 1) {
-    const scale = perLevel ? meta.level_scale![z]! : meta.scale!;
-    const offset = perLevel ? meta.level_offset![z]! : meta.offset!;
-    const start = z * stride;
-    const end = start + stride;
-    if (!tr) for (let i = start; i < end; i += 1) out[i] = q[i]! * scale + offset;
-    else
-      for (let i = start; i < end; i += 1) {
-        const v = q[i]! * scale + offset;
-        out[i] =
-          tr === "log10" ? Math.pow(10, v) : tr === "log1p" ? Math.expm1(v) : Math.sign(v) * v * v;
-      }
-  }
-  return out;
+function envFor(frame: number): CodecEnv {
+  return { manifest, values: (name: string) => valuesOf(name, frame) };
 }
 
-function halfOf(buffer: ArrayBuffer, meta: VariableMeta, decoded: Float32Array): Uint16Array {
-  const n = count(meta);
-  if (meta.dtype === "float16") return new Uint16Array(buffer.slice(0, n * 2));
-  const out = new Uint16Array(n);
+/** Physical values of name@frame (fetching the payload if needed). */
+async function valuesOf(name: string, frame: number): Promise<Float32Array> {
+  const meta = manifest.variables[name];
+  if (!meta) throw new Error(`未知变量 ${name}`);
+  const payload = await ensureRaw(name, frame);
+  return codecOf(meta).decode(payload, meta, envFor(frame));
+}
+
+function halfOf(payload: Payload, meta: VariableMeta, decoded: Float32Array): Uint16Array {
+  const fast = codecOf(meta).half?.(payload, meta);
+  if (fast) return fast;
+  const out = new Uint16Array(count(meta));
   toHalfArray(decoded, out);
   return out;
 }
 
 // ---------------------------------------------------------------- raw cache
-function touch(k: string, buf: ArrayBuffer): void {
+function touch(k: string, buf: Payload): void {
   raw.delete(k);
   raw.set(k, buf);
 }
@@ -144,13 +118,13 @@ function evict(): void {
   for (const [k, buf] of raw) {
     if (rawBytes <= RAW_BUDGET) break;
     raw.delete(k);
-    rawBytes -= buf.byteLength;
+    rawBytes -= buf.bytes.byteLength;
     const [name, frame] = k.split("@");
     postMessage({ type: "evicted", name, frame: Number(frame) });
   }
 }
 
-async function ensureRaw(name: string, frame: number): Promise<ArrayBuffer> {
+async function ensureRaw(name: string, frame: number): Promise<Payload> {
   const k = key(name, frame);
   const hit = raw.get(k);
   if (hit) {
@@ -164,22 +138,13 @@ async function ensureRaw(name: string, frame: number): Promise<ArrayBuffer> {
   const p = (async () => {
     performance.mark(`atmos:fetch:${k}:start`);
     const t0 = performance.now();
-    const base = dataRoot + (dirs[frame] ?? "");
-    const response = await fetch(base + meta.file);
-    if (!response.ok) throw new Error(`无法加载 ${k}: ${response.status}`);
-    const buffer = await response.arrayBuffer();
-    if (isSz3(meta)) {
-      const indexName = meta.index_file || meta.file.replace(/\.sz3pack$/, ".json");
-      const ir = await fetch(base + indexName);
-      if (!ir.ok) throw new Error(`无法加载 ${k} 索引: ${ir.status}`);
-      sz3Index.set(k, (await ir.json()) as Sz3Index);
-    }
+    const payload = await codecOf(meta).load(dataRoot + (dirs[frame] ?? ""), meta, name);
     performance.mark(`atmos:fetch:${k}:end`);
-    raw.set(k, buffer);
-    rawBytes += buffer.byteLength;
-    postMessage({ type: "cached", name, frame, timing: { fetchMs: performance.now() - t0, bytes: buffer.byteLength } });
+    raw.set(k, payload);
+    rawBytes += payload.bytes.byteLength;
+    postMessage({ type: "cached", name, frame, timing: { fetchMs: performance.now() - t0, bytes: payload.bytes.byteLength } });
     evict();
-    return buffer;
+    return payload;
   })();
   fetching.set(k, p);
   try {
@@ -196,36 +161,29 @@ async function run(job: Job): Promise<void> {
     return;
   }
   if (job.kind === "wind") {
-    if (isSz3(manifest.variables.u) || isSz3(manifest.variables.v) || isSz3(manifest.variables.w)) {
-      await ensureSz3();
-    }
-    const [ub, vb, wb] = await Promise.all(["u", "v", "w"].map((n) => ensureRaw(n, job.frame)));
+    const names = ["u", "v", "w"] as const;
+    const payloads = await Promise.all(names.map((n) => ensureRaw(n, job.frame)));
     const t0 = performance.now();
-    const um = manifest.variables.u!, vm = manifest.variables.v!, wm = manifest.variables.w!;
-    const n = count(um);
+    const n = count(manifest.variables.u!);
     const packed = new Uint16Array(n * 4);
-    const put = (buf: ArrayBuffer, meta: VariableMeta, name: string, channel: number) => {
-      if (meta.dtype === "float16") {
-        const h = new Uint16Array(buf, 0, n);
-        for (let i = 0; i < n; i += 1) packed[i * 4 + channel] = h[i]!;
-      } else toHalfArray(decode(buf, meta, job.frame, name), packed, 4, channel);
-    };
-    put(ub!, um, "u", 0);
-    put(vb!, vm, "v", 1);
-    put(wb!, wm, "w", 2);
+    for (let c = 0; c < 3; c += 1) {
+      const meta = manifest.variables[names[c]]!;
+      const fast = codecOf(meta).half?.(payloads[c]!, meta);
+      if (fast) for (let i = 0; i < n; i += 1) packed[i * 4 + c] = fast[i]!;
+      else toHalfArray(await codecOf(meta).decode(payloads[c]!, meta, envFor(job.frame)), packed, 4, c);
+    }
     post({ type: "wind", frame: job.frame, half: packed.buffer, packMs: performance.now() - t0 }, [packed.buffer]);
     return;
   }
   const meta = manifest.variables[job.name];
   if (!meta) return;
-  if (isSz3(meta)) await ensureSz3();
   const tFetch = performance.now();
-  const buffer = await ensureRaw(job.name, job.frame);
+  const payload = await ensureRaw(job.name, job.frame);
   const fetchMs = performance.now() - tFetch;
   performance.mark(`atmos:decode:${job.name}@${job.frame}:start`);
   const t0 = performance.now();
-  const decoded = decode(buffer, meta, job.frame, job.name);
-  const half = job.half ? halfOf(buffer, meta, decoded) : null;
+  const decoded = await codecOf(meta).decode(payload, meta, envFor(job.frame));
+  const half = job.half ? halfOf(payload, meta, decoded) : null;
   performance.mark(`atmos:decode:${job.name}@${job.frame}:end`);
   const transfer: ArrayBuffer[] = [decoded.buffer as ArrayBuffer];
   if (half) transfer.push(half.buffer as ArrayBuffer);
@@ -236,7 +194,7 @@ async function run(job: Job): Promise<void> {
       frame: job.frame,
       buffer: decoded.buffer,
       half: half?.buffer ?? null,
-      timing: { fetchMs, decodeMs: performance.now() - t0, bytes: buffer.byteLength },
+      timing: { fetchMs, decodeMs: performance.now() - t0, bytes: payload.bytes.byteLength },
     },
     transfer,
   );

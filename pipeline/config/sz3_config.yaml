@@ -1,0 +1,26 @@
+# SZ3 export format (pipeline/sz3pipe). Only used by `python -m nc_export --format sz3`.
+# Delete this file together with pipeline/sz3pipe/ when the SZ3 format is dropped.
+#
+# tier T1L: every 3D field is compressed level by level (one SZ3 stream per level),
+# 2D fields as one stream. Error bound (absolute, in the transform domain):
+#   f16_err       = this frame's float16 max rounding error (what the current f16 file has)
+#   u8_half_step  = half of this frame's own 8-bit step (per level for 3D) = current u8 max error
+#   integer       = 0.49 and rounded after decoding (lossless for categories)
+# derive: not stored. The browser recomputes it from already-stored fields. The exporter
+# checks every frame: the formula must hold on the nc values (error <= 5% of the half step)
+# and the value recomputed from the decoded inputs must stay within max_err (physical units),
+# or within one 8-bit step per level when max_err is not given. Otherwise the field is
+# stored with SZ3 in every frame.
+# u_gust max_err 0.0094 m/s = the smallest per-level u_gust error of the current format (6h case).
+tier: T1L
+defaults: {bound: u8_half_step}
+u: {bound: f16_err}
+v: {bound: f16_err}
+wind_shear: {transform: log10}
+visibility: {transform: log10}
+risk_level: {bound: integer}
+sigma_u: {derive: {op: profile, from: ustar, coef: 2.4, exponent: 0.3333333333333333}}
+sigma_v: {derive: {op: profile, from: ustar, coef: 1.8, exponent: 0.3333333333333333}}
+sigma_w: {derive: {op: profile, from: ustar, coef: 1.2, exponent: 0.3333333333333333}}
+u_gust: {derive: {op: gust, u: u, v: v, sigma: sigma_u}, max_err: 0.0094}
+cloud_low: {derive: {op: copy, from: cloud}}

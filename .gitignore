@@ -9,5 +9,13 @@ data/web/**/*.u16.bin.br
 # dropped nc and date-stamped web exports (not committed)
 data/nc/
 data/web/[0-9][0-9][0-9][0-9][0-9][0-9]/
+data/web/current/
+data/web/sz3/
+data/web/.*.tmp/
+data/web/**/.*.tmp/
+# SZ3 WASM build intermediates (only sz3_O3.{mjs,wasm,d.mts} are committed)
+web/src/data/codecs/sz3/*.o
+web/src/data/codecs/sz3/obj/
+web/src/data/codecs/sz3/gen/
 services/.env
 .env

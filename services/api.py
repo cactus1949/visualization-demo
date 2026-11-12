@@ -25,20 +25,38 @@ def health() -> dict[str, object]:
     return {"ok": True, "web_root": str(ROOT)}
 
 
+def _is_month(p) -> bool:
+    return p.is_dir() and p.name.isdigit() and len(p.name) == 6
+
+
+def _is_day(p) -> bool:
+    return p.is_dir() and p.name.isdigit() and len(p.name) == 8
+
+
+def _format_dirs() -> list:
+    """Every $WEB_ROOT/<format>/ that has yyyymm/yyyymmdd/manifest.json (no format names hard-coded)."""
+    if not ROOT.is_dir():
+        return []
+    return sorted(p for p in ROOT.iterdir() if p.is_dir() and not p.name.startswith(".") and not p.name.isdigit())
+
+
 @app.get("/api/days")
-def days() -> dict[str, object]:
-    items: list[dict[str, object]] = []
-    if ROOT.is_dir():
-        for month in sorted(p for p in ROOT.iterdir() if p.is_dir() and p.name.isdigit() and len(p.name) == 6):
-            for day in sorted(p for p in month.iterdir() if p.is_dir() and p.name.isdigit() and len(p.name) == 8):
-                manifest = day / "manifest.json"
-                if manifest.is_file():
-                    items.append({
-                        "date": day.name,
-                        "path": f"/data/{month.name}/{day.name}/",
-                        "manifest": f"/data/{month.name}/{day.name}/manifest.json",
-                    })
-    return {"web_root": str(ROOT), "days": items}
+def days(format: str | None = None) -> dict[str, object]:
+    """Exported days and which formats each one has; ``?format=sz3`` keeps only that format."""
+    by_day: dict[str, dict[str, str]] = {}
+    for fmt_dir in _format_dirs():
+        if format and fmt_dir.name != format:
+            continue
+        for month in sorted(filter(_is_month, fmt_dir.iterdir())):
+            for day in sorted(filter(_is_day, month.iterdir())):
+                if (day / "manifest.json").is_file():
+                    by_day.setdefault(day.name, {})[fmt_dir.name] = f"/data/{fmt_dir.name}/{month.name}/{day.name}/manifest.json"
+    items = [{"date": d, "formats": sorted(f), "manifests": f} for d, f in sorted(by_day.items())]
+    latest: dict[str, str] = {}
+    for item in items:
+        for fmt in item["formats"]:
+            latest[fmt] = item["date"]
+    return {"web_root": str(ROOT), "formats": sorted(latest), "latest": latest, "days": items}
 
 
 class PayloadFiles(StaticFiles):

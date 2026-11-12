@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { Manifest, VariableMeta } from "../data/manifest";
+import type { FormatDef } from "../formats/types";
 import { DataStore } from "../data/store";
 import { AtmosScene, field2D, type Theme } from "../render/scene";
 import { floatRange, domainOf, textureUploadMs, type Domain } from "../render/fields";
@@ -67,12 +68,13 @@ export type ViewSnapshot = {
 const props = withDefaults(defineProps<{
   manifestUrl?: string;
   showPanel?: boolean;
-  codec?: "current" | "sz3";
+  /** export format = data directory under $WEB_ROOT (see formats/*.ts) */
+  format?: FormatDef;
   initialView?: ViewSnapshot | null;
 }>(), {
   manifestUrl: "",
   showPanel: true,
-  codec: "current",
+  format: () => ({ id: "current", label: "当前编码", order: 0, fallbackCases: ["lowair_atmos_6h", "lowair_atmos"] }),
   initialView: null,
 });
 const emit = defineEmits<{
@@ -82,15 +84,38 @@ const emit = defineEmits<{
 
 const query = new URLSearchParams(location.search);
 const embed = query.has("embed") && query.get("embed") !== "0";
-/** Multi-time case by default; `?data=lowair_atmos` opens the single-time v6.10 data. */
-const DEFAULT_DATA = "lowair_atmos_6h";
-const SZ3_DATA = "lowair_atmos_6h_sz3";
-const FALLBACK_DATA = "lowair_atmos";
+/**
+ * Which manifest to open (in this order):
+ *  - `?data=<case>`  a repo case under data/web/ (e.g. lowair_atmos, the v6.10 single time)
+ *  - `?date=YYYYMMDD` that day of this format: /data/<format>/yyyymm/yyyymmdd/manifest.json
+ *  - otherwise the latest day of this format from /api/days, then the format's repo fallbacks
+ */
 const dataBase = (import.meta.env.VITE_DATA_BASE ?? "").replace(/\/$/, "");
 const dateParam = (query.get("date") ?? "").replace(/-/g, "");
-const datePath = /^\d{8}$/.test(dateParam) ? `${dateParam.slice(0, 6)}/${dateParam}` : "";
-const defaultCase = (props.codec === "sz3" || query.get("codec") === "sz3") ? SZ3_DATA : DEFAULT_DATA;
-const dataName = datePath || (query.get("data") ?? "").replace(/[^\w-]/g, "") || defaultCase;
+const dateOk = /^\d{8}$/.test(dateParam);
+const caseParam = (query.get("data") ?? "").replace(/[^\w-]/g, "");
+const dayUrl = (date: string) => `${dataBase}/data/${props.format.id}/${date.slice(0, 6)}/${date}/manifest.json`;
+const caseUrl = (name: string) => `${dataBase}/data/${name}/manifest.json`;
+
+async function latestDay(): Promise<string | null> {
+  try {
+    const r = await fetch(`${dataBase}/api/days?format=${encodeURIComponent(props.format.id)}`);
+    if (!r.ok) return null;
+    const body = (await r.json()) as { latest?: Record<string, string> };
+    return body.latest?.[props.format.id] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Candidate manifest URLs, best first. */
+async function manifestCandidates(): Promise<string[]> {
+  if (props.manifestUrl) return [props.manifestUrl];
+  if (caseParam) return [caseUrl(caseParam)];
+  if (dateOk) return [dayUrl(dateParam)];
+  const latest = await latestDay();
+  return [...(latest ? [dayUrl(latest)] : []), ...(props.format.fallbackCases ?? []).map(caseUrl)];
+}
 const timelineHidden = query.get("timeline") === "0";
 const MAX_SPEED = 25; // m/s, scale of the derived speed byte
 const SPEED = "speed";
@@ -1037,10 +1062,20 @@ function cpuNames(): string[] {
   return [...out];
 }
 
+/** Frames that get a GPU slot: a = ⌊t⌋, b = a + 1 and the prefetch frame c (3 slots). */
+function gpuFrames(): number[] {
+  return [...new Set([cur.a, cur.b, prefetchFrame(tl, cur.b)])];
+}
+
+/**
+ * gpuFrames plus `prefetch_extra` frames further ahead (SZ3: 1). Those are decoded to half
+ * floats early and wait in the store until a slot frees up; they never take a GPU slot
+ * themselves, otherwise 4 frames would fight over 3 slots and the upload never settles.
+ */
 function desiredFrames(): number[] {
-  const c = prefetchFrame(tl, cur.b);
-  const frames = [cur.a, cur.b, c];
-  if (manifest.value?.codec === "sz3") frames.push(prefetchFrame(tl, c));
+  const frames = gpuFrames();
+  let next = frames[frames.length - 1]!;
+  for (let k = 0; k < (manifest.value?.prefetch_extra ?? 0); k += 1) frames.push((next = prefetchFrame(tl, next)));
   return [...new Set(frames)];
 }
 
@@ -1050,7 +1085,7 @@ function feedSlots(): void {
   const want = desiredFrames();
   const keep = [cur.a, cur.b];
   const active = gpuActive().scalars;
-  for (const f of want) {
+  for (const f of gpuFrames()) {
     if (!timeFields.wind.holds(f)) {
       const h = store.takeHalf("wind", f);
       if (h) timeFields.wind.offer(f, h, keep);
@@ -1834,6 +1869,8 @@ function resize(): void {
 function exposeApi(): void {
   window.__atmosApi = {
     setView,
+    snapshot,
+    dataError: () => store?.lastError ?? "",
     setSection: (p: Partial<typeof section>) => {
       const prev = section.enabled ? section.kind : null;
       // Assign the variable first: its (sync) watcher applies per-variable defaults,
@@ -2216,15 +2253,19 @@ async function start(): Promise<void> {
       });
     });
   };
-  const url = props.manifestUrl || `${dataBase}/data/${dataName}/manifest.json`;
-  let opened = await openStore(url);
-  if (!opened && !props.manifestUrl && dataName === DEFAULT_DATA) {
-    // multi-time data not exported on this machine: fall back to the single-time case
-    store.dispose();
-    opened = await openStore(`${dataBase}/data/${FALLBACK_DATA}/manifest.json`);
+  let opened = false;
+  const candidates = await manifestCandidates();
+  for (const url of candidates) {
+    if (disposed) return;
+    if (store) store.dispose();
+    opened = await openStore(url);
+    if (opened) break;
   }
-  if (disposed || !opened || !store.manifest) {
-    status.value = store?.lastError || "数据清单加载失败";
+  if (disposed || !opened || !store?.manifest) {
+    status.value =
+      !dateOk && !caseParam && !props.manifestUrl
+        ? (props.format.missingHint ?? "没有可用数据") + (store?.lastError ? `（${store.lastError}）` : "")
+        : store?.lastError || "数据清单加载失败";
     return;
   }
   loadMs.manifest = Math.round(performance.now() - t0);
@@ -2619,7 +2660,7 @@ onBeforeUnmount(() => {
 
     <div class="hud">
       <b>天津低空三维风场</b>
-      <span>WebGL2 · {{ gpu }}{{ manifest?.codec === "sz3" ? " · SZ3 T1L" : "" }}</span>
+      <span>WebGL2 · {{ gpu }}{{ manifest?.codec_label ? ` · ${manifest.codec_label}` : "" }}</span>
       <span
         >{{ fps || "—" }} FPS · {{ particles?.count?.toLocaleString() ?? "—" }} 粒子 ·
         {{ drawCalls }} draw</span

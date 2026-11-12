@@ -17,8 +17,10 @@ export interface VariableMeta {
   label_zh: string;
   colormap: string;
   file: string;
-  /** SZ3 sidecar with per-slab offsets (T1L). */
+  /** codec sidecar next to `file` (SZ3: per-slab offsets) */
   index_file?: string;
+  /** `encoding: "derived"`: recipe the codec uses instead of a file */
+  derive?: Record<string, unknown>;
   bytes_raw: number;
   bytes_compressed: number;
   data_min: number;
@@ -74,9 +76,13 @@ export interface Manifest {
   /** schema 4 only; a schema-3 manifest is treated as one frame in the manifest directory. */
   times?: TimeEntry[];
   time_zone?: string | null;
-  /** "sz3" when this case uses T1L (or another SZ3 tier) for the main 3D fields. */
+  /** export format ("current", "sz3", ...); codec-specific fields are read by codecs/*.ts only */
+  format?: string;
   codec?: string;
-  sz3_tier?: string;
+  /** short HUD label of the codec, e.g. "SZ3 T1L" */
+  codec_label?: string;
+  /** frames to prefetch to the GPU beyond the next one (SZ3: 1, decode is slower) */
+  prefetch_extra?: number;
   timing: {
     load_s: number;
     total_s: number;
