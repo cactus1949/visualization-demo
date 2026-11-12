@@ -8,6 +8,15 @@ import vue from "@vitejs/plugin-vue";
 const dataRoot = path.resolve(__dirname, "../data/web");
 const dataApi = process.env.DATA_API ?? "http://127.0.0.1:8000";
 
+function cacheControlFor(file: string): string | undefined {
+  const name = path.basename(file);
+  if (name === "manifest.json") return "no-cache";
+  if (name.endsWith(".bin.br") || name.endsWith(".sz3pack") || name.endsWith(".json")) {
+    return "public, max-age=31536000, immutable";
+  }
+  return undefined;
+}
+
 function serveData(
   request: Connect.IncomingMessage,
   response: Connect.ServerResponse,
@@ -27,6 +36,8 @@ function serveData(
   } else if (file.endsWith(".sz3pack")) {
     response.setHeader("Content-Type", "application/octet-stream");
   }
+  const cache = cacheControlFor(file);
+  if (cache) response.setHeader("Cache-Control", cache);
   response.end(fs.readFileSync(file));
 }
 

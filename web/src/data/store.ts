@@ -16,6 +16,8 @@ export type WantJob = {
   name: string;
   frame: number;
   half?: boolean;
+  /** wind pack: include the vertical component (particles). false = u, v only, w = 0. */
+  includeW?: boolean;
 };
 
 /** Event names passed to listeners: "manifest", a variable name, "wind", "cached", "error". */
@@ -115,7 +117,8 @@ export class DataStore {
   }
 
   static jobKey(j: WantJob): string {
-    return `${j.kind}:${j.name}@${j.frame}${j.half ? "+h" : ""}`;
+    const w = j.kind === "wind" && j.includeW ? "+w" : "";
+    return `${j.kind}:${j.name}@${j.frame}${j.half ? "+h" : ""}${w}`;
   }
 
   get(name: string, frame: number): LoadedVariable | undefined {

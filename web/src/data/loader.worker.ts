@@ -33,6 +33,7 @@ interface Job {
   name: string;
   frame: number;
   half?: boolean;
+  includeW?: boolean;
 }
 
 const post = (message: unknown, transfer: Transferable[] = []) =>
@@ -49,7 +50,8 @@ let active = 0;
 let keepFrames: number[] = [];
 
 const key = (name: string, frame: number) => `${name}@${frame}`;
-const jobKey = (j: Job) => `${j.kind}:${j.name}@${j.frame}${j.half ? "+h" : ""}`;
+const jobKey = (j: Job) =>
+  `${j.kind}:${j.name}@${j.frame}${j.half ? "+h" : ""}${j.kind === "wind" && j.includeW ? "+w" : ""}`;
 
 // ---------------------------------------------------------------- float -> half table
 // float -> half (round-to-nearest on the mantissa), tables as in three's DataUtils
@@ -144,12 +146,13 @@ async function run(job: Job): Promise<void> {
     return;
   }
   if (job.kind === "wind") {
-    const names = ["u", "v", "w"] as const;
+    const includeW = Boolean(job.includeW);
+    const names = (includeW ? ["u", "v", "w"] : ["u", "v"]) as ("u" | "v" | "w")[];
     const payloads = await Promise.all(names.map((n) => ensureRaw(n, job.frame)));
     const t0 = performance.now();
     const n = count(manifest.variables.u!);
     const packed = new Uint16Array(n * 4);
-    for (let c = 0; c < 3; c += 1) {
+    for (let c = 0; c < names.length; c += 1) {
       const meta = manifest.variables[names[c]]!;
       const fast = codecOf(meta).half?.(payloads[c]!, meta);
       if (fast) for (let i = 0; i < n; i += 1) packed[i * 4 + c] = fast[i]!;

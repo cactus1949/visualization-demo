@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .cache_headers import cache_control_for
 from .paths import load_dotenv, web_root
 
 load_dotenv()
@@ -75,6 +76,9 @@ class PayloadFiles(StaticFiles):
             response.headers["content-type"] = "application/octet-stream"
         elif name.endswith(".sz3pack"):
             response.headers["content-type"] = "application/octet-stream"
+        cache = cache_control_for(name)
+        if cache:
+            response.headers["Cache-Control"] = cache
         return response
 
 
