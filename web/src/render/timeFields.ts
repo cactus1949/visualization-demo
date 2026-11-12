@@ -5,8 +5,10 @@ import type { Domain } from "./fields";
  * Time-dependent 3D fields on the GPU.
  *
  * Every resource (the packed wind, each scalar in use) owns up to SLOTS half-float
- * `DataArrayTexture`s holding whole frames (A = ⌊t⌋, B = ⌊t⌋+1, C = prefetch) and ONE
- * `WebGL3DRenderTarget` that all consumers sample. A blend pass writes
+ * `DataArrayTexture`s holding whole frames. With the default fetch window of
+ * [⌊t⌋, ⌊t⌋+1] only two slots are filled; the third is left unused so a later
+ * larger window can reuse it. ONE `WebGL3DRenderTarget` is what all consumers
+ * sample. A blend pass writes
  * mix(A, B, s) into that target, layer by layer, only when (A, B, s) changes, so
  * particles, volume, slices, sections, polyline walls, box stacks and cut faces all see
  * the same instant and never need to rebind. Wind uses magnitude-preserving
@@ -140,6 +142,17 @@ export class TimeResource {
     victim.next = 0;
     if (this.shown.a === frame || this.shown.b === frame) this.shown.a = -1; // force re-blend later
     return true;
+  }
+
+  /** Drop slots whose frames have left the window; the texture is kept for reuse. */
+  releaseOutside(keep: number[]): void {
+    for (const s of this.slots) {
+      if (s.frame >= 0 && !keep.includes(s.frame)) {
+        s.frame = -1;
+        s.next = 0;
+        s.data = null;
+      }
+    }
   }
 
   /** Upload pending slot data; returns the number of layers uploaded. */

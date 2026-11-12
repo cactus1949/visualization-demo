@@ -11,16 +11,20 @@ export interface FileTiming {
   bytes: number;
 }
 
-export type WantJob = { kind: "fetch" | "decode" | "wind"; name: string; frame: number; half?: boolean };
+export type WantJob = {
+  kind: "fetch" | "decode" | "wind";
+  name: string;
+  frame: number;
+  half?: boolean;
+};
 
 /** Event names passed to listeners: "manifest", a variable name, "wind", "cached", "error". */
 export type StoreEvent = { name: string; frame: number };
 
 /**
  * Main-thread side of the data worker. Variables are keyed by `name@frame`; schema-3 data
- * is frame 0. The main thread only keeps Float32 for the frames it is asked to retain (the
- * worker keeps the encoded bytes of every frame), and hands half-float payloads straight to
- * the GPU slot uploader.
+ * is frame 0. The main thread and the worker both keep only the sliding window of frames
+ * (⌊t⌋ and ⌊t⌋+1 by default). Half-float payloads go straight to the GPU slot uploader.
  */
 export class DataStore {
   manifest: Manifest | null = null;
@@ -29,8 +33,10 @@ export class DataStore {
   readonly values = new Map<string, LoadedVariable>();
   /** half-float payloads waiting for a GPU slot: `${name}@${frame}` and `wind@${frame}` */
   readonly halves = new Map<string, Uint16Array>();
-  /** encoded bytes present in the worker cache (`${name}@${frame}`) */
+  /** encoded bytes present in the worker window cache (`${name}@${frame}`) */
   readonly cached = new Set<string>();
+  /** frames whose in-flight fetches were aborted after a seek (cleared by the caller) */
+  readonly aborted: string[] = [];
   /** jobs sent to the worker that have not reported back yet */
   readonly pending = new Set<string>();
   readonly fileTimings: Record<string, FileTiming> = {};
@@ -70,13 +76,23 @@ export class DataStore {
     if (m.type === "cached") {
       this.cached.add(DataStore.key(m.name, m.frame));
       if (m.frame === 0 && m.timing && !this.fileTimings[m.name])
-        this.fileTimings[m.name] = { fetchMs: m.timing.fetchMs, decodeMs: 0, bytes: m.timing.bytes };
+        this.fileTimings[m.name] = {
+          fetchMs: m.timing.fetchMs,
+          decodeMs: 0,
+          bytes: m.timing.bytes,
+        };
       this.notify("cached", m.frame);
       return;
     }
     if (m.type === "evicted") {
       this.cached.delete(DataStore.key(m.name, m.frame));
       this.notify("cached", m.frame);
+      return;
+    }
+    if (m.type === "aborted") {
+      this.cached.delete(DataStore.key(m.name, m.frame));
+      this.aborted.push(DataStore.key(m.name, m.frame));
+      this.notify("aborted", m.frame);
       return;
     }
     if (!this.manifest) return;
@@ -88,7 +104,10 @@ export class DataStore {
     if (m.type === "data") {
       const k = DataStore.key(m.name, m.frame);
       if (m.timing && m.frame === 0) this.fileTimings[m.name] = m.timing;
-      this.values.set(k, { meta: this.manifest.variables[m.name]!, data: new Float32Array(m.buffer) });
+      this.values.set(k, {
+        meta: this.manifest.variables[m.name]!,
+        data: new Float32Array(m.buffer),
+      });
       if (m.half) this.halves.set(k, new Uint16Array(m.half));
       this.notify(m.name, m.frame);
     }
@@ -106,27 +125,31 @@ export class DataStore {
     return this.cached.has(DataStore.key(name, frame));
   }
 
-  /** Replace the worker's queue (highest priority first). Re-sent only when it changes. */
-  want(jobs: WantJob[]): void {
-    const text = jobs.map(DataStore.jobKey).join("|");
+  /**
+   * Replace the worker's queue (highest priority first) and the frames it may keep.
+   * Re-sent only when the jobs or the window change. Frames that leave the window
+   * have their in-flight fetches aborted and their cached bytes released.
+   */
+  want(jobs: WantJob[], frames: number[]): void {
+    const text = `${jobs.map(DataStore.jobKey).join("|")}#${frames.join(",")}`;
     if (text === this.lastWant) return;
     this.lastWant = text;
-    // Jobs dropped from the list are discarded by the worker unless already running;
-    // running ones still report "done" (and their result) later.
     this.pending.clear();
     for (const j of jobs) this.pending.add(DataStore.jobKey(j));
-    this.worker.postMessage({ type: "want", jobs });
+    this.worker.postMessage({ type: "want", jobs, frames });
   }
 
   isPending(j: WantJob): boolean {
     return this.pending.has(DataStore.jobKey(j));
   }
 
-  /** Drop Float32 copies the caller no longer needs (the worker still has the bytes). */
+  /** Drop Float32 and half-float copies whose frame (or name) is no longer needed. */
   retain(keep: (name: string, frame: number) => boolean): void {
-    for (const k of [...this.values.keys()]) {
-      const at = k.lastIndexOf("@");
-      if (!keep(k.slice(0, at), Number(k.slice(at + 1)))) this.values.delete(k);
+    for (const map of [this.values, this.halves]) {
+      for (const k of [...map.keys()]) {
+        const at = k.lastIndexOf("@");
+        if (!keep(k.slice(0, at), Number(k.slice(at + 1)))) map.delete(k);
+      }
     }
   }
 

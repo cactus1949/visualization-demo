@@ -1,17 +1,19 @@
 /**
  * Data worker: fetches each variable's encoded file for a frame through its codec
- * (codecs/*.ts), keeps the still-encoded payloads in an LRU cache and decodes on demand.
+ * (codecs/*.ts), keeps only the sliding-window payloads, and decodes on demand.
  *
  * Jobs (the main thread replaces the queue with its current wish list):
- *  - fetch  : only make sure the encoded bytes of name@frame are cached (background prefetch)
+ *  - fetch  : only make sure the encoded bytes of name@frame are cached
  *  - decode : Float32 physical values for CPU readers (+ half floats for a GPU slot if `half`)
  *  - wind   : RGBA half-float pack (u, v, w, 0) of one frame for the GPU wind slots
  *
- * Half-float work happens here, never on the main thread: f16 variables are already half
- * floats (copied as-is), others go through a table-based float→half conversion.
+ * A `want` message also carries the frames in the current window. Encoded bytes
+ * for frames that have left the window are released, and in-flight fetches for
+ * those frames are aborted. Half-float work happens here, never on the main thread.
  */
 import type { Manifest, VariableMeta } from "./manifest";
 import type { Codec, CodecEnv, Payload } from "./codecs/types";
+import { isAbortError, WindowByteCache } from "./windowCache";
 
 // Codec plug-ins: every codecs/*.ts file (current.ts, sz3.ts, ...). Deleting one removes it.
 const codecs: Codec[] = Object.values(
@@ -34,18 +36,20 @@ interface Job {
 }
 
 const post = (message: unknown, transfer: Transferable[] = []) =>
-  (self as unknown as { postMessage(m: unknown, t: Transferable[]): void }).postMessage(message, transfer);
+  (self as unknown as { postMessage(m: unknown, t: Transferable[]): void }).postMessage(
+    message,
+    transfer,
+  );
 let manifest: Manifest;
 let dataRoot = "";
 let dirs: string[] = [""];
-const RAW_BUDGET = 220 * 1024 * 1024;
-const raw = new Map<string, Payload>(); // insertion order = LRU order
-let rawBytes = 0;
-const fetching = new Map<string, Promise<Payload>>();
-let queue: Job[] = [];
+const cache = new WindowByteCache();
 const running = new Set<string>();
 const CONCURRENCY = 2;
+let queue: Job[] = [];
 let active = 0;
+/** Frames the main thread currently wants kept in the encoded-byte cache. */
+let keepFrames: number[] = [];
 
 const key = (name: string, frame: number) => `${name}@${frame}`;
 const jobKey = (j: Job) => `${j.kind}:${j.name}@${j.frame}${j.half ? "+h" : ""}`;
@@ -57,17 +61,30 @@ const SHIFT = new Uint32Array(512);
 for (let i = 0; i < 256; i += 1) {
   const e = i - 127;
   if (e < -27) {
-    BASE[i] = 0x0000; BASE[i | 0x100] = 0x8000; SHIFT[i] = 24; SHIFT[i | 0x100] = 24;
+    BASE[i] = 0x0000;
+    BASE[i | 0x100] = 0x8000;
+    SHIFT[i] = 24;
+    SHIFT[i | 0x100] = 24;
   } else if (e < -14) {
-    BASE[i] = 0x0400 >> (-e - 14); BASE[i | 0x100] = (0x0400 >> (-e - 14)) | 0x8000;
-    SHIFT[i] = -e - 1; SHIFT[i | 0x100] = -e - 1;
+    BASE[i] = 0x0400 >> (-e - 14);
+    BASE[i | 0x100] = (0x0400 >> (-e - 14)) | 0x8000;
+    SHIFT[i] = -e - 1;
+    SHIFT[i | 0x100] = -e - 1;
   } else if (e <= 15) {
-    BASE[i] = (e + 15) << 10; BASE[i | 0x100] = ((e + 15) << 10) | 0x8000;
-    SHIFT[i] = 13; SHIFT[i | 0x100] = 13;
+    BASE[i] = (e + 15) << 10;
+    BASE[i | 0x100] = ((e + 15) << 10) | 0x8000;
+    SHIFT[i] = 13;
+    SHIFT[i | 0x100] = 13;
   } else if (e < 128) {
-    BASE[i] = 0x7c00; BASE[i | 0x100] = 0xfc00; SHIFT[i] = 24; SHIFT[i | 0x100] = 24;
+    BASE[i] = 0x7c00;
+    BASE[i | 0x100] = 0xfc00;
+    SHIFT[i] = 24;
+    SHIFT[i | 0x100] = 24;
   } else {
-    BASE[i] = 0x7c00; BASE[i | 0x100] = 0xfc00; SHIFT[i] = 13; SHIFT[i | 0x100] = 13;
+    BASE[i] = 0x7c00;
+    BASE[i | 0x100] = 0xfc00;
+    SHIFT[i] = 13;
+    SHIFT[i | 0x100] = 13;
   }
 }
 function toHalfArray(src: Float32Array, out: Uint16Array, stride = 1, channel = 0): void {
@@ -109,48 +126,35 @@ function halfOf(payload: Payload, meta: VariableMeta, decoded: Float32Array): Ui
 }
 
 // ---------------------------------------------------------------- raw cache
-function touch(k: string, buf: Payload): void {
-  raw.delete(k);
-  raw.set(k, buf);
-}
-
-function evict(): void {
-  for (const [k, buf] of raw) {
-    if (rawBytes <= RAW_BUDGET) break;
-    raw.delete(k);
-    rawBytes -= buf.bytes.byteLength;
-    const [name, frame] = k.split("@");
-    postMessage({ type: "evicted", name, frame: Number(frame) });
-  }
-}
-
 async function ensureRaw(name: string, frame: number): Promise<Payload> {
   const k = key(name, frame);
-  const hit = raw.get(k);
-  if (hit) {
-    touch(k, hit);
-    return hit;
-  }
-  const pending = fetching.get(k);
-  if (pending) return pending;
   const meta = manifest.variables[name];
   if (!meta) throw new Error(`未知变量 ${name}`);
-  const p = (async () => {
+  return cache.load(k, async (signal) => {
     performance.mark(`atmos:fetch:${k}:start`);
     const t0 = performance.now();
-    const payload = await codecOf(meta).load(dataRoot + (dirs[frame] ?? ""), meta, name);
+    const payload = await codecOf(meta).load(dataRoot + (dirs[frame] ?? ""), meta, name, signal);
     performance.mark(`atmos:fetch:${k}:end`);
-    raw.set(k, payload);
-    rawBytes += payload.bytes.byteLength;
-    postMessage({ type: "cached", name, frame, timing: { fetchMs: performance.now() - t0, bytes: payload.bytes.byteLength } });
-    evict();
+    postMessage({
+      type: "cached",
+      name,
+      frame,
+      timing: { fetchMs: performance.now() - t0, bytes: payload.bytes.byteLength },
+    });
     return payload;
-  })();
-  fetching.set(k, p);
-  try {
-    return await p;
-  } finally {
-    fetching.delete(k);
+  });
+}
+
+function applyWindow(frames: number[]): void {
+  keepFrames = [...frames];
+  const { evicted, aborted } = cache.retainFrames(keepFrames);
+  for (const k of evicted) {
+    const at = k.lastIndexOf("@");
+    postMessage({ type: "evicted", name: k.slice(0, at), frame: Number(k.slice(at + 1)) });
+  }
+  for (const k of aborted) {
+    const at = k.lastIndexOf("@");
+    postMessage({ type: "aborted", name: k.slice(0, at), frame: Number(k.slice(at + 1)) });
   }
 }
 
@@ -170,9 +174,17 @@ async function run(job: Job): Promise<void> {
       const meta = manifest.variables[names[c]]!;
       const fast = codecOf(meta).half?.(payloads[c]!, meta);
       if (fast) for (let i = 0; i < n; i += 1) packed[i * 4 + c] = fast[i]!;
-      else toHalfArray(await codecOf(meta).decode(payloads[c]!, meta, envFor(job.frame)), packed, 4, c);
+      else
+        toHalfArray(
+          await codecOf(meta).decode(payloads[c]!, meta, envFor(job.frame)),
+          packed,
+          4,
+          c,
+        );
     }
-    post({ type: "wind", frame: job.frame, half: packed.buffer, packMs: performance.now() - t0 }, [packed.buffer]);
+    post({ type: "wind", frame: job.frame, half: packed.buffer, packMs: performance.now() - t0 }, [
+      packed.buffer,
+    ]);
     return;
   }
   const meta = manifest.variables[job.name];
@@ -205,12 +217,16 @@ function pump(): void {
     const job = queue.shift()!;
     const k = jobKey(job);
     if (running.has(k)) continue;
+    if (keepFrames.length && !keepFrames.includes(job.frame)) continue;
     // A fetch-only job whose bytes are already here needs no slot.
-    if (job.kind === "fetch" && raw.has(key(job.name, job.frame))) continue;
+    if (job.kind === "fetch" && cache.has(key(job.name, job.frame))) continue;
     running.add(k);
     active += 1;
     run(job)
-      .catch((error) => postMessage({ type: "error", message: String(error), name: job.name, frame: job.frame }))
+      .catch((error) => {
+        if (isAbortError(error)) return;
+        postMessage({ type: "error", message: String(error), name: job.name, frame: job.frame });
+      })
       .finally(() => {
         running.delete(k);
         active -= 1;
@@ -231,10 +247,19 @@ self.onmessage = async (event: MessageEvent) => {
       manifest = (await response.json()) as Manifest;
       dirs = manifest.times?.length ? manifest.times.map((t) => t.dir) : [""];
       performance.mark("atmos:fetch:manifest:end");
-      postMessage({ type: "manifest", manifest, timing: { fetchMs: performance.now() - tManifest } });
+      postMessage({
+        type: "manifest",
+        manifest,
+        timing: { fetchMs: performance.now() - tManifest },
+      });
     } else if (event.data.type === "want") {
-      // Highest priority first; anything not listed any more is dropped (in-flight jobs finish).
-      queue = (event.data.jobs as Job[]).filter((j) => !running.has(jobKey(j)));
+      const frames = Array.isArray(event.data.frames) ? (event.data.frames as number[]) : [];
+      applyWindow(frames);
+      // Highest priority first; jobs for frames no longer in the window are dropped.
+      // In-flight fetches for those frames are aborted by applyWindow.
+      queue = (event.data.jobs as Job[]).filter(
+        (j) => !running.has(jobKey(j)) && frames.includes(j.frame),
+      );
       pump();
     }
   } catch (error) {
