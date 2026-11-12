@@ -11,6 +11,7 @@
  * floats (copied as-is), others go through a table-based float→half conversion.
  */
 import type { Manifest, VariableMeta } from "./manifest";
+import { decodeSz3, ensureSz3, type Sz3Index } from "./sz3Decode";
 
 type JobKind = "fetch" | "decode" | "wind";
 interface Job {
@@ -29,6 +30,8 @@ const RAW_BUDGET = 220 * 1024 * 1024;
 const raw = new Map<string, ArrayBuffer>(); // insertion order = LRU order
 let rawBytes = 0;
 const fetching = new Map<string, Promise<ArrayBuffer>>();
+const sz3Index = new Map<string, Sz3Index>();
+const isSz3 = (meta: VariableMeta | undefined) => meta?.encoding === "sz3";
 let queue: Job[] = [];
 const running = new Set<string>();
 const CONCURRENCY = 2;
@@ -89,7 +92,12 @@ function count(meta: VariableMeta): number {
   return meta.shape.reduce((a, b) => a * b, 1);
 }
 
-function decode(buffer: ArrayBuffer, meta: VariableMeta): Float32Array {
+function decode(buffer: ArrayBuffer, meta: VariableMeta, frame = 0, name = ""): Float32Array {
+  if (isSz3(meta)) {
+    const idx = sz3Index.get(key(name, frame));
+    if (!idx) throw new Error(`缺少 SZ3 索引 ${name}@${frame}`);
+    return decodeSz3(new Uint8Array(buffer), idx);
+  }
   const n = count(meta);
   const out = new Float32Array(n);
   if (meta.dtype === "float16") {
@@ -156,9 +164,16 @@ async function ensureRaw(name: string, frame: number): Promise<ArrayBuffer> {
   const p = (async () => {
     performance.mark(`atmos:fetch:${k}:start`);
     const t0 = performance.now();
-    const response = await fetch(dataRoot + (dirs[frame] ?? "") + meta.file);
+    const base = dataRoot + (dirs[frame] ?? "");
+    const response = await fetch(base + meta.file);
     if (!response.ok) throw new Error(`无法加载 ${k}: ${response.status}`);
     const buffer = await response.arrayBuffer();
+    if (isSz3(meta)) {
+      const indexName = meta.index_file || meta.file.replace(/\.sz3pack$/, ".json");
+      const ir = await fetch(base + indexName);
+      if (!ir.ok) throw new Error(`无法加载 ${k} 索引: ${ir.status}`);
+      sz3Index.set(k, (await ir.json()) as Sz3Index);
+    }
     performance.mark(`atmos:fetch:${k}:end`);
     raw.set(k, buffer);
     rawBytes += buffer.byteLength;
@@ -181,31 +196,35 @@ async function run(job: Job): Promise<void> {
     return;
   }
   if (job.kind === "wind") {
+    if (isSz3(manifest.variables.u) || isSz3(manifest.variables.v) || isSz3(manifest.variables.w)) {
+      await ensureSz3();
+    }
     const [ub, vb, wb] = await Promise.all(["u", "v", "w"].map((n) => ensureRaw(n, job.frame)));
     const t0 = performance.now();
     const um = manifest.variables.u!, vm = manifest.variables.v!, wm = manifest.variables.w!;
     const n = count(um);
     const packed = new Uint16Array(n * 4);
-    const put = (buf: ArrayBuffer, meta: VariableMeta, channel: number) => {
+    const put = (buf: ArrayBuffer, meta: VariableMeta, name: string, channel: number) => {
       if (meta.dtype === "float16") {
         const h = new Uint16Array(buf, 0, n);
         for (let i = 0; i < n; i += 1) packed[i * 4 + channel] = h[i]!;
-      } else toHalfArray(decode(buf, meta), packed, 4, channel);
+      } else toHalfArray(decode(buf, meta, job.frame, name), packed, 4, channel);
     };
-    put(ub!, um, 0);
-    put(vb!, vm, 1);
-    put(wb!, wm, 2);
+    put(ub!, um, "u", 0);
+    put(vb!, vm, "v", 1);
+    put(wb!, wm, "w", 2);
     post({ type: "wind", frame: job.frame, half: packed.buffer, packMs: performance.now() - t0 }, [packed.buffer]);
     return;
   }
   const meta = manifest.variables[job.name];
   if (!meta) return;
+  if (isSz3(meta)) await ensureSz3();
   const tFetch = performance.now();
   const buffer = await ensureRaw(job.name, job.frame);
   const fetchMs = performance.now() - tFetch;
   performance.mark(`atmos:decode:${job.name}@${job.frame}:start`);
   const t0 = performance.now();
-  const decoded = decode(buffer, meta);
+  const decoded = decode(buffer, meta, job.frame, job.name);
   const half = job.half ? halfOf(buffer, meta, decoded) : null;
   performance.mark(`atmos:decode:${job.name}@${job.frame}:end`);
   const transfer: ArrayBuffer[] = [decoded.buffer as ArrayBuffer];

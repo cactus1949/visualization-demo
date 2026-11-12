@@ -188,6 +188,30 @@ const st = await api(() => window.__atmosApi.interactionState());
 results.push({ name: "清除 → no geometry, view", ok: st.points === 0 && !st.drawing, why: "" });
 console.log(`${st.points === 0 && !st.drawing ? "PASS" : "FAIL"}  清除 → no geometry, view`);
 
+// ---------- 7. time axis (v6.11; skipped for single-time data)
+const tlInfo = await api(() => window.__atmosApi.timeline?.());
+if (tlInfo && tlInfo.frames > 1) {
+  const atT = async (t) => { await api((t) => window.__atmosApi.setTime(t), t); await page.waitForFunction(() => window.__atmosApi.hasFrame(), null, { timeout: 180_000 }); await frames(3); };
+  await reset();
+  await api(() => window.__atmosApi.setSection({ kind: "lon", variable: "tke", autoRange: true })); await settle(["tke"]);
+  const r0 = (await api(() => window.__atmosApi.debugVisibility())).section;
+  await atT(2.5);
+  await check("t=2.5 section tke → visible, range unchanged", (v) => (v.section.min === r0.min && v.section.max === r0.max ? true : "range-moved"));
+  await api(() => window.__atmosApi.setSection({ enabled: false }));
+  await api(() => window.__atmosApi.setVolume({ enabled: true, variable: "icing_index", filterMin: 0.5, filterMax: 0.8 })); await settle(["icing_index"]);
+  await atT(6);
+  await check("t=6 volume icing narrow window → visible");
+  await api(() => window.__atmosApi.setVolume({ enabled: false }));
+  await api(() => window.__atmosApi.setSection({ kind: "lon", variable: "speed" })); await settle(["u", "v"]);
+  await api(() => window.__atmosApi.setSectionMode("box")); await settle();
+  await api(() => window.__atmosApi.stepFrame(-1)); await page.waitForFunction(() => window.__atmosApi.hasFrame(), null, { timeout: 180_000 }); await frames(3);
+  await check("drawing + step frame → drawing kept", (v, s) => (s.drawing && s.owner === "draw" ? true : `owner=${s.owner}`));
+  await page.keyboard.press("Escape"); await settle();
+  await api(() => window.__atmosApi.setSectionMode("lon")); await settle();
+  await atT(0);
+  await check("back to t=0 lon section");
+}
+
 const pass = results.filter((r) => r.ok).length;
 console.log(JSON.stringify({ pass, total: results.length, errors }, null, 0));
 await browser.close();

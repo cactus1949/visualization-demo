@@ -21,6 +21,8 @@ function serveData(
     response.setHeader("Content-Encoding", "br");
   } else if (file.endsWith(".json")) {
     response.setHeader("Content-Type", "application/json");
+  } else if (file.endsWith(".sz3pack")) {
+    response.setHeader("Content-Type", "application/octet-stream");
   }
   response.end(fs.readFileSync(file));
 }
@@ -43,5 +45,7 @@ function dataPlugin(): Plugin {
 export default defineConfig({
   plugins: [vue(), dataPlugin()],
   publicDir: false,
+  assetsInclude: ["**/*.wasm"],
+  worker: { format: "es" },
   server: { host: "0.0.0.0" },
 });

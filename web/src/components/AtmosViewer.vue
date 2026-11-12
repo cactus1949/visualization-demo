@@ -53,9 +53,27 @@ import RangeSlider from "./RangeSlider.vue";
 import UnfoldedPlot from "./UnfoldedPlot.vue";
 import TimelineBar from "./TimelineBar.vue";
 
-const props = withDefaults(defineProps<{ manifestUrl?: string; showPanel?: boolean }>(), {
+export type ViewSnapshot = {
+  t: number;
+  playing: boolean;
+  rate: number;
+  smooth: boolean;
+  loop: boolean;
+  camera: [number, number, number];
+  target: [number, number, number];
+  exaggeration: number;
+};
+
+const props = withDefaults(defineProps<{
+  manifestUrl?: string;
+  showPanel?: boolean;
+  codec?: "current" | "sz3";
+  initialView?: ViewSnapshot | null;
+}>(), {
   manifestUrl: "",
   showPanel: true,
+  codec: "current",
+  initialView: null,
 });
 const emit = defineEmits<{
   ready: [{ backend: string }];
@@ -66,8 +84,13 @@ const query = new URLSearchParams(location.search);
 const embed = query.has("embed") && query.get("embed") !== "0";
 /** Multi-time case by default; `?data=lowair_atmos` opens the single-time v6.10 data. */
 const DEFAULT_DATA = "lowair_atmos_6h";
+const SZ3_DATA = "lowair_atmos_6h_sz3";
 const FALLBACK_DATA = "lowair_atmos";
-const dataName = (query.get("data") ?? "").replace(/[^\w-]/g, "") || DEFAULT_DATA;
+const dataBase = (import.meta.env.VITE_DATA_BASE ?? "").replace(/\/$/, "");
+const dateParam = (query.get("date") ?? "").replace(/-/g, "");
+const datePath = /^\d{8}$/.test(dateParam) ? `${dateParam.slice(0, 6)}/${dateParam}` : "";
+const defaultCase = (props.codec === "sz3" || query.get("codec") === "sz3") ? SZ3_DATA : DEFAULT_DATA;
+const dataName = datePath || (query.get("data") ?? "").replace(/[^\w-]/g, "") || defaultCase;
 const timelineHidden = query.get("timeline") === "0";
 const MAX_SPEED = 25; // m/s, scale of the derived speed byte
 const SPEED = "speed";
@@ -1016,7 +1039,9 @@ function cpuNames(): string[] {
 
 function desiredFrames(): number[] {
   const c = prefetchFrame(tl, cur.b);
-  return [...new Set([cur.a, cur.b, c])];
+  const frames = [cur.a, cur.b, c];
+  if (manifest.value?.codec === "sz3") frames.push(prefetchFrame(tl, c));
+  return [...new Set(frames)];
 }
 
 /** Hand arrived half-float frames to their GPU slots; drop ones nobody wants any more. */
@@ -1697,6 +1722,19 @@ const VIEWS: Record<string, { pos: [number, number, number]; target: [number, nu
   top: { pos: [0, 26, 0.01], target: [0, 0, 0] },
 };
 
+function snapshot(): ViewSnapshot {
+  return {
+    t: tl.t,
+    playing: tl.playing,
+    rate: tl.rate,
+    smooth: tl.smooth,
+    loop: tl.loop,
+    camera: camera.position.toArray() as [number, number, number],
+    target: controls.target.toArray() as [number, number, number],
+    exaggeration: view.exaggeration,
+  };
+}
+
 function setView(name: string): void {
   const preset = VIEWS[name] ?? VIEWS.overview;
   camera.position.set(...preset.pos);
@@ -2178,12 +2216,12 @@ async function start(): Promise<void> {
       });
     });
   };
-  const url = props.manifestUrl || `/data/${dataName}/manifest.json`;
+  const url = props.manifestUrl || `${dataBase}/data/${dataName}/manifest.json`;
   let opened = await openStore(url);
   if (!opened && !props.manifestUrl && dataName === DEFAULT_DATA) {
     // multi-time data not exported on this machine: fall back to the single-time case
     store.dispose();
-    opened = await openStore(`/data/${FALLBACK_DATA}/manifest.json`);
+    opened = await openStore(`${dataBase}/data/${FALLBACK_DATA}/manifest.json`);
   }
   if (disposed || !opened || !store.manifest) {
     status.value = store?.lastError || "数据清单加载失败";
@@ -2196,6 +2234,13 @@ async function start(): Promise<void> {
   tl.frames = tl.times.length;
   tl.ready = Array.from({ length: tl.frames }, () => false);
   if (query.has("t")) setTimelineTime(tl, Number(query.get("t")));
+  if (props.initialView) {
+    setTimelineTime(tl, props.initialView.t);
+    tl.playing = props.initialView.playing;
+    tl.rate = props.initialView.rate;
+    tl.smooth = props.initialView.smooth;
+    tl.loop = props.initialView.loop;
+  }
   const b0 = bracket(tl);
   Object.assign(cur, b0);
   resetVolumeFilter(layers.volumeVar);
@@ -2251,7 +2296,14 @@ async function start(): Promise<void> {
   controls.maxDistance = 60;
   controls.maxPolarAngle = Math.PI * 0.495;
   controls.screenSpacePanning = false;
-  setView("overview");
+  if (props.initialView) {
+    camera.position.set(...props.initialView.camera);
+    controls.target.set(...props.initialView.target);
+    controls.update();
+    view.exaggeration = props.initialView.exaggeration;
+  } else {
+    setView("overview");
+  }
   resize();
   resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(canvas.value!);
@@ -2536,6 +2588,8 @@ function overRange(name: string, lo: number, hi: number): { overLow: boolean; ov
   return { overLow: st.data_min < lo - eps, overHigh: st.data_max > hi + eps };
 }
 
+defineExpose({ snapshot });
+
 onMounted(() => void start());
 onBeforeUnmount(() => {
   disposed = true;
@@ -2565,7 +2619,7 @@ onBeforeUnmount(() => {
 
     <div class="hud">
       <b>天津低空三维风场</b>
-      <span>WebGL2 · {{ gpu }}</span>
+      <span>WebGL2 · {{ gpu }}{{ manifest?.codec === "sz3" ? " · SZ3 T1L" : "" }}</span>
       <span
         >{{ fps || "—" }} FPS · {{ particles?.count?.toLocaleString() ?? "—" }} 粒子 ·
         {{ drawCalls }} draw</span

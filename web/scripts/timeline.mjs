@@ -102,10 +102,12 @@ for (const t of [0, 3, 6]) {
   await at(t);
   await page.waitForTimeout(300);
   const v = await page.evaluate(() => {
-    const el = document.querySelector(".profile-box");
-    return el?.textContent?.replace(/\s+/g, " ").slice(0, 160);
+    const txt = document.querySelector(".profile-box")?.textContent?.replace(/\s+/g, " ") ?? "";
+    const m = txt.match(/近地面.{0,20}?([\d.]+) m\/s/);
+    const top = txt.match(/顶层.{0,20}?([\d.]+) m\/s/);
+    return { nearGround: m ? Number(m[1]) : null, top: top ? Number(top[1]) : null };
   });
-  report.checks.probe.push({ t, text: v });
+  report.checks.probe.push({ t, ...v });
   if (t === 3) report.shots.push(await shot("tl-probe-f003"));
 }
 

@@ -3,8 +3,8 @@ export interface VariableMeta {
   shape: number[];
   encoding: string;
   range_scope: "global" | "per_level";
-  dtype: "uint8" | "uint16" | "float16";
-  bits: 8 | 16;
+  dtype: "uint8" | "uint16" | "float16" | "float32";
+  bits: 8 | 16 | 32;
   scale?: number;
   offset?: number;
   level_scale?: number[];
@@ -17,6 +17,8 @@ export interface VariableMeta {
   label_zh: string;
   colormap: string;
   file: string;
+  /** SZ3 sidecar with per-slab offsets (T1L). */
+  index_file?: string;
   bytes_raw: number;
   bytes_compressed: number;
   data_min: number;
@@ -72,6 +74,9 @@ export interface Manifest {
   /** schema 4 only; a schema-3 manifest is treated as one frame in the manifest directory. */
   times?: TimeEntry[];
   time_zone?: string | null;
+  /** "sz3" when this case uses T1L (or another SZ3 tier) for the main 3D fields. */
+  codec?: string;
+  sz3_tier?: string;
   timing: {
     load_s: number;
     total_s: number;

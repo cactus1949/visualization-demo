@@ -5,3 +5,9 @@ __pycache__/
 .venv/
 *.pyc
 data/web/**/*.u16.bin.br
+
+# dropped nc and date-stamped web exports (not committed)
+data/nc/
+data/web/[0-9][0-9][0-9][0-9][0-9][0-9]/
+services/.env
+.env

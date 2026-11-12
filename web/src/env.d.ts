@@ -10,3 +10,11 @@ declare global {
     __atmosTimings?: Record<string, unknown>;
   }
 }
+
+interface ImportMetaEnv {
+  readonly VITE_DATA_BASE?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
