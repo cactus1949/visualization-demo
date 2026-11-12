@@ -5,7 +5,19 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { Manifest, VariableMeta } from "../data/manifest";
 import { DataStore } from "../data/store";
 import { AtmosScene, field2D, type Theme } from "../render/scene";
-import { FieldTextures, floatRange, domainOf, textureUploadMs, type Domain } from "../render/fields";
+import { floatRange, domainOf, textureUploadMs, type Domain } from "../render/fields";
+import { TimeFields, type TimeResource } from "../render/timeFields";
+import { timesOf } from "../data/manifest";
+import {
+  advance as advanceTimeline,
+  bracket,
+  clockOf,
+  createTimeline,
+  prefetchFrame,
+  setTime as setTimelineTime,
+  stepFrame as stepTimelineFrame,
+  RATES,
+} from "../state/timeline";
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
 import { VolumeLayer } from "../render/volume";
 import { DEFAULT_CUTS, clampCuts, cutBounds, type CutState } from "../render/cuts";
@@ -39,9 +51,10 @@ import ColorLegend from "./ColorLegend.vue";
 import ProfileChart from "./ProfileChart.vue";
 import RangeSlider from "./RangeSlider.vue";
 import UnfoldedPlot from "./UnfoldedPlot.vue";
+import TimelineBar from "./TimelineBar.vue";
 
 const props = withDefaults(defineProps<{ manifestUrl?: string; showPanel?: boolean }>(), {
-  manifestUrl: "/data/lowair_atmos/manifest.json",
+  manifestUrl: "",
   showPanel: true,
 });
 const emit = defineEmits<{
@@ -51,6 +64,11 @@ const emit = defineEmits<{
 
 const query = new URLSearchParams(location.search);
 const embed = query.has("embed") && query.get("embed") !== "0";
+/** Multi-time case by default; `?data=lowair_atmos` opens the single-time v6.10 data. */
+const DEFAULT_DATA = "lowair_atmos_6h";
+const FALLBACK_DATA = "lowair_atmos";
+const dataName = (query.get("data") ?? "").replace(/[^\w-]/g, "") || DEFAULT_DATA;
+const timelineHidden = query.get("timeline") === "0";
 const MAX_SPEED = 25; // m/s, scale of the derived speed byte
 const SPEED = "speed";
 
@@ -289,8 +307,36 @@ function cutFaceStyle(): Omit<CompositeSurface, "kind" | "binding" | "field" | "
   };
 }
 
+/** Horizontal speed of the current frame (CPU, for stats / debug); cached per frame. */
+const speedCache = { frame: -1, values: null as Float32Array | null, range: [0, 1] as [number, number] };
+function speedValuesA(): Float32Array | null {
+  const u = loaded("u");
+  const v = loaded("v");
+  if (!u || !v) return null;
+  if (speedCache.frame === cur.a && speedCache.values) return speedCache.values;
+  const values = new Float32Array(u.data.length);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < values.length; i += 1) {
+    const s = Math.hypot(u.data[i]!, v.data[i]!);
+    values[i] = s;
+    if (s < lo) lo = s;
+    if (s > hi) hi = s;
+  }
+  speedCache.frame = cur.a;
+  speedCache.values = values;
+  speedCache.range = [lo, hi];
+  return values;
+}
+function speedRangeA(): [number, number] {
+  speedValuesA();
+  return [...speedCache.range] as [number, number];
+}
+
 function volumeFullRange(name: string): [number, number] {
-  if (name === SPEED) return [...fields.speedRange] as [number, number];
+  // Fixed across time steps: the derived speed's display_range, otherwise the manifest's
+  // all-frame data_min/max (schema 4) — the window slider never jumps while playing.
+  if (name === SPEED) return displayRange(SPEED) ?? speedRangeA();
   const meta = manifest.value?.variables[name];
   if (!meta) return [0, 1];
   return [meta.data_min, meta.data_max];
@@ -311,7 +357,7 @@ function resetVolumeFilter(name: string): void {
   layers.volumeFilterMin = lo;
   layers.volumeFilterMax = hi;
   volumeFilterVariable.value = name;
-  volumeFilterNeedsSpeedRange.value = name === SPEED && !fields.speedValues;
+  volumeFilterNeedsSpeedRange.value = name === SPEED && !displayRange(SPEED) && !speedValuesA();
 }
 
 function updateSliceFilter(): void {
@@ -336,7 +382,7 @@ function updateVolumeFilter(): void {
 }
 
 const volumeBounds = computed<[number, number]>(() => {
-  if (!manifest.value || !fields) return [0, 1];
+  if (!manifest.value || !domain) return [0, 1];
   return volumeFullRange(layers.volumeVar);
 });
 
@@ -347,7 +393,12 @@ let camera: THREE.PerspectiveCamera;
 let controls: OrbitControls;
 let atmos: AtmosScene;
 let domain: Domain;
-let fields: FieldTextures;
+let timeFields: TimeFields | null = null;
+/** global timeline (state/timeline.ts); independent of every style / draw state */
+const tl = createTimeline();
+/** frames and weight currently displayed / requested: a = ⌊t⌋, b = a + 1, s = blend weight */
+const cur = { a: 0, b: 0, s: 0 };
+const showTimeline = computed(() => !timelineHidden && tl.frames > 1);
 let particles: WindParticles | null = null;
 let hslice: HorizontalSlice | null = null;
 let vsection: VerticalSection | null = null;
@@ -390,38 +441,66 @@ const volumeFilterVariable = ref("");
 const volumeFilterNeedsSpeedRange = ref(false);
 const depthOccluders: THREE.Object3D[] = [];
 
-const loaded = (name: string) => store?.loaded.get(name);
+/** Physical values of `name` at the current frame ⌊t⌋ (CPU copy). */
+const loaded = (name: string) => store?.get(name, cur.a);
+
+/**
+ * CPU values of `name` at the displayed instant: frame a, frame b and the blend weight.
+ * Falls back to frame a alone until b has arrived.
+ */
+function cpuPair(name: string): { A: Float32Array; B: Float32Array | null; s: number } | null {
+  const A = store?.get(name, cur.a)?.data;
+  if (!A) return null;
+  const B = cur.s > 0 ? (store.get(name, cur.b)?.data ?? null) : null;
+  return { A, B, s: B ? cur.s : 0 };
+}
+const mixAt = (p: { A: Float32Array; B: Float32Array | null; s: number }, i: number) =>
+  p.B ? p.A[i]! + (p.B[i]! - p.A[i]!) * p.s : p.A[i]!;
+/** Horizontal wind at index i, magnitude-preserving blend (same rule as the GPU pass). */
+function windAt(
+  u: { A: Float32Array; B: Float32Array | null; s: number },
+  v: { A: Float32Array; B: Float32Array | null; s: number },
+  i: number,
+): [number, number, number] {
+  const ua = u.A[i]!, va = v.A[i]!;
+  if (!u.B || !v.B) return [ua, va, Math.hypot(ua, va)];
+  const ub = u.B[i]!, vb = v.B[i]!;
+  const s = u.s;
+  const m = Math.hypot(ua, va) + (Math.hypot(ub, vb) - Math.hypot(ua, va)) * s;
+  let uu = ua + (ub - ua) * s;
+  let vv = va + (vb - va) * s;
+  const l = Math.hypot(uu, vv);
+  if (l > 1e-5) {
+    uu *= m / l;
+    vv *= m / l;
+  }
+  return [uu, vv, m];
+}
 
 function request(name: string): void {
   if (!store || name === "none") return;
   const names = name === SPEED || name === "speed0" ? ["u", "v"] : [name];
   for (const n of names) {
     if (!loaded(n) && requestedAt[n] === undefined) requestedAt[n] = performance.now();
-    store.request(n);
   }
+  wantsDirty = true;
 }
 
-/** Texture + dequantisation for a 3D variable, or null while it is still loading. */
+/**
+ * Texture of a 3D variable at the current instant: the blended "current time" target that
+ * every consumer samples, or null until its first blend.
+ */
 function binding(name: string): ScalarBinding | null {
+  if (!timeFields || !manifest.value) return null;
   if (name === SPEED) {
-    const u = loaded("u");
-    const v = loaded("v");
-    if (!u || !v) return null;
-    return {
-      texture: fields.speed(u.data, v.data, MAX_SPEED),
-      scale: 1,
-      offset: 0,
-      log10: false,
-    };
+    if (!timeFields.speedValid) return null;
+    return { texture: timeFields.speedTexture, scale: 1, offset: 0, log10: false };
   }
-  const data = loaded(name);
-  if (!data) return null;
-  return {
-    texture: fields.scalar(name, data.data),
-    scale: 1,
-    offset: 0,
-    log10: false,
-  };
+  if (!manifest.value.variables[name] || manifest.value.variables[name]!.dims.length !== 3) return null;
+  const r = timeFields.scalars.get(name);
+  if (!r?.valid) return null;
+  r.lastUsed = performance.now();
+  return { texture: r.texture, scale: 1, offset: 0, log10: false };
 }
 
 /**
@@ -445,8 +524,9 @@ function autoRange(name: string, colormap: string, heightM?: number): [number, n
   let lo: number;
   let hi: number;
   if (name === SPEED) {
-    if (!fields.speedValues) return [0, 15];
-    [lo, hi] = floatRange(fields.speedValues, start, end);
+    const sv = speedValuesA();
+    if (!sv) return [0, 15];
+    [lo, hi] = floatRange(sv, start, end);
   } else {
     const data = loaded(name);
     if (!data) return [0, 1];
@@ -654,8 +734,8 @@ function updateSection(): void {
 
 function updateUnfolded(): void {
   if (!section.enabled || section.kind !== "polyline" || section.points.length < 2 || !manifest.value) { unfolded.value = null; return; }
-  const data = section.variable === SPEED ? null : loaded(section.variable);
-  const u = loaded("u"), v = loaded("v");
+  const data = section.variable === SPEED ? null : cpuPair(section.variable);
+  const u = cpuPair("u"), v = cpuPair("v");
   if (section.variable === SPEED && (!u || !v)) return;
   if (section.variable !== SPEED && !data) return;
   const g = manifest.value.grid;
@@ -664,12 +744,13 @@ function updateUnfolded(): void {
     const iy = THREE.MathUtils.clamp(Math.round((.5 - z / domain.sz) * (g.ny - 1)), 0, g.ny - 1);
     const k = THREE.MathUtils.clamp(Math.round((y * 1000 - g.levels_m[0]) / (g.levels_m[1] - g.levels_m[0])), 0, g.nz - 1);
     const idx = k * g.nx * g.ny + iy * g.nx + ix;
-    return section.variable === SPEED ? Math.hypot(u!.data[idx], v!.data[idx]) : data!.data[idx];
+    return section.variable === SPEED ? windAt(u!, v!, idx)[2] : mixAt(data!, idx);
   });
 }
 
 /** Full data range of the current ground variable (slider bounds). */
 const groundBounds = ref<[number, number]>([0, 1]);
+let groundBoundsKey = "";
 const groundUnits = computed(() =>
   layers.groundVar === "speed0" ? "m/s" : (manifest.value?.variables[layers.groundVar]?.units ?? ""),
 );
@@ -684,10 +765,24 @@ function groundFilterFor(read: (i: number) => number): [number, number] {
     if (v > hi) hi = v;
   }
   if (!(hi > lo)) hi = lo + 1e-6;
+  // Across time frames the bounds only grow (per ground variable), and a filter
+  // handle sitting on a bound follows it — otherwise a later, windier frame would be
+  // silently clipped by frame 0's maximum.
+  const [plo, phi] = groundBounds.value;
+  const same = groundBoundsKey === layers.groundVar;
+  if (same) {
+    lo = Math.min(lo, plo);
+    hi = Math.max(hi, phi);
+  }
+  groundBoundsKey = layers.groundVar;
   groundBounds.value = [lo, hi];
   if (!Number.isFinite(layers.groundFilterMin) || !Number.isFinite(layers.groundFilterMax)) {
     layers.groundFilterMin = lo;
     layers.groundFilterMax = hi;
+  } else if (same) {
+    const eps = (phi - plo) * 1e-6;
+    if (layers.groundFilterMin <= plo + eps) layers.groundFilterMin = lo;
+    if (layers.groundFilterMax >= phi - eps) layers.groundFilterMax = hi;
   }
   const fmin = Math.min(layers.groundFilterMin, layers.groundFilterMax);
   const fmax = Math.max(layers.groundFilterMin, layers.groundFilterMax);
@@ -705,22 +800,22 @@ function updateGround(): void {
     return;
   }
   if (name === "speed0") {
-    const u = loaded("u");
-    const v = loaded("v");
+    const u = cpuPair("u");
+    const v = cpuPair("v");
     if (!u || !v) return request("speed0");
-    const read = (i: number) =>
-      Math.hypot(u.data[i], v.data[i]);
+    const read = (i: number) => windAt(u, v, i)[2];
     const range = displayRange("speed0") ?? displayRange(SPEED) ?? [0, 20];
     atmos.setGroundField(read, range, "viridis", view.theme, 0.55, groundFilterFor(read));
     applyBuildings();
     return;
   }
   const data = loaded(name);
-  if (!data) return request(name);
+  const pair = cpuPair(name);
+  if (!data || !pair) return request(name);
   const meta = data.meta;
   const cmap = meta.colormap === "rdbu" ? "rdbu" : meta.colormap;
   const range: [number, number] = displayRange(name) ?? [meta.data_min, meta.data_max];
-  const read = field2D(meta, data.data);
+  const read = pair.B ? (i: number) => mixAt(pair, i) : field2D(meta, pair.A);
   atmos.setGroundField(read, range, cmap, view.theme, 0.55, groundFilterFor(read));
   applyBuildings();
 }
@@ -740,7 +835,7 @@ function updateVolume(): void {
     syncVolumeSlices();
     return;
   }
-  if (layers.volumeVar === SPEED && volumeFilterNeedsSpeedRange.value && fields.speedValues) {
+  if (layers.volumeVar === SPEED && volumeFilterNeedsSpeedRange.value && speedValuesA()) {
     resetVolumeFilter(SPEED);
   } else if (volumeFilterVariable.value !== layers.volumeVar) {
     resetVolumeFilter(layers.volumeVar);
@@ -812,19 +907,14 @@ function updateComposite(): void { syncVolumeSlices(); }
 
 
 function ensureParticles(): void {
-  if (particles || !renderer || !manifest.value) return;
-  const u = loaded("u");
-  const v = loaded("v");
-  const w = loaded("w");
-  if (!u || !v || !w) return;
-  const tUpload = performance.now();
-  performance.mark("atmos:upload:wind:start");
-  const texture = fields.windTexture(u.data, v.data, w.data, MAX_SPEED);
-  fields.speed(u.data, v.data, MAX_SPEED);
-  performance.mark("atmos:upload:wind:end");
-  recordUpload("wind", performance.now() - tUpload);
-  const wAbs = Math.max(Math.abs(w.meta.data_min), Math.abs(w.meta.data_max));
-  const colourSpeed = displayRange(SPEED) ?? ([...fields.speedRange] as [number, number]);
+  if (particles || !renderer || !manifest.value || !timeFields?.wind.valid) return;
+  const wMeta = manifest.value.variables.w;
+  if (!wMeta) return;
+  // The particles sample the blended "current time" wind target; it never needs rebinding.
+  const texture = timeFields.wind.texture;
+  if (timeFields.wind.firstUploadMs !== null) recordUpload("wind", timeFields.wind.firstUploadMs);
+  const wAbs = Math.max(Math.abs(wMeta.data_min), Math.abs(wMeta.data_max));
+  const colourSpeed = displayRange(SPEED) ?? speedRangeA();
   const wDisplay = displayRange("w");
   const wRange = wDisplay
     ? Math.max(Math.abs(wDisplay[0]), Math.abs(wDisplay[1]))
@@ -863,15 +953,18 @@ function updateDepthOccluders(): void {
   if (boxStack) depthOccluders.push(boxStack.group);
 }
 
-function onData(name: string): void {
-  if (name === "manifest") return;
-  if (requestedAt[name] !== undefined)
+function onData(name: string, frame: number): void {
+  if (name === "manifest" || name === "error") return;
+  wantsDirty = true;
+  if (name === "cached" || name === "wind") {
+    if (name === "cached") updateReadyTicks();
+    return;
+  }
+  if (frame === 0 && requestedAt[name] !== undefined && loadMs[name] === undefined)
     loadMs[name] = Math.round(performance.now() - requestedAt[name]);
   publishTimings();
-  ensureParticles();
-  updateSlice();
-  updateSection();
-  updateVolume();
+  // CPU readers only care about the frames on screen.
+  if (frame !== cur.a && frame !== cur.b) return;
   if (
     name === layers.groundVar ||
     ((name === "u" || name === "v") && layers.groundVar === "speed0")
@@ -879,6 +972,227 @@ function onData(name: string): void {
     updateGround();
   }
   if (layers.probe && probe.value) refreshProbe();
+  if (section.enabled && section.kind === "polyline" && (name === section.variable || ((name === "u" || name === "v") && section.variable === SPEED))) updateUnfolded();
+  // first CPU copy of a section / volume variable: style defaults may depend on it
+  if (frame === cur.a && (name === section.variable || name === layers.volumeVar)) {
+    updateSlice();
+    updateSection();
+    updateVolume();
+  }
+}
+
+// ---------------------------------------------------------------- time: data wishes, GPU slots, CPU refresh
+let wantsDirty = true;
+let lastWantsAt = 0;
+let gpuWasValid = new Set<string>();
+
+/** 3D variables whose blended texture is in use right now (+ whether the speed target is). */
+function gpuActive(): { scalars: string[]; speed: boolean } {
+  const vars = manifest.value?.variables ?? {};
+  const names = new Set<string>();
+  let speed = false;
+  const use = (n: string) => {
+    if (n === SPEED) speed = true;
+    else if (vars[n]?.dims.length === 3) names.add(n);
+  };
+  if (layers.volume) use(layers.volumeVar);
+  if (section.enabled) use(section.variable);
+  return { scalars: [...names], speed };
+}
+
+/** Names whose Float32 the CPU readers need at frames a / b. */
+function cpuNames(): string[] {
+  const vars = manifest.value?.variables ?? {};
+  const out = new Set<string>(["u", "v"]);
+  const add = (n: string) => {
+    if (vars[n]) out.add(n);
+  };
+  if (layers.ground && layers.groundVar !== "none" && layers.groundVar !== "speed0") add(layers.groundVar);
+  if (layers.probe && probeVariable.value !== SPEED && probeVariable.value !== "direction") add(probeVariable.value);
+  if (section.enabled) add(section.variable);
+  if (layers.volume) add(layers.volumeVar);
+  return [...out];
+}
+
+function desiredFrames(): number[] {
+  const c = prefetchFrame(tl, cur.b);
+  return [...new Set([cur.a, cur.b, c])];
+}
+
+/** Hand arrived half-float frames to their GPU slots; drop ones nobody wants any more. */
+function feedSlots(): void {
+  if (!timeFields || !store) return;
+  const want = desiredFrames();
+  const keep = [cur.a, cur.b];
+  const active = gpuActive().scalars;
+  for (const f of want) {
+    if (!timeFields.wind.holds(f)) {
+      const h = store.takeHalf("wind", f);
+      if (h) timeFields.wind.offer(f, h, keep);
+    }
+    for (const n of active) {
+      const r = timeFields.scalar(n);
+      r.lastUsed = performance.now();
+      if (!r.holds(f)) {
+        const h = store.takeHalf(n, f);
+        if (h) r.offer(f, h, keep);
+      }
+    }
+  }
+  for (const k of [...store.halves.keys()]) {
+    const at = k.lastIndexOf("@");
+    const name = k.slice(0, at);
+    const f = Number(k.slice(at + 1));
+    const res = name === "wind" ? timeFields.wind : timeFields.scalars.get(name);
+    // nobody wants it, or a duplicate of a frame a slot already holds
+    if (!want.includes(f) || !res || res.holds(f)) store.halves.delete(k);
+  }
+  // free GPU slots of scalars that have not been used for a while (keeps VRAM in budget)
+  const now = performance.now();
+  for (const [n, r] of timeFields.scalars) {
+    if (!active.includes(n) && now - r.lastUsed > 15_000) {
+      if (layers.volume && layers.volumeVar === n) continue;
+      if (section.enabled && section.variable === n) continue;
+      timeFields.disposeScalar(n);
+    }
+  }
+}
+
+/** Rebuild the worker's wish list (current frames first, then background prefetch). */
+function syncWants(now: number): void {
+  if (!store || !manifest.value || !timeFields) return;
+  if (!wantsDirty && now - lastWantsAt < 250) return;
+  wantsDirty = false;
+  lastWantsAt = now;
+  const jobs: { kind: "fetch" | "decode" | "wind"; name: string; frame: number; half?: boolean }[] = [];
+  const frames = desiredFrames();
+  const { scalars } = gpuActive();
+  const cpu = cpuNames();
+  if (!ready) cpu.push(...["tke", "t2m"].filter((n) => manifest.value!.variables[n]));
+  for (const f of frames) {
+    if (!timeFields.wind.holds(f) && !store.halves.has(`wind@${f}`)) jobs.push({ kind: "wind", name: "wind", frame: f });
+    for (const n of scalars) {
+      const r = timeFields.scalars.get(n);
+      const needHalf = !r?.holds(f) && !store.halves.has(`${n}@${f}`);
+      const needCpu = cpu.includes(n) && !store.get(n, f);
+      if (needHalf || needCpu) jobs.push({ kind: "decode", name: n, frame: f, half: needHalf });
+    }
+    for (const n of cpu) {
+      if (scalars.includes(n) || store.get(n, f)) continue;
+      jobs.push({ kind: "decode", name: n, frame: f });
+    }
+  }
+  // Background: encoded bytes of every frame, in playback order from the current one.
+  if (ready) {
+    const names = prefetchNames();
+    for (let k = 1; k <= tl.frames; k += 1) {
+      const f = (cur.a + k) % tl.frames;
+      for (const n of names) if (!store.isCached(n, f)) jobs.push({ kind: "fetch", name: n, frame: f });
+    }
+  }
+  store.want(jobs);
+  // CPU copies outside the window are dropped; the worker still caches their bytes.
+  store.retain((_, f) => frames.includes(f));
+}
+
+function prefetchNames(): string[] {
+  const vars = manifest.value?.variables ?? {};
+  const names = new Set(["u", "v", "w", ...gpuActive().scalars]);
+  for (const n of cpuNames()) names.add(n);
+  return [...names].filter((n) => vars[n]);
+}
+
+function updateReadyTicks(): void {
+  if (!store || !manifest.value) return;
+  const names = prefetchNames();
+  const ready = Array.from({ length: tl.frames }, (_, f) => names.every((n) => store.isCached(n, f)));
+  if (ready.some((r, i) => r !== tl.ready[i])) tl.ready = ready;
+}
+
+/** Are frames a and b resident on the GPU for every layer in use? */
+function canShow(a: number, b: number): boolean {
+  if (!timeFields) return false;
+  const res: TimeResource[] = [timeFields.wind, ...gpuActive().scalars.map((n) => timeFields!.scalar(n))];
+  return res.every((r) => r.resident(a) && r.resident(b));
+}
+
+const timeStats = { blendMs: 0, blends: 0, switchMs: [] as number[], lastSwitchStart: 0, shownT: -1 };
+const cpuRefreshAt = { probe: 0, ground: 0, unfolded: 0 };
+const cpuShown = { probe: 0, ground: 0, unfolded: 0 };
+
+/** Per animation frame: advance playback, upload slots, blend, refresh CPU readers (throttled). */
+function stepTime(now: number, dt: number): void {
+  if (!timeFields) return;
+  advanceTimeline(tl, dt, canShow);
+  const br = bracket(tl);
+  const changed = br.a !== cur.a || br.b !== cur.b || br.s !== cur.s;
+  if (br.a !== cur.a || br.b !== cur.b) wantsDirty = true;
+  cur.a = br.a;
+  cur.b = br.b;
+  cur.s = br.s;
+  if (changed && timeStats.lastSwitchStart === 0) timeStats.lastSwitchStart = now;
+  feedSlots();
+  timeFields.pump();
+  const active = gpuActive();
+  const res: TimeResource[] = [timeFields.wind, ...active.scalars.map((n) => timeFields!.scalar(n))];
+  const shown = timeFields.blend(cur.a, cur.b, cur.s, res, active.speed);
+  if (shown && timeStats.lastSwitchStart) {
+    timeStats.switchMs.push(performance.now() - timeStats.lastSwitchStart);
+    if (timeStats.switchMs.length > 120) timeStats.switchMs.shift();
+    timeStats.lastSwitchStart = 0;
+  }
+  if (shown) timeStats.shownT = tl.t;
+  timeStats.blendMs = timeFields.lastBlendMs;
+  timeStats.blends = timeFields.blendCount;
+  // A target that just became valid: (re)bind the consumers once.
+  const valid = new Set<string>();
+  if (timeFields.wind.valid) valid.add("wind");
+  if (timeFields.speedValid) valid.add(SPEED);
+  for (const [n, r] of timeFields.scalars) if (r.valid) valid.add(n);
+  let fresh = false;
+  for (const n of valid) if (!gpuWasValid.has(n)) fresh = true;
+  gpuWasValid = valid;
+  if (fresh) {
+    ensureParticles();
+    updateSlice();
+    updateSection();
+    updateVolume();
+  }
+  syncWants(now);
+  // CPU readers follow the displayed instant: 10 Hz probe, 4 Hz ground / unfolded while
+  // moving; immediately once playback / scrubbing stops.
+  if (layers.probe && probe.value && cpuDue("probe", now, 100)) refreshProbe();
+  if (layers.ground && layers.groundVar !== "none" && cpuDue("ground", now, 250)) updateGround();
+  if (section.enabled && section.kind === "polyline" && unfoldedVisible.value && cpuDue("unfolded", now, 250))
+    updateUnfolded();
+}
+
+function cpuDue(key: keyof typeof cpuRefreshAt, now: number, periodMs: number): boolean {
+  if (cpuShown[key] === tl.t) return false;
+  if ((tl.playing || tl.scrubbing) && now - cpuRefreshAt[key] < periodMs) return false;
+  cpuRefreshAt[key] = now;
+  cpuShown[key] = tl.t;
+  return true;
+}
+
+function onTimelineChange(): void {
+  wantsDirty = true;
+}
+
+function onTimeKey(e: KeyboardEvent): void {
+  if (tl.frames <= 1 || timelineHidden) return;
+  const target = e.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA")) return;
+  if (e.key === " " || e.code === "Space") {
+    tl.playing = !tl.playing;
+    e.preventDefault();
+  } else if (e.key === "ArrowLeft") {
+    stepTimelineFrame(tl, -1);
+    e.preventDefault();
+  } else if (e.key === "ArrowRight") {
+    stepTimelineFrame(tl, 1);
+    e.preventDefault();
+  }
 }
 
 // ---------------------------------------------------------------- probe / profile
@@ -899,27 +1213,26 @@ function refreshProbe(
   cell: { ix: number; iy: number } | null = fixedCell.value,
 ): void {
   if (!manifest.value) return;
-  const u = loaded("u");
-  const v = loaded("v");
+  const u = cpuPair("u");
+  const v = cpuPair("v");
   if (!u || !v) return;
   const source = cell ?? previewCell;
   const { ix, iy } = source;
   const g = manifest.value.grid;
   const name = probeVariable.value;
-  const data = name === SPEED || name === "direction" ? null : loaded(name);
+  const data = name === SPEED || name === "direction" ? null : cpuPair(name);
   if (name !== SPEED && name !== "direction" && !data) request(name);
   const speed: number[] = [];
   const direction: number[] = [];
   const values: number[] = [];
   for (let k = 0; k < g.nz; k += 1) {
     const i = k * g.nx * g.ny + iy * g.nx + ix;
-    const uu = u.data[i];
-    const vv = v.data[i];
-    speed.push(Math.hypot(uu, vv));
+    const [uu, vv, mag] = windAt(u, v, i);
+    speed.push(mag);
     // meteorological direction: where the wind comes from, clockwise from north
     direction.push((THREE.MathUtils.radToDeg(Math.atan2(-uu, -vv)) + 360) % 360);
     if (name === "direction") values.push(direction[direction.length - 1]!);
-    else if (data) values.push(data.data[i]);
+    else if (data) values.push(mixAt(data, i));
     else values.push(speed[speed.length - 1]!);
   }
   // If the requested 3D field has not arrived yet, leave values empty so the chart
@@ -939,6 +1252,8 @@ function refreshProbe(
     lat: probe.value.lat,
     speed,
     direction,
+    t: tl.t,
+    valid_time: tl.frames > 1 ? `${clockOf(tl).date}T${clockOf(tl).time}` : undefined,
   };
   emit("probe", payload);
   if (window.parent !== window) window.parent.postMessage(payload, "*");
@@ -1423,6 +1738,7 @@ function frame(now: number): void {
     if (window.__atmosStatus) window.__atmosStatus.fps = fps.value;
   }
   processPointer();
+  stepTime(now, dt);
   controls.update();
   atmos.root.scale.y = view.exaggeration;
   atmos.root.updateMatrixWorld();
@@ -1444,12 +1760,14 @@ function frame(now: number): void {
   }
   renderer.render(atmos.scene, camera);
   if (!ready && particles) {
+    wantsDirty = true;
     ready = true;
     performance.mark("atmos:first-frame");
     const started = (window as any).__atmosStart as number | undefined;
     const firstFrameMs = performance.now() - (started ?? 0);
     publishTimings({ firstFrameMs });
     window.__atmosStatus = {
+      frames: tl.frames,
       backend: "WebGL2",
       gpu: gpu.value,
       particlePath: particles.label,
@@ -1678,7 +1996,7 @@ function exposeApi(): void {
       if (secOn && !Number.isFinite(Number(section.min) + Number(section.max))) reasons.push("section-range-nan");
       let discarded = 0;
       if (secOn && secBinding && !awaitingDraw && !noGeometry) {
-        const data = section.variable === SPEED ? fields.speedValues : loaded(section.variable)?.data;
+        const data = section.variable === SPEED ? speedValuesA() : loaded(section.variable)?.data;
         if (data) {
           discarded = discardedFraction(data, {
             min: section.min, max: section.max,
@@ -1711,7 +2029,7 @@ function exposeApi(): void {
     hasData: (name: string) => Boolean(loaded(name)),
     /** Percentiles of a loaded variable (subsampled), for checking what a threshold hides. */
     debugStats: (name: string) => {
-      const data = name === SPEED ? fields.speedValues : loaded(name)?.data;
+      const data = name === SPEED ? speedValuesA() : loaded(name)?.data;
       if (!data) return null;
       const step = Math.max(1, Math.floor(data.length / 100_000));
       const s: number[] = [];
@@ -1731,10 +2049,11 @@ function exposeApi(): void {
     },
     /** Same voxel through the volume mapping and the section mapping (CPU, same LUT). */
     debugCompare: (name: string, ix: number, iy: number, k: number) => {
-      const data = loaded(name)?.data;
+      const pair = cpuPair(name);
       const g = manifest.value?.grid;
-      if (!data || !g) return null;
-      const value = data[k * g.nx * g.ny + iy * g.nx + ix]!;
+      if (!pair || !g) return null;
+      // same instant as the GPU target: frames a, b mixed with weight s
+      const value = mixAt(pair, k * g.nx * g.ny + iy * g.nx + ix);
       const bound = layers.volume && layers.volumeVar === name && volume?.bound ? volume.bound : volumeStyleFor(name);
       const norm = (lo: number, hi: number) => THREE.MathUtils.clamp((value - lo) / Math.max(hi - lo, 1e-9), 0, 1);
       const tv = norm(bound.min, bound.max);
@@ -1761,8 +2080,86 @@ function exposeApi(): void {
       sectionEnabled: section.enabled, sectionKind: section.kind,
       sectionDrawing: section.drawMode, boxDefined: section.box.defined,
       polylinePoints: section.points.length, unfoldedVisible: unfoldedVisible.value,
+      t: tl.t, playing: tl.playing, frames: tl.frames, ready: [...tl.ready],
+      ground: { variable: layers.groundVar, bounds: [...groundBounds.value], filter: [layers.groundFilterMin, layers.groundFilterMax] },
     }),
     timings: () => window.__atmosTimings ?? publishTimings(),
+    // ---- time axis (state/timeline.ts)
+    setTime: (t: number) => {
+      tl.playing = false;
+      setTimelineTime(tl, t);
+      wantsDirty = true;
+    },
+    play: () => {
+      tl.playing = true;
+    },
+    pause: () => {
+      tl.playing = false;
+    },
+    stepFrame: (dir: number) => {
+      stepTimelineFrame(tl, dir < 0 ? -1 : 1);
+      wantsDirty = true;
+    },
+    setPlayback: (p: { rate?: number; smooth?: boolean; loop?: boolean }) => {
+      if (p.rate !== undefined && (RATES as readonly number[]).includes(Number(p.rate))) tl.rate = Number(p.rate);
+      if (p.smooth !== undefined) tl.smooth = Boolean(p.smooth);
+      if (p.loop !== undefined) tl.loop = Boolean(p.loop);
+    },
+    /** frames ⌊t⌋ and ⌈t⌉ resident on the GPU and the current instant blended into the targets */
+    hasFrame: (t?: number) => {
+      const tt = t === undefined ? tl.t : Number(t);
+      const a = Math.min(Math.floor(tt + 1e-6), tl.frames - 1);
+      const b = Math.min(a + 1, tl.frames - 1);
+      const resident = canShow(a, tt - a > 1e-6 ? b : a);
+      return t === undefined ? resident && timeStats.shownT === tl.t : resident;
+    },
+    timeline: () => ({
+      frames: tl.frames,
+      t: tl.t,
+      playing: tl.playing,
+      rate: tl.rate,
+      smooth: tl.smooth,
+      loop: tl.loop,
+      buffering: tl.buffering,
+      ready: [...tl.ready],
+      clock: clockOf(tl),
+      shownT: timeStats.shownT,
+      a: cur.a,
+      b: cur.b,
+      s: cur.s,
+    }),
+    /** GPU "current time" texel vs the same blend on the CPU (wind: u, v, w, |V|; scalars: value). */
+    debugTimeTexel: (name: string, ix: number, iy: number, k: number) => {
+      if (!timeFields || !manifest.value) return null;
+      const g = manifest.value.grid;
+      const i = k * g.nx * g.ny + iy * g.nx + ix;
+      if (name === "wind") {
+        const u = cpuPair("u"), v = cpuPair("v");
+        if (!u || !v) return null;
+        const gpu = timeFields.readTexel(timeFields.wind.target, ix, iy, k);
+        const [uu, vv, m] = windAt(u, v, i);
+        const lin = [mixAt(u, i), mixAt(v, i)];
+        return { gpu, cpu: [uu, vv, m], linearMag: Math.hypot(lin[0]!, lin[1]!), a: cur.a, b: cur.b, s: cur.s };
+      }
+      const r = timeFields.scalars.get(name);
+      const p = cpuPair(name);
+      if (!r || !p) return null;
+      return { gpu: timeFields.readTexel(r.target, ix, iy, k)[0], cpu: mixAt(p, i), a: cur.a, b: cur.b, s: cur.s };
+    },
+    timeStats: () => ({
+      blendMs: timeStats.blendMs,
+      blends: timeStats.blends,
+      switchMs: [...timeStats.switchMs],
+      uploadedLayers: timeFields?.uploadedLayers ?? 0,
+      gpuMB: timeFields ? timeFields.gpuBytes() / 1e6 : 0,
+      cpuMB: store ? [...store.values.values()].reduce((a, v) => a + v.data.byteLength, 0) / 1e6 : 0,
+      pendingHalvesMB: store ? [...store.halves.values()].reduce((a, v) => a + v.byteLength, 0) / 1e6 : 0,
+      slots: timeFields
+        ? Object.fromEntries(
+            [timeFields.wind, ...timeFields.scalars.values()].map((r) => [r.name, r.slots.map((x) => x.frame)]),
+          )
+        : {},
+    }),
   };
 }
 
@@ -1770,24 +2167,40 @@ async function start(): Promise<void> {
   const t0 = performance.now();
   performance.mark("atmos:start");
   (window as any).__atmosStart = t0;
-  store = new DataStore(props.manifestUrl);
-  await new Promise<void>((resolve) => {
-    const off = store.on((name) => {
-      if (name === "manifest") {
-        off();
-        resolve();
-      }
+  const openStore = (url: string) => {
+    store = new DataStore(url);
+    return new Promise<boolean>((resolve) => {
+      const off = store.on((name) => {
+        if (name === "manifest" || name === "error") {
+          off();
+          resolve(name === "manifest");
+        }
+      });
     });
-  });
-  if (disposed || !store.manifest) return;
+  };
+  const url = props.manifestUrl || `/data/${dataName}/manifest.json`;
+  let opened = await openStore(url);
+  if (!opened && !props.manifestUrl && dataName === DEFAULT_DATA) {
+    // multi-time data not exported on this machine: fall back to the single-time case
+    store.dispose();
+    opened = await openStore(`/data/${FALLBACK_DATA}/manifest.json`);
+  }
+  if (disposed || !opened || !store.manifest) {
+    status.value = store?.lastError || "数据清单加载失败";
+    return;
+  }
   loadMs.manifest = Math.round(performance.now() - t0);
   manifest.value = store.manifest;
   domain = domainOf(store.manifest);
-  fields = new FieldTextures(domain);
+  tl.times = timesOf(store.manifest);
+  tl.frames = tl.times.length;
+  tl.ready = Array.from({ length: tl.frames }, () => false);
+  if (query.has("t")) setTimelineTime(tl, Number(query.get("t")));
+  const b0 = bracket(tl);
+  Object.assign(cur, b0);
   resetVolumeFilter(layers.volumeVar);
   store.on(onData);
-  // The worker already preloads u, v, w then tke, t2m; do not request them again
-  // or a second fetch can start on a slow network before the first is cached.
+  // First wish list: the current frame's wind (u, v, w), then tke, t2m — as in v6.10.
   for (const n of ["u", "v", "w", "tke", "t2m"]) {
     if (requestedAt[n] === undefined) requestedAt[n] = performance.now();
   }
@@ -1802,6 +2215,8 @@ async function start(): Promise<void> {
   renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
+  timeFields = new TimeFields(renderer, domain);
+  syncWants(performance.now());
   const gl = renderer.getContext();
   const info = gl.getExtension("WEBGL_debug_renderer_info");
   gpu.value = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : "WebGL2";
@@ -1846,6 +2261,7 @@ async function start(): Promise<void> {
   el.addEventListener("pointerup", onPointerUp);
   el.addEventListener("contextmenu", onContextMenu);
   window.addEventListener("keydown", onDrawKey);
+  window.addEventListener("keydown", onTimeKey);
   el.addEventListener("dblclick", onDoubleClick);
   exposeApi();
   updateGround();
@@ -2052,6 +2468,8 @@ const legends = computed(() => {
     max: number;
     windowMin?: number;
     windowMax?: number;
+    overLow?: boolean;
+    overHigh?: boolean;
   }[] = [];
   if (section.enabled)
     out.push({
@@ -2063,6 +2481,7 @@ const legends = computed(() => {
       colormap: section.colormap,
       min: section.min,
       max: section.max,
+      ...overRange(section.variable, section.min, section.max),
     });
   if (layers.particles && particleParams.colorMode !== "single") {
     const name =
@@ -2084,6 +2503,7 @@ const legends = computed(() => {
       colormap: particleParams.colormap,
       min: range[0],
       max: range[1],
+      ...(name === "w" ? overRange("w", range[0], range[1]) : {}),
     });
   }
   if (volumeWanted()) {
@@ -2097,15 +2517,30 @@ const legends = computed(() => {
       max: volumeColorRange.value[1],
       windowMin: layers.volumeFilterMin,
       windowMax: layers.volumeFilterMax,
+      ...overRange(layers.volumeVar, volumeColorRange.value[0], volumeColorRange.value[1]),
     });
   }
   return out;
 });
 
+/**
+ * Legend end arrows: lit when the displayed frame has values beyond the (fixed) colour
+ * range. Uses the manifest's per-frame min/max of frame ⌊t⌋ (schema 4), else the file range.
+ */
+function overRange(name: string, lo: number, hi: number): { overLow: boolean; overHigh: boolean } {
+  const meta = manifest.value?.variables[name];
+  if (!meta || !Number.isFinite(lo) || !Number.isFinite(hi)) return { overLow: false, overHigh: false };
+  const a = bracket(tl).a;
+  const st = meta.frames?.[a] ?? meta;
+  const eps = Math.abs(hi - lo) * 1e-3;
+  return { overLow: st.data_min < lo - eps, overHigh: st.data_max > hi + eps };
+}
+
 onMounted(() => void start());
 onBeforeUnmount(() => {
   disposed = true;
   window.removeEventListener("keydown", onDrawKey);
+  window.removeEventListener("keydown", onTimeKey);
   cancelAnimationFrame(raf);
   resizeObserver?.disconnect();
   store?.dispose();
@@ -2116,7 +2551,7 @@ onBeforeUnmount(() => {
   boxStack?.dispose();
   volume?.dispose();
   buildings?.dispose();
-  fields?.dispose();
+  timeFields?.dispose();
   controls?.dispose();
   renderer?.dispose();
   probeMarker?.dispose();
@@ -2149,8 +2584,12 @@ onBeforeUnmount(() => {
         :max="l.max"
         :window-min="l.windowMin"
         :window-max="l.windowMax"
+        :over-low="l.overLow"
+        :over-high="l.overHigh"
       />
     </div>
+
+    <TimelineBar v-if="showTimeline" :tl="tl" @change="onTimelineChange" />
 
     <ProfileChart
       v-if="layers.probe && probe"
@@ -2170,7 +2609,7 @@ onBeforeUnmount(() => {
     />
     <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
 
-    <div class="hint">
+    <div class="hint" :class="{ 'above-timeline': showTimeline }">
       拖动：旋转 · 右键：平移 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 ·
       折线：左键放点，双击/回车/右键完成；框选：拖拽松开即完成；Esc 取消 ·
       打开探针 → 悬停预览位置（不改读数）→ 单击（非拖动）固定并更新廓线；可选跟随鼠标
@@ -2657,6 +3096,9 @@ onBeforeUnmount(() => {
   font-size: 11px;
   white-space: nowrap;
   pointer-events: none;
+}
+.hint.above-timeline {
+  bottom: 84px;
 }
 .panel {
   position: absolute;

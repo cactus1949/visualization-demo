@@ -78,12 +78,56 @@ def _range(values: np.ndarray, percentiles: tuple[float, float], fixed: Any, tra
     return lo, hi
 
 
+def encoding_transform(encoding: str) -> str | None:
+    return {"u8_log10": "log10", "u16_log10": "log10",
+            "u8_signed_sqrt": "signed_sqrt", "u16_signed_sqrt": "signed_sqrt"}.get(encoding)
+
+
+def union_ranges(arrays: Any, encoding: str, range_scope: str) -> Any:
+    """Shared quantisation range over several frames (transformed domain).
+
+    Returns ``[(lo, hi), ...]`` per level for ``per_level`` 3D data, otherwise one ``(lo, hi)``.
+    Frames are expected to have identical shapes.
+    """
+    transform = encoding_transform(encoding)
+    frames = [transform_values(a, transform) for a in arrays]
+    def lohi(parts):
+        finite = [p[np.isfinite(p)] for p in parts]
+        finite = [f for f in finite if f.size]
+        if not finite:
+            return (0.0, 1.0)
+        lo = float(min(f.min() for f in finite)); hi = float(max(f.max() for f in finite))
+        if hi <= lo:
+            hi = lo + max(abs(lo) * 1e-12, 1e-12)
+        return (lo, hi)
+    if range_scope == "per_level" and frames[0].ndim >= 3:
+        return [lohi([f[z] for f in frames]) for z in range(frames[0].shape[0])]
+    return lohi(frames)
+
+
 def encode_variable(values: Any, encoding: str, range_scope: str = "global",
-                    clip_percentiles=(0.0, 100.0), fixed_range=None) -> tuple[np.ndarray, dict[str, Any]]:
-    """Encode a physical array and return encoded values plus manifest metadata."""
+                    clip_percentiles=(0.0, 100.0), fixed_range=None,
+                    shared_range: Any = None) -> tuple[np.ndarray, dict[str, Any]]:
+    """Encode a physical array and return encoded values plus manifest metadata.
+
+    ``shared_range`` (from :func:`union_ranges`) pins the quantisation grid so that several
+    time steps share one scale/offset; it overrides percentiles and ``fixed_range``.
+    """
     array = np.asarray(values, dtype=np.float64)
-    transform = {"u8_log10": "log10", "u16_log10": "log10",
-                 "u8_signed_sqrt": "signed_sqrt", "u16_signed_sqrt": "signed_sqrt"}.get(encoding)
+    if encoding == "u8_int":
+        # Categorical integers (risk_level): stored as-is, scale 1 / offset 0, no rounding error.
+        finite = array[np.isfinite(array)]
+        rounded = np.rint(np.where(np.isfinite(array), array, 0.0))
+        if finite.size and (np.max(np.abs(finite - np.rint(finite))) > 1e-6 or finite.min() < 0 or finite.max() > 255):
+            raise ValueError("u8_int needs integer values in 0..255")
+        return rounded.astype(np.uint8), {
+            "encoding": encoding, "range_scope": "global", "dtype": "uint8", "bits": 8,
+            "transform": None, "scale": 1.0, "offset": 0.0,
+            "data_min": float(finite.min()) if finite.size else float("nan"),
+            "data_max": float(finite.max()) if finite.size else float("nan"),
+            "clipped_low_frac": 0.0, "clipped_high_frac": 0.0, "nan_count": int((~np.isfinite(array)).sum()),
+        }
+    transform = encoding_transform(encoding)
     if encoding == "f16":
         finite = array[np.isfinite(array)]
         return array.astype("<f2"), {
@@ -100,7 +144,10 @@ def encode_variable(values: Any, encoding: str, range_scope: str = "global",
         scales, offsets = [], []
         lows = highs = nan = 0.0
         for z in range(array.shape[0]):
-            lo, hi = _range(array[z], clip_percentiles, fixed_range, transform)
+            if shared_range is not None:
+                lo, hi = (float(x) for x in shared_range[z])
+            else:
+                lo, hi = _range(array[z], clip_percentiles, fixed_range, transform)
             q, m = quantize(array[z], lo, hi, bits, transform)
             encoded[z] = q; scales.append(m["scale"]); offsets.append(m["offset"])
             lows += m["clipped_low_frac"] * array[z].size; highs += m["clipped_high_frac"] * array[z].size; nan += m["nan_count"]
@@ -109,7 +156,10 @@ def encode_variable(values: Any, encoding: str, range_scope: str = "global",
                          "transform": transform, "level_scale": scales, "level_offset": offsets,
                          "data_min": float(np.min(finite)), "data_max": float(np.max(finite)),
                          "clipped_low_frac": lows / max(1, array.size), "clipped_high_frac": highs / max(1, array.size), "nan_count": int(nan)}
-    lo, hi = _range(array, clip_percentiles, fixed_range, transform)
+    if shared_range is not None:
+        lo, hi = (float(x) for x in shared_range)
+    else:
+        lo, hi = _range(array, clip_percentiles, fixed_range, transform)
     q, m = quantize(array, lo, hi, bits, transform)
     m.update({"encoding": encoding, "range_scope": "global", "dtype": f"uint{bits}", "bits": bits, "transform": transform})
     return q, m

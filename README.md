@@ -10,6 +10,7 @@
 - **探针廓线**：打开“探针”后悬停只预览 3D 气象站位置（不改读数），单击（非拖动）固定并更新该点 40 层的风速、风向和所选变量廓线；可选“跟随鼠标”实时更新读数。
 - **体渲染切面**：体渲染面板提供 xcut / ycut / zcut 双端滑块（0–1），只改变体盒的根局部 AABB；“切面”打开时，新生成的盒面会和剖面走同一条 v4.2 光线内合成路径。
 - **四种剖面**：经度方向（x 常量）和纬度方向（z 常量）是可拖动的轴对齐竖墙；折线和框选进入绘制模式，左键在地面放点或拖框，右键旋转视角，Esc 退出。折线达到两个点立即显示折墙和左下展开图；框选按模型层生成水平板并显示高度标签。
+- **时间维度与播放（v6.11）**：默认打开 6 小时连续数据（f000–f006，7 帧，间隔 1 小时，个例 torch-abl3d）。底部时间轴可播放 / 暂停、上一帧 / 下一帧、0.5×–4× 倍速（1× = 1 小时数据播 4 秒）、循环、拖动进度条；帧间平滑默认开（GPU 混合，风场保模长插值），关掉后按整点切换。时刻按文件里的字面时间显示，文件未标时区，不加时区标签。规则见 `docs/state-model.md`「时间轴」。
 - **屏幕空间标注**：探针、剖面手柄、折线顶点和层高标签由 `web/src/render/annotations/` 统一绘制，样式见 `docs/annotation-style.md`。标记按 CSS 像素定尺寸，不受垂直夸张或框选拉伸影响。
 
 ## 目录结构
@@ -19,6 +20,7 @@
 | `pipeline/ncpipe/`       | NetCDF → 按变量配置量化 + Brotli + manifest，与渲染器无关 |
 | `pipeline/bldpipe/`      | 建筑白膜管线：裁剪、投影、拉伸、meshopt 压缩          |
 | `data/web/lowair_atmos/` | 23 个变量的 `.bin.br` 和 `manifest.json`（约 7.5 MB） |
+| `data/web/lowair_atmos_6h/` | 6 小时 7 帧：`manifest.json`（schema 4）+ `t000/` … `t006/`，每帧 23 个 `.bin.br`（合计约 39.3 MB） |
 | `data/web/buildings/`    | `buildings.glb`（约 6.4 MB）和 `buildings.json`       |
 | `web/`                   | three.js 前端                                         |
 
@@ -34,6 +36,18 @@ PYTHONPATH=pipeline /workspace/.venv-nc/bin/python -m ncpipe build \
 ```
 
 每个变量按 `pipeline/config/quant_config.yaml` 编码，再经 Brotli（quality 9）压缩。配置里可以写编码（`u8_linear`、`u16_linear`、`f16`、`u8_log10` 等）、区间范围（`global` 或 `per_level`），以及可选的分位数裁剪。本案例中 u、v 存成 float16；w 用逐层 8 位线性（比 float16 小很多，首屏更快）；温度、湿度等窄区间的 2D 变量，以及多数脉动、结冰类 3D 变量，也用 8 位线性；`visibility` 和跨数量级的 `wind_shear` 用 log10。`tke` 在这份数据里大约 2.4–12.7，没有跨数量级，所以仍用逐层 8 位线性。量化区间默认按数据的 min/max（或分位数）计算，只影响存储。色带和色例使用配置里的固定 `display_range`（物理单位），与量化范围无关，后一个时次也会用同一套颜色。`variables.yaml` 仍只保留中文名、色带和参考范围。`w` 仍从 41 个界面层平均到 40 个层中心。manifest 记录 encoding、dtype，以及全局或逐层的 scale/offset。
+
+### 多时次（6 小时连续数据）
+
+```bash
+PYTHONPATH=pipeline /workspace/.venv-nc/bin/python -m ncpipe build \
+  --inputs /workspace/data/lowair_atmos_tianjin_6h/f00*.nc \
+  --config pipeline/config/variables.yaml \
+  --quant pipeline/config/quant_config_6h.yaml \
+  --out data/web/lowair_atmos_6h
+```
+
+`--inputs` 走 `ncpipe/build_multi.py`：先校验各帧网格相同，再按变量（逐层变量按层）统计所有帧的并集 min/max，**7 帧共用一套量化网格**，然后逐帧写 `tNNN/<变量>.bin.br`。编码仍是上面的现有格式（这一版不换 C 方案 / SZ3 / 时间差分）；一帧一目录、manifest 记 `times` 和共用的 scale/offset，以后换编码只动 Worker 解码。manifest（schema 4）新增 `times[]`（`dir`、`valid_time` 为文件里解码出的字面时间，未标时区）和每个变量的 `frames[]`（逐帧 min/max、字节数）；`data_min/max` 是 7 帧并集。`risk_level` 改用 `u8_int` 整数原样存储（scale 1、offset 0），不再出现 2 解成 2.0039。`quant_config_6h.yaml` 只放宽了 7 帧并集超出原色带的四个量：w ±0.25、t2m 270–295 K、dirdz ±0.3、visibility 200–30000 m。
 
 ### 建筑白膜
 
@@ -63,6 +77,8 @@ npm run build          # 类型检查 + 生产构建（同时把 data/web 复制
 npx vite preview --port 4173 --strictPort
 ```
 
+默认打开 `data/web/lowair_atmos_6h`（不存在时自动退回单时次 `lowair_atmos`）；`?data=lowair_atmos` 强制单时次，`?t=2.5` 打开指定时刻，`?timeline=0` 隐藏时间轴。
+
 浏览器需要支持 WebGL2 和 `EXT_color_buffer_float`（桌面端 Chrome、Edge、Firefox、Safari 17+ 都支持）。`?embed=1` 会隐藏控制面板；在 iframe 中运行时，组件会向父页面发送 `atmos:ready` 和 `atmos:probe` 消息。
 
 ### 交互
@@ -87,7 +103,8 @@ npx vite preview --port 4173 --strictPort
 ## 架构
 
 ```
-nc ─ ncpipe ─▶ data/web/*.bin.br ─ Worker 解压并解码为 Float32 ─▶ R16F Data3DTexture（每个变量只上传一次）
+nc ─ ncpipe ─▶ data/web/<case>/tNNN/*.bin.br ─ Worker 缓存字节、解码 Float32 + 半精度 ─▶ 每帧槽位 DataArrayTexture
+                                                 └─ GPU 混合 pass（⌊t⌋, ⌊t⌋+1, s）─▶ “当前时刻” WebGL3DRenderTarget
                                                  ├─ 切片 / 剖面：片元着色器直接采样物理值
                                                  ├─ 粒子：RGBA16F 风场纹理（u, v, w, |V|）
                                                  └─ 体渲染：光线步进
@@ -106,7 +123,8 @@ nc ─ ncpipe ─▶ data/web/*.bin.br ─ Worker 解压并解码为 Float32 ─
 - **建筑**（`buildings.ts`）：`MeshStandardMaterial`，开启 flatShading，并通过 `onBeforeCompile` 把墙脚约 28 m 压暗，模拟环境光遮蔽；配合方向光阴影（4096² 阴影贴图）。
 - **探针**：直接读内存中解码后的 Float32 数组（每次 40 个值），每帧最多做一次射线检测，只检测地面和切片，不检测 192 万个建筑三角形；固定点是贯穿场景高度的细杆加地面圆环，由标注层投影到屏幕。
 - **标注层**（`web/src/render/annotations/`）：功能模块只提供锚点，层负责按像素绘制 HTML/SVG 标记、标签和手柄，并做廉价的建筑高度场遮挡淡出。
-- `window.__atmosApi` 提供 `setView / setSection / setSlice / setParticles / setLayer / setVolume / setCamera / setExaggeration / setProbeEnabled / setProbeFollowMouse / probeAt / probeHoverAt / setPolyline / selectPolylineVertex / setBox / setCuts / advance / status`，供截图和录屏脚本调用（`web/scripts/screenshot.mjs`、`web/scripts/record.mjs`）。
+- **时间维度**（`web/src/render/timeFields.ts`、`web/src/state/timeline.ts`、`web/src/components/TimelineBar.vue`）：Worker 按帧缓存编码字节（LRU 220 MB），在 Worker 里解码并转半精度（f16 直接拷贝，其余查表转换），风场直接打包成 RGBA16F。每个在用的 3D 量有 3 个半精度 `DataArrayTexture` 槽位（⌊t⌋、⌊t⌋+1、预取帧）和一张 `WebGL3DRenderTarget`；混合 pass 只在 t 变化时跑，40 层逐层写入，所有消费者采样同一张目标纹理。换槽按层分批上传（每帧 6 层），首帧仍只拉 t000。
+- `window.__atmosApi` 提供 `setView / setSection / setSlice / setParticles / setLayer / setVolume / setCamera / setExaggeration / setProbeEnabled / setProbeFollowMouse / probeAt / probeHoverAt / setPolyline / selectPolylineVertex / setBox / setCuts / advance / status`，以及时间轴的 `setTime / play / pause / stepFrame / setPlayback / hasFrame / timeline / timeStats`，供截图和录屏脚本调用（`web/scripts/screenshot.mjs`、`web/scripts/record.mjs`）。
 
 ## 生产部署
 

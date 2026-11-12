@@ -25,6 +25,23 @@ export interface VariableMeta {
   clipped_high_frac: number;
   nan_count: number;
   staggered_from?: string;
+  /** schema 4: per-frame stats; quantisation (scale/offset) is shared by all frames. */
+  frames?: FrameStats[];
+}
+
+export interface FrameStats {
+  bytes_compressed: number;
+  data_min: number;
+  data_max: number;
+}
+
+/** One time step (schema 4). `valid_time` is the literal clock from the file; no time zone is implied. */
+export interface TimeEntry {
+  index: number;
+  dir: string;
+  valid_time: string;
+  lead_h: number;
+  source: string;
 }
 
 export interface GridMeta {
@@ -46,16 +63,25 @@ export interface GridMeta {
 export interface Manifest {
   schema_version: number;
   case: string;
-  source_file: string;
+  source_file: string | string[];
   created_utc: string;
   global_attrs: Record<string, unknown>;
   grid: GridMeta;
   variables: Record<string, VariableMeta>;
   derived?: Record<string, { display_range: [number, number] }>;
+  /** schema 4 only; a schema-3 manifest is treated as one frame in the manifest directory. */
+  times?: TimeEntry[];
+  time_zone?: string | null;
   timing: {
     load_s: number;
     total_s: number;
     bytes_raw: number;
     bytes_compressed: number;
   };
+}
+
+/** Frames of a manifest; schema 3 (single time) becomes one frame with an empty dir. */
+export function timesOf(manifest: Manifest): TimeEntry[] {
+  if (manifest.times?.length) return manifest.times;
+  return [{ index: 0, dir: "", valid_time: "", lead_h: 0, source: String(manifest.source_file ?? "") }];
 }

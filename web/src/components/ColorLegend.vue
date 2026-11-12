@@ -10,6 +10,9 @@ const props = defineProps<{
   max: number;
   windowMin?: number;
   windowMax?: number;
+  /** current frame has values below / above the colour range: light the end arrow */
+  overLow?: boolean;
+  overHigh?: boolean;
 }>();
 
 const gradient = computed(() => colormapCss(props.colormap));
@@ -42,9 +45,13 @@ const ticks = computed(() => {
       <span>{{ title }}</span>
       <small>{{ units }}</small>
     </div>
+    <div class="legend-bar-row">
+    <span class="over low" :class="{ lit: overLow }" :title="overLow ? '当前时刻有低于色带下限的值' : ''" />
     <div class="legend-bar" :style="{ background: gradient }">
       <span v-if="hasWindow" class="legend-dim left" :style="{ width: windowLeft }" />
       <span v-if="hasWindow" class="legend-dim right" :style="{ left: windowRight }" />
+    </div>
+    <span class="over high" :class="{ lit: overHigh }" :title="overHigh ? '当前时刻有高于色带上限的值' : ''" />
     </div>
     <div class="legend-ticks">
       <span v-for="(tick, i) in ticks" :key="i">{{ tick }}</span>
@@ -74,11 +81,40 @@ const ticks = computed(() => {
 .legend-title small {
   color: var(--muted);
 }
+.legend-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 6px;
+}
 .legend-bar {
   position: relative;
+  flex: 1;
   height: 10px;
-  margin-top: 6px;
   border-radius: 5px;
+}
+/* end arrows: dim outline normally, fixed-amber when the frame exceeds the colour range */
+.over {
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  opacity: 0.22;
+}
+.over.low {
+  border-right: 7px solid var(--muted, #87a3b5);
+}
+.over.high {
+  border-left: 7px solid var(--muted, #87a3b5);
+}
+.over.lit {
+  opacity: 1;
+}
+.over.low.lit {
+  border-right-color: #ffc247;
+}
+.over.high.lit {
+  border-left-color: #ffc247;
 }
 .legend-dim {
   position: absolute;
@@ -94,6 +130,8 @@ const ticks = computed(() => {
 }
 .legend-ticks {
   display: flex;
+  margin-left: 10px;
+  margin-right: 10px;
   justify-content: space-between;
   margin-top: 3px;
   font-size: 10px;

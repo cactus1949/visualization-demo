@@ -31,5 +31,5 @@ precip: {encoding: u8_linear, range_scope: global, display_range: [0, 2.5]}
 cloud: {encoding: u8_linear, range_scope: global, display_range: [0, 100]}
 cloud_low: {encoding: u8_linear, range_scope: global, display_range: [0, 100]}
 visibility: {encoding: u8_log10, range_scope: global, display_range: [200, 5000]}
-risk_level: {encoding: u8_linear, range_scope: global, display_range: [0, 4]}
+risk_level: {encoding: u8_int, range_scope: global, display_range: [0, 4]}
 p: {encoding: u8_linear, range_scope: global, display_range: [100000, 103000]}

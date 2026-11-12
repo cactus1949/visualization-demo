@@ -87,8 +87,14 @@ def build(input_path: str | Path, config_path: str | Path, out_dir: str | Path,
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description=__doc__); p.add_argument("--input", required=True); p.add_argument("--config", required=True); p.add_argument("--quant", default=None); p.add_argument("--out", required=True); p.add_argument("--bits16", nargs="*", default=[]); p.add_argument("--vars", nargs="*", default=None)
-    a = p.parse_args(argv); build(a.input, a.config, a.out, a.bits16, a.vars, a.quant)
+    p = argparse.ArgumentParser(description=__doc__); p.add_argument("--input", default=None)
+    p.add_argument("--inputs", nargs="+", default=None, help="several time steps (f000.nc ... f006.nc) -> manifest schema 4, one tNNN/ dir per frame"); p.add_argument("--config", required=True); p.add_argument("--quant", default=None); p.add_argument("--out", required=True); p.add_argument("--bits16", nargs="*", default=[]); p.add_argument("--vars", nargs="*", default=None)
+    a = p.parse_args(argv)
+    if a.inputs:
+        from .build_multi import build_multi
+        build_multi(sorted(a.inputs), a.config, a.out, a.quant, a.vars); return
+    if not a.input: p.error("--input or --inputs is required")
+    build(a.input, a.config, a.out, a.bits16, a.vars, a.quant)
 
 
 if __name__ == "__main__": main()
