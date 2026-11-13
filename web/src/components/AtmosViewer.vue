@@ -3388,6 +3388,55 @@ function globeVolumeInfo(): { box: { lo: number[]; hi: number[] } | null; steps:
   return { box: volume?.shellBox() ?? null, steps: volume?.steps ?? 0, visible: volume?.mesh.visible ?? false };
 }
 
+/**
+ * Switch the open encoding without disposing the host, so the globe tab can
+ * change current/SZ3 in place (camera, sections, exaggeration stay).
+ */
+async function reloadFormat(): Promise<void> {
+  window.__atmosReady = false;
+  status.value = "加载数据清单…";
+  const candidates = await manifestCandidates();
+  let opened = false;
+  for (const url of candidates) {
+    if (disposed) return;
+    store?.dispose();
+    opened = await new Promise<boolean>((resolve) => {
+      store = new DataStore(url);
+      const off = store.on((name) => {
+        if (name === "manifest" || name === "error") {
+          off();
+          resolve(name === "manifest");
+        }
+      });
+    });
+    if (opened) break;
+  }
+  if (disposed) return;
+  if (!opened || !store.manifest) {
+    status.value = (props.format.missingHint ?? "没有可用数据") + (store?.lastError ? `（${store.lastError}）` : "");
+    return;
+  }
+  manifest.value = store.manifest;
+  tl.times = timesOf(store.manifest);
+  tl.frames = tl.times.length;
+  tl.ready = Array.from({ length: tl.frames }, () => false);
+  if (tl.t > Math.max(0, tl.frames - 1)) setTimelineTime(tl, Math.max(0, tl.frames - 1));
+  Object.assign(cur, bracket(tl));
+  store.on(onData);
+  timeFields?.wind.releaseOutside([]);
+  if (timeFields) for (const r of timeFields.scalars.values()) r.releaseOutside([]);
+  wantsDirty = true;
+  syncWants(performance.now());
+  status.value = "就绪";
+  window.__atmosReady = true;
+}
+
+watch(() => props.format.id, (id, prev) => {
+  if (!prev || id === prev) return;
+  if (!host) return;
+  void reloadFormat();
+});
+
 defineExpose({ snapshot, refreshShell, globeVolumeInfo, theme: computed(() => view.theme) });
 
 onMounted(() => void start());
@@ -3471,7 +3520,7 @@ onBeforeUnmount(() => {
     <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
 
     <div class="hint" :class="{ 'above-timeline': showTimeline }">
-      <template v-if="globeMode">左键拖动：旋转 · 右键拖动：缩放 · 中键拖动：俯仰 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 · </template>
+      <template v-if="globeMode">左键拖动：旋转 · 右键拖动：缩放 · 中键拖动：俯仰 · 滚轮：缩放 · Ctrl+左键/右键拖动：俯仰 · Shift+左键拖动：环视 · 经度/纬度剖面可拖动平移 · </template>
       <template v-else>拖动：旋转 · 右键：平移 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 · </template>
       折线：左键放点，双击/回车/右键完成；框选：拖拽松开即完成；Esc 取消 ·
       打开探针 → 悬停预览位置（不改读数）→ 单击（非拖动）固定并更新廓线；可选跟随鼠标

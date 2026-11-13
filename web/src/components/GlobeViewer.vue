@@ -9,6 +9,7 @@ import { computed, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shall
 import { Cartesian3, Color, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
+import GlobeFormatSwitch from "./GlobeFormatSwitch.vue";
 import type { FormatDef } from "../formats/types";
 import type { CurvedVolumeOptions } from "../render/volume";
 import { GeoDecodeError, geoBaseUrl, lastDecodeMs, lastDecodeWhere, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
@@ -34,6 +35,12 @@ declare global {
 }
 
 const props = defineProps<{ format?: FormatDef }>();
+const emit = defineEmits<{ "switch-format": [id: string] }>();
+
+function onSwitchFormat(id: string): void {
+  emit("switch-format", id);
+}
+
 
 const host = ref<HTMLDivElement | null>(null);
 const atmos = ref<InstanceType<typeof AtmosViewer> | null>(null);
@@ -57,6 +64,8 @@ function applySky(theme: string): void {
   viewer.scene.backgroundColor = light ? LIGHT_SKY : Color.BLACK;
   if (viewer.scene.skyBox) viewer.scene.skyBox.show = !light;
   if (viewer.scene.moon) viewer.scene.moon.show = !light;
+  if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = !light;
+  viewer.scene.globe.showGroundAtmosphere = !light;
 }
 
 watch(themeClass, (theme) => applySky(theme));
@@ -279,8 +288,12 @@ onBeforeUnmount(() => {
 
 /** AtmosViewer's own onBeforeUnmount runs after this component's; tear the globe down after the layers. */
 function teardown(): void {
+  const canvas = viewer?.scene?.canvas;
+  const gl = canvas?.getContext("webgl2") ?? canvas?.getContext("webgl");
   overlay.value?.dispose();
   viewer?.destroy();
+  const lose = gl?.getExtension("WEBGL_lose_context");
+  if (lose && gl && !gl.isContextLost()) lose.loseContext();
   geoUniforms?.uGeoGround.value.dispose();
   overlay.value = null;
   viewer = null;
@@ -302,6 +315,7 @@ onUnmounted(teardown);
       :create-host="() => overlay!"
     />
     <aside class="globe-panel">
+      <GlobeFormatSwitch :model-value="props.format?.id ?? ''" @update:model-value="onSwitchFormat" />
       <div class="row">
         <span>底图</span>
         <button type="button" :class="{ on: ui.style === 'img' }" @click="setBasemap('img')">影像</button>
@@ -405,5 +419,19 @@ onUnmounted(teardown);
 }
 .globe.light .muted {
   color: #5d7384;
+}
+.globe.light .globe-panel select,
+.globe.light .globe-panel input[type="checkbox"] {
+  color: #1c2d3a;
+  background: #f7fafc;
+  accent-color: #0f8aa3;
+  border: 1px solid rgba(60, 90, 110, 0.35);
+}
+.globe.light .globe-panel select {
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.globe.light .warn {
+  color: #9a6b12;
 }
 </style>
