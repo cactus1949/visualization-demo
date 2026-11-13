@@ -38,6 +38,8 @@ const codec: Codec = {
     const levels = perLevel ? meta.shape[0]! : 1;
     const stride = perLevel ? n / levels : n;
     const tr = meta.transform;
+    // Exporter reserves the top code for missing cells only when the variable has any (nan_code in the manifest).
+    const nanCode = meta.nan_code;
     for (let z = 0; z < levels; z += 1) {
       const scale = perLevel ? meta.level_scale![z]! : meta.scale!;
       const offset = perLevel ? meta.level_offset![z]! : meta.offset!;
@@ -49,6 +51,7 @@ const codec: Codec = {
           const v = q[i]! * scale + offset;
           out[i] = tr === "log10" ? Math.pow(10, v) : tr === "log1p" ? Math.expm1(v) : Math.sign(v) * v * v;
         }
+      if (nanCode !== undefined) for (let i = start; i < end; i += 1) if (q[i] === nanCode) out[i] = Number.NaN;
     }
     return out;
   },

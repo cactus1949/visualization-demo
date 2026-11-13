@@ -185,6 +185,10 @@ def test_missing_p_is_rejected_and_report_matches_manifest(tmp_path):
     frame = manifest["variables"]["u"]["frames"][0]
     assert frame["tier"] == report["variables"]["u"]["frames"][0]["tier"] == "x1"
     assert report["totals"]["tiers"]["x1"] == 1
+    # bytes_compressed counts the .sz3pack only; the index JSON is reported separately
+    pack, index = out / manifest["times"][0]["dir"] / "u.sz3pack", out / manifest["times"][0]["dir"] / "u.json"
+    assert frame["bytes_compressed"] == pack.stat().st_size and frame["bytes_index"] == index.stat().st_size
+    assert manifest["timing"]["bytes_index"] == sum(v.get("bytes_index", 0) for v in manifest["variables"].values())
 
 
 def _synthetic_frame(path, hour, rng):

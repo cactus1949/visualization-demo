@@ -22,12 +22,20 @@ export interface VariableMeta {
   /** `encoding: "derived"`: recipe the codec uses instead of a file */
   derive?: Record<string, unknown>;
   bytes_raw: number;
+  /** current: the .bin.br file; SZ3: the .sz3pack only (the index JSON is in bytes_index) */
   bytes_compressed: number;
+  /** SZ3 only: bytes of the per-frame index JSON (`index_file`), summed over frames */
+  bytes_index?: number;
   data_min: number;
   data_max: number;
   clipped_low_frac: number;
   clipped_high_frac: number;
   nan_count: number;
+  /**
+   * Current encoding only: integer code that marks a missing cell. Written only when the variable
+   * has missing cells (finite values then use codes 0..max-1); absent means no code is reserved.
+   */
+  nan_code?: number;
   staggered_from?: string;
   /** schema 4: per-frame stats; quantisation (scale/offset) is shared by all frames. */
   frames?: FrameStats[];
@@ -81,7 +89,11 @@ export interface Manifest {
   codec?: string;
   /** short HUD label of the codec, e.g. "SZ3 T1L" */
   codec_label?: string;
-  /** frames to prefetch to the GPU beyond the next one (SZ3: 1, decode is slower) */
+  /**
+   * Legacy SZ3 export field ("frames beyond the interpolation pair"). Not read by the client: both
+   * formats use FETCH_WINDOW_AHEAD = 2 in state/fetchWindow.ts, i.e. [⌊t⌋, ⌊t⌋+1, ⌊t⌋+2], which is
+   * one frame beyond the pair, so the value 1 the exporter writes matches the window.
+   */
   prefetch_extra?: number;
   timing: {
     load_s: number;

@@ -472,7 +472,7 @@ def build_sz3(inputs: Sequence[str | Path], config_path: str | Path, out_dir: st
         specs[n]["codec"] = "sz3"
     if fallback: results = _run_jobs(jobs, n_workers)
 
-    variables: dict[str, Any] = {}; total_bytes = 0; report_variables: dict[str, Any] = {}
+    variables: dict[str, Any] = {}; total_bytes = total_index = 0; report_variables: dict[str, Any] = {}
     tier_totals: dict[str, Any] = {"x1": 0, "x0.25": 0, "x0.0625": 0, "quant": {"config": 0, "sparse": 0, "ladder": 0}}
     for name in names:
         dims, attrs_for_var = attrs[name]
@@ -500,12 +500,14 @@ def build_sz3(inputs: Sequence[str | Path], config_path: str | Path, out_dir: st
             stats = [r["vars"][name] for r in results]
             entry = {**common, "encoding": "sz3", "sz3_bound": "per_level", "transform": None,
                      "domain_transform": specs[name].get("transform"), "file": f"{name}.sz3pack", "index_file": f"{name}.json",
+                     # bytes_compressed = .sz3pack only; the per-frame index JSON is counted in bytes_index
                      "bytes_raw": int(np.prod(shape)) * 4, "bytes_compressed": int(sum(s["bytes"] for s in stats)),
-                     "frames": [{"bytes_compressed": s["bytes"], "codec": s["codec"], "tier": s["tier"], "fallback": s["fallback"],
+                     "bytes_index": int(sum(s["index_bytes"] for s in stats)),
+                     "frames": [{"bytes_compressed": s["bytes"], "bytes_index": s["index_bytes"], "codec": s["codec"], "tier": s["tier"], "fallback": s["fallback"],
                                  "eb_max": s["eb_max"], "slab_kinds": s["slab_kinds"], "nan_count": s["nan_count"],
                                  "data_min": s["data_min"], "data_max": s["data_max"], "max_err": s["max_err"], "rmse": s["rmse"]} for s in stats]}
-            total_bytes += entry["bytes_compressed"]; stat_values = stats
-            report_variables[name] = {"frames": [{k: s[k] for k in ("codec", "tier", "fallback", "bytes", "max_err", "rmse", "eb_max")} for s in stats]}
+            total_bytes += entry["bytes_compressed"]; total_index += entry["bytes_index"]; stat_values = stats
+            report_variables[name] = {"frames": [{k: s[k] for k in ("codec", "tier", "fallback", "bytes", "index_bytes", "max_err", "rmse", "eb_max")} for s in stats]}
             for s in stats:
                 if s["tier"] in ("x1", "x0.25", "x0.0625"): tier_totals[s["tier"]] += 1
                 elif s["tier"] == "quant": tier_totals["quant"][s["fallback"] if s["fallback"] in ("config", "sparse") else "ladder"] += 1
@@ -516,10 +518,13 @@ def build_sz3(inputs: Sequence[str | Path], config_path: str | Path, out_dir: st
         print(f"{name}: {entry['encoding']} {entry['bytes_compressed']/1e6:.3f}MB")
     derived_display = {k: {"display_range": [float(x) for x in v["display_range"]]} for k, v in (display_cfg.get("derived") or {}).items() if isinstance(v, dict) and v.get("display_range")}
     manifest = {"schema_version": 4, "format": "sz3", "codec": "sz3", "sz3_tier": cfg.get("tier", "T1L"),
-                "codec_label": f"SZ3 {cfg.get('tier', 'T1L')}", "prefetch_extra": 1, "case": str(ref.attrs.get("case", "")),
+                "codec_label": f"SZ3 {cfg.get('tier', 'T1L')}",
+                # informational: frames beyond the interpolation pair; the client uses FETCH_WINDOW_AHEAD = 2
+                "prefetch_extra": 1, "case": str(ref.attrs.get("case", "")),
                 "source_file": [str(p) for p in paths], "created_utc": datetime.now(timezone.utc).isoformat(), "global_attrs": kept_attrs(ref),
                 "grid": grid, "times": times, "time_zone": None, "time_note": TIME_NOTE, "variables": variables, "derived": derived_display,
                 "timing": {"load_s": 0.0, "total_s": time.perf_counter() - started, "bytes_raw": 0, "bytes_compressed": total_bytes,
+                           "bytes_index": total_index,
                            "frame_encode_s": [round(r["secs"], 2) for r in results], "workers": n_workers}}
     (output / "manifest.json").write_text(json.dumps(jsonable(manifest), ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     report = {"version": 1, "variables": report_variables, "totals": {"tiers": tier_totals}}

@@ -9,7 +9,7 @@ export interface Sz3Index {
   per_level?: boolean;
   slab_shape: number[];
   transform?: "log10" | string | null;
-  /** categorical field stored with bound 0.49: round after decoding */
+  /** integer field (risk_level, stored as u8 integers in quant slabs): round after decoding as a guard */
   round?: boolean;
   offsets?: number[];
   lengths?: number[];

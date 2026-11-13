@@ -41,6 +41,8 @@ $WEB_ROOT/sz3/202611/20261111/manifest.json       t000/u.sz3pack + u.json …
 
 每种格式先写到同级的 `.20261111.tmp`，写完再整体改名替换，导到一半失败时旧数据不受影响。
 
+当前编码（`--format current`）的缺测：f16 直接存 NaN。u8/u16/u8_int 只有在该变量（多时次按所有帧合起来看）出现缺测时，才把最高码值（255 / 65535）留作缺测码，manifest 写 `nan_code`，有限值只用 0 到最高码值减 1；没有缺测的变量不留码值，输出和以前逐字节一致。浏览器 `codecs/current.ts` 把等于 `nan_code` 的格子解成 NaN。以前 NaN 被记成 0 号码，解出来是本层最小值。
+
 SZ3 的设置在 `pipeline/config/sz3_config.yaml`：
 - 每个变量、每帧、每层在变换域使用 `min(P, ratio × 有限值范围)` 作为上限；常数层只写常数。
 - `codec: quant` 或自动识别到稀疏帧时使用独立的 u8/f16 量化，其余帧使用 SZ3 并按验收阶梯降档。实际 codec、tier、fallback、缺测数和层类型写入 index v2、manifest 和 `sz3_report.json`。
