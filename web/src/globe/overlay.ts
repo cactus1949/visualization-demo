@@ -1,51 +1,82 @@
-/** Three.js layer host sharing Cesium's canvas and WebGL context. */
+/**
+ * Cesium ViewHost: three.js drawn into Cesium's own canvas and WebGL context, after Cesium's frame
+ * (postRender). Each frame: hooks.beforeCamera → RTC camera sync (instead of controls.update) →
+ * hooks.afterCamera (layers, occluder depth capture) → clear depth, depth-only terrain proxy,
+ * own test objects, layer scene → hooks.afterRender → resetState + Cesium cache resync.
+ *
+ * Uses Cesium private fields (no public API exists): `context._gl`, and after three has reset GL
+ * state, `_currentRenderState / _currentPassState / _currentFramebuffer` are put back to Cesium's
+ * defaults so its state diffing re-applies everything. The same reset also runs on preRender, so GL
+ * work layers do outside the frame (TimeFields uploads / blends from data callbacks) can't leave
+ * Cesium with a stale cache. Recheck on Cesium upgrades (docs/globe-geo.md).
+ */
 import { Cartesian3, Matrix4, type Scene as CesiumScene } from "cesium";
 import { Group, Mesh, PerspectiveCamera, Raycaster, Scene, Vector2, WebGLRenderer, type Material, type Object3D, type WebGLRenderTarget } from "three";
 import type { GeoMap } from "../geo/mapping";
 import { DepthProxy } from "./depthProxy";
 import { RtcCameraSync, type EnuSphere } from "./rtcCamera";
 import { applyLayerRendererConfig } from "../host/rendererConfig";
+import { withHidden } from "../host/hidden";
 import type { FrameHooks, ViewHost } from "../host/types";
+
+export type DepthEncoding = ViewHost["depthEncoding"];
+
+export interface CesiumHostOptions {
+  /** "linear" (default) or "log" (three logarithmicDepthBuffer). Task A decides the final default. */
+  depthEncoding?: DepthEncoding;
+  onContextLost?: () => void;
+}
+
+/** `?globeDepth=log` switches the overlay to a logarithmic depth buffer; anything else is linear. */
+export function depthEncodingFromUrl(search = location.search): DepthEncoding {
+  return new URLSearchParams(search).get("globeDepth") === "log" ? "log" : "linear";
+}
 
 export class GlobeOverlay implements ViewHost {
   readonly renderer: WebGLRenderer;
   readonly camera = new PerspectiveCamera();
   readonly element: HTMLCanvasElement;
+  readonly depthEncoding: DepthEncoding;
+  /** host-owned extras drawn after the proxy (the alignment test layer lives in `layers`) */
   readonly scene = new Scene();
   readonly layers = new Group();
   readonly sync: RtcCameraSync;
-  readonly depthEncoding: "linear" | "log";
+  /** ENU bounding sphere of everything three draws; drives near / far (owned by the host) */
   sphere: EnuSphere = { center: [0, 0, 0], radius: 1.5 };
-  private readonly ctx: CesiumContextInternals;
+  drawCalls = 0;
   private readonly proxyScene = new Scene();
-  private readonly cesium: CesiumScene;
-  private removePost: (() => void) | null = null;
+  private readonly ctx: CesiumContextInternals;
+  private readonly onContextLost: () => void;
+  private readonly ray = new Raycaster();
   private removePre: (() => void) | null = null;
+  private removePost: (() => void) | null = null;
+  private layerScene: Scene | null = null;
+  private hooks: FrameHooks | null = null;
+  private last = 0;
+  private width = 0;
+  private height = 0;
   private lost = false;
   private disposed = false;
-  private hooks: FrameHooks | null = null;
-  private layerScene: Scene | null = null;
-  private last = performance.now();
-  private view: { position: [number, number, number]; target: [number, number, number] } = { position: [0.6, 0.5, 1.2], target: [0, 0, 0] };
-  drawCalls = 0;
 
-  constructor(cesium: CesiumScene, map: GeoMap, readonly proxy: DepthProxy, private readonly onContextLost: () => void = () => {}) {
-    this.cesium = cesium;
+  constructor(private readonly cesium: CesiumScene, map: GeoMap, readonly proxy: DepthProxy, opts: CesiumHostOptions = {}) {
     this.ctx = (cesium as unknown as { context: CesiumContextInternals }).context;
     this.element = cesium.canvas;
-    const mode = new URLSearchParams(location.search).get("globeDepth") === "log" ? "log" : "linear";
-    this.depthEncoding = mode;
-    const gl = this.ctx._gl;
-    this.renderer = new WebGLRenderer({ canvas: cesium.canvas, context: gl, logarithmicDepthBuffer: mode === "log" });
+    this.depthEncoding = opts.depthEncoding ?? "linear";
+    this.onContextLost = opts.onContextLost ?? (() => {});
+    this.renderer = new WebGLRenderer({ canvas: cesium.canvas, context: this.ctx._gl, logarithmicDepthBuffer: this.depthEncoding === "log" });
     this.renderer.autoClear = false;
     this.renderer.setPixelRatio(1);
+    this.renderer.info.autoReset = false;
     applyLayerRendererConfig(this.renderer);
+    // RTC sync writes the matrices; afterCamera's updateMatrixWorld() must not rebuild them from position
     this.camera.matrixAutoUpdate = false;
     this.camera.matrixWorldAutoUpdate = false;
     this.sync = new RtcCameraSync(map.lon0, map.lat0, map.enu_unit_m);
     this.proxyScene.add(proxy.mesh);
     this.scene.add(this.layers);
     cesium.canvas.addEventListener("webglcontextlost", this.handleLost);
+    this.removePre = cesium.preRender.addEventListener(() => this.resyncAfter(() => {}));
+    this.removePost = cesium.postRender.addEventListener(() => this.frame());
   }
 
   private readonly handleLost = (event: Event): void => {
@@ -54,129 +85,140 @@ export class GlobeOverlay implements ViewHost {
     this.onContextLost();
   };
 
-  size(): { width: number; height: number } { return { width: this.element.clientWidth, height: this.element.clientHeight }; }
-
-  private resyncCesiumState(): void {
-    const c = this.ctx;
-    c._currentRenderState = c._defaultRenderState;
-    c._currentPassState = c._defaultPassState;
-    c._currentFramebuffer = undefined;
-  }
-
-  private syncCamera(): void {
-    this.sync.sync(this.cesium.camera, this.camera, this.sphere);
-    this.camera.matrix.decompose(this.camera.position, this.camera.quaternion, this.camera.scale);
-    this.camera.updateMatrixWorld(false);
-  }
-
-  private renderLayers(): void {
-    if (this.lost || this.disposed || !this.layerScene) return;
-    const gl = this.renderer.getContext();
-    this.renderer.resetState();
-    this.renderer.setViewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    this.renderer.clearDepth();
-    this.renderer.render(this.proxyScene, this.camera);
-    this.renderer.render(this.layerScene, this.camera);
-    this.drawCalls = this.renderer.info.render.calls;
-    this.renderer.resetState();
-    this.resyncCesiumState();
+  size(): { width: number; height: number } {
+    return { width: this.element.clientWidth, height: this.element.clientHeight };
   }
 
   start(scene: Scene, hooks: FrameHooks): void {
     this.layerScene = scene;
     this.hooks = hooks;
-    this.resizeAndNotify();
     this.last = performance.now();
-    this.removePre = this.cesium.preRender.addEventListener(() => {
-      // Data callbacks can upload textures outside postRender; restore Cesium's cache first.
-      this.renderer.resetState();
-      this.resyncCesiumState();
-    });
-    this.removePost = this.cesium.postRender.addEventListener(() => {
-      if (this.lost || this.disposed || !this.hooks) return;
-      const now = performance.now();
-      const realDt = (now - this.last) / 1000;
-      const dt = Math.min(0.1, realDt);
-      this.last = now;
-      this.hooks.beforeCamera(now, dt, realDt);
-      this.syncCamera();
-      this.hooks.afterCamera(now, dt, realDt);
-      this.renderLayers();
-      this.hooks.afterRender(now);
-    });
+    this.width = this.height = 0;
   }
 
-  private resizeAndNotify(): void {
+  private frame(): void {
+    if (this.lost || this.disposed) return;
+    const now = performance.now();
+    const realDt = (now - this.last) / 1000;
+    const dt = Math.min(0.1, realDt);
+    this.last = now;
+    this.renderer.info.reset();
+    this.trackSize();
+    this.hooks?.beforeCamera(now, dt, realDt);
+    this.sync.sync(this.cesium.camera, this.camera, this.sphere);
+    this.hooks?.afterCamera(now, dt, realDt);
+    this.resyncAfter(() => {
+      const gl = this.renderer.getContext();
+      this.renderer.setViewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      this.renderer.clearDepth();
+      this.renderer.render(this.proxyScene, this.camera);
+      this.renderer.render(this.scene, this.camera);
+      if (this.layerScene) this.renderer.render(this.layerScene, this.camera);
+    });
+    this.drawCalls = this.renderer.info.render.calls;
+    this.hooks?.afterRender(now);
+  }
+
+  /** Cesium owns the canvas size (and its pixel ratio); only tell the layers when it changed. */
+  private trackSize(): void {
     const { width, height } = this.size();
-    this.renderer.setSize(width, height, false);
-    this.camera.aspect = width / Math.max(1, height);
-    this.camera.updateProjectionMatrix();
+    if (width === this.width && height === this.height) return;
+    this.width = width;
+    this.height = height;
     this.hooks?.resize(width, height);
   }
 
+  /** Run three GL work, then put GL and Cesium's state cache back to defaults. */
+  resyncAfter(work: () => void): void {
+    if (this.lost || this.disposed) return;
+    this.renderer.resetState();
+    try {
+      work();
+    } finally {
+      this.renderer.resetState();
+      const c = this.ctx;
+      c._currentRenderState = c._defaultRenderState;
+      c._currentPassState = c._defaultPassState;
+      c._currentFramebuffer = undefined;
+    }
+  }
+
   captureOccluderDepth(target: WebGLRenderTarget, scene: Scene, hide: Object3D[]): void {
-    if (this.lost) return;
-    const volume = scene.getObjectByName("volume");
-    const hidden: Array<[Object3D, boolean]> = [];
-    if (volume) hidden.push([volume, volume.visible]), (volume.visible = false);
-    for (const object of hide) hidden.push([object, object.visible]), (object.visible = false);
-    const gl = this.renderer.getContext();
-    this.renderer.resetState();
-    this.renderer.setViewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    this.renderer.setRenderTarget(target);
-    this.renderer.clear(true, true, true);
-    this.renderer.render(this.proxyScene, this.camera);
-    this.renderer.render(scene, this.camera);
-    this.renderer.setRenderTarget(null);
-    for (const [object, visible] of hidden) object.visible = visible;
-    this.renderer.resetState();
-    this.resyncCesiumState();
+    this.resyncAfter(() => {
+      this.renderer.setRenderTarget(target);
+      this.renderer.clear(true, true, true);
+      // the proxy stands in for Cesium's terrain / ellipsoid (Cesium's own depth is not usable here)
+      this.renderer.render(this.proxyScene, this.camera);
+      withHidden(hide, () => this.renderer.render(scene, this.camera));
+      this.renderer.setRenderTarget(null);
+    });
   }
 
   raycaster(clientX: number, clientY: number): Raycaster {
     const rect = this.element.getBoundingClientRect();
-    const ray = new Raycaster();
-    ray.setFromCamera(new Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), this.camera);
-    return ray;
+    this.ray.setFromCamera(new Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), this.camera);
+    return this.ray;
   }
 
-  setCameraControl(enabled: boolean): void { this.cesium.screenSpaceCameraController.enableInputs = enabled; }
+  setCameraControl(enabled: boolean): void {
+    this.cesium.screenSpaceCameraController.enableInputs = enabled;
+  }
+
   setDrawMode(_on: boolean): void {}
-  capturePointer(id: number): void { this.element.setPointerCapture(id); }
-  releasePointer(id: number): void { if (this.element.hasPointerCapture(id)) this.element.releasePointerCapture(id); }
-  getView(): { position: [number, number, number]; target: [number, number, number] } { return this.view; }
+
+  capturePointer(id: number): void {
+    this.element.setPointerCapture(id);
+  }
+
+  releasePointer(id: number): void {
+    if (this.element.hasPointerCapture(id)) this.element.releasePointerCapture(id);
+  }
+
+  /** ENU units; the target is the point on the view ray at the camera's distance from the ENU origin. */
+  getView(): { position: [number, number, number]; target: [number, number, number] } {
+    const c = this.cesium.camera;
+    const p = this.sync.cameraEnu(c);
+    const d = Matrix4.multiplyByPointAsVector(this.sync.ecefToEnu, c.directionWC, new Cartesian3());
+    const r = Math.hypot(...p);
+    return { position: p, target: [p[0] + d.x * r, p[1] + d.y * r, p[2] + d.z * r] };
+  }
 
   setView(position: [number, number, number], target: [number, number, number]): void {
-    this.view = { position, target };
     const p = this.toEcef(position), t = this.toEcef(target);
     const direction = Cartesian3.normalize(Cartesian3.subtract(t, p, new Cartesian3()), new Cartesian3());
-    const up = new Cartesian3(this.sync.enuToEcef[8], this.sync.enuToEcef[9], this.sync.enuToEcef[10]);
-    this.cesium.camera.setView({ destination: p, orientation: { direction, up } });
+    const m = this.sync.enuToEcef; // column 2 = local up at the ENU origin
+    const up = new Cartesian3(m[8], m[9], m[10]);
+    const right = Cartesian3.normalize(Cartesian3.cross(direction, up, new Cartesian3()), new Cartesian3());
+    const trueUp = Cartesian3.cross(right, direction, new Cartesian3());
+    this.cesium.camera.setView({ destination: p, orientation: { direction, up: trueUp } });
   }
 
   private toEcef(p: [number, number, number]): Cartesian3 {
-    return Matrix4.multiplyByPoint(this.sync.enuToEcef, new Cartesian3(p[0] * this.sync.unitM, p[1] * this.sync.unitM, p[2] * this.sync.unitM), new Cartesian3());
+    const s = this.sync.unitM;
+    return Matrix4.multiplyByPoint(this.sync.enuToEcef, new Cartesian3(p[0] * s, p[1] * s, p[2] * s), new Cartesian3());
   }
 
-  benchFrames(n: number): { mean: number; median: number } {
-    const times: number[] = [];
+  /** Debug: render n full Cesium frames (globe + this overlay) synchronously, ms per frame incl. gl.finish(). */
+  benchFrames(n: number): { n: number; mean: number; median: number; p90: number } {
     const gl = this.renderer.getContext();
-    for (let i = 0; i < Math.max(0, Math.floor(n)); i++) {
+    const times: number[] = [];
+    for (let i = 0; i < n; i++) {
       const t0 = performance.now();
-      this.syncCamera();
-      this.renderLayers();
+      this.cesium.render();
       gl.finish();
       times.push(performance.now() - t0);
     }
     times.sort((a, b) => a - b);
-    return { mean: times.length ? times.reduce((a, b) => a + b, 0) / times.length : 0, median: times.length ? times[Math.floor(times.length / 2)]! : 0 };
+    const at = (q: number) => times[Math.min(times.length - 1, Math.floor(q * times.length))] ?? 0;
+    return { n, mean: times.reduce((a, b) => a + b, 0) / Math.max(1, n), median: at(0.5), p90: at(0.9) };
   }
 
+  /** Releases the host's own objects (proxy, test layer) and the three renderer; the Viewer is owned by the caller. */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.removePost?.();
     this.removePre?.();
+    this.removePost?.();
     this.element.removeEventListener("webglcontextlost", this.handleLost);
     this.layers.traverse((o) => {
       if (!(o instanceof Mesh) && !("isLineSegments" in o)) return;
@@ -190,10 +232,7 @@ export class GlobeOverlay implements ViewHost {
   }
 }
 
-export function createCesiumHost(cesium: CesiumScene, map: GeoMap, proxy: DepthProxy, onContextLost?: () => void): GlobeOverlay {
-  return new GlobeOverlay(cesium, map, proxy, onContextLost);
-}
-
+/** Private Cesium Context fields this overlay touches (no public API; recheck on upgrade). */
 interface CesiumContextInternals {
   _gl: WebGL2RenderingContext;
   _currentRenderState: unknown;

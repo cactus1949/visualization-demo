@@ -39,6 +39,8 @@ export class RtcCameraSync {
     const view = Matrix4.multiply(this.unscale, Matrix4.multiply(camera.viewMatrix, this.scaled, this.tmp), this.tmp);
     target.matrixWorldInverse.fromArray(Matrix4.toArray(view));
     target.matrixWorld.copy(target.matrixWorldInverse).invert();
+    // also as position / quaternion: layers read camera.position (volume ray origin), and with
+    // matrix(World)AutoUpdate off nothing rebuilds the matrices from these
     target.matrix.copy(target.matrixWorld);
     target.matrix.decompose(target.position, target.quaternion, target.scale);
     const c = this.cameraEnu(camera);

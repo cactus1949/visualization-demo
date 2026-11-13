@@ -124,3 +124,40 @@ export function domainSpanM(grid: GeoGrid, frame: EnuFrame): { east: number; nor
   const s = exactEnu(grid, frame, 0.5, 0, 0), n = exactEnu(grid, frame, 0.5, 1, 0);
   return { east: Math.hypot(e[0] - w[0], e[1] - w[1]), north: Math.hypot(n[0] - s[0], n[1] - s[1]) };
 }
+
+/** Ground height (ellipsoid metres) at (u, v) plus its extremes over the domain. */
+export interface GroundSampler {
+  at(u: number, v: number): number;
+  min: number;
+  max: number;
+}
+
+/**
+ * Conservative centre-ENU bounding box (units of map.enu_unit_m) of the curved data shell
+ * ground .. ground + k * top. The domain's edges sit lower in ENU z than its centre (Earth curvature,
+ * ~15-20 m at the corners here), so the box comes from a dense u, v sample of exact float64 positions;
+ * the ground extremes cover DEM bumps between samples, `marginM` covers the rest.
+ */
+export function shellBounds(
+  grid: GeoGrid,
+  map: GeoMap,
+  ground: GroundSampler | null,
+  k: number,
+  { samples = 41, marginM = 20 }: { samples?: number; marginM?: number } = {},
+): { lo: Vec3; hi: Vec3 } {
+  const frame = enuFrameAt(map.lon0, map.lat0);
+  const lo: Vec3 = [Infinity, Infinity, Infinity];
+  const hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+  const top = k * grid.top_m;
+  for (let j = 0; j < samples; j++) for (let i = 0; i < samples; i++) {
+    const u = i / (samples - 1), v = j / (samples - 1);
+    const g = ground ? ground.at(u, v) : 0;
+    const hs = ground ? [ground.min, g, g + top, ground.max + top] : [0, top];
+    for (const h of hs) {
+      const p = exactEnu(grid, frame, u, v, h);
+      for (let c = 0; c < 3; c++) { lo[c] = Math.min(lo[c]!, p[c]!); hi[c] = Math.max(hi[c]!, p[c]!); }
+    }
+  }
+  const s = map.enu_unit_m;
+  return { lo: lo.map((x) => (x - marginM) / s) as Vec3, hi: hi.map((x) => (x + marginM) / s) as Vec3 };
+}

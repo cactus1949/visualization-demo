@@ -26,3 +26,10 @@ export function sampleGrid(field: GridField, u: number, v: number): number {
   const at = (x: number, y: number) => field.values[y * field.nx + x]!;
   return (at(x0, y0) * (1 - ax) + at(x0 + 1, y0) * ax) * (1 - ay) + (at(x0, y0 + 1) * (1 - ax) + at(x0 + 1, y0 + 1) * ax) * ay;
 }
+
+/** Ground sampler for `shellBounds` (geo/mapping.ts). */
+export function groundSampler(field: GridField): { at(u: number, v: number): number; min: number; max: number } {
+  let min = Infinity, max = -Infinity;
+  for (const g of field.values) { min = Math.min(min, g); max = Math.max(max, g); }
+  return { at: (u, v) => sampleGrid(field, u, v), min, max };
+}

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { FrameHooks, ViewHost } from "./types";
 import { applyLayerRendererConfig } from "./rendererConfig";
+import { withHidden } from "./hidden";
 
 export type ThreeHostOptions = {
   initialView?: { position: [number, number, number]; target: [number, number, number] } | null;
@@ -10,13 +11,9 @@ export type ThreeHostOptions = {
 
 /** Creates the existing Three.js render host used by the atmosphere view. */
 export function createThreeHost(
-  container: HTMLElement,
+  canvas: HTMLCanvasElement,
   options: ThreeHostOptions = {},
 ): ViewHost {
-  const canvas = container instanceof HTMLCanvasElement
-    ? container
-    : container.querySelector<HTMLCanvasElement>("canvas") ?? document.createElement("canvas");
-  if (!canvas.parentElement && canvas !== container) container.appendChild(canvas);
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
@@ -89,15 +86,13 @@ export function createThreeHost(
       raf = requestAnimationFrame(frame);
     },
     captureOccluderDepth(target, sceneToRender, hide) {
-      const volume = sceneToRender.getObjectByName("volume");
-      const hidden: Array<[THREE.Object3D, boolean]> = [];
-      if (volume) hidden.push([volume, volume.visible]), (volume.visible = false);
-      for (const object of hide) hidden.push([object, object.visible]), (object.visible = false);
-      renderer.setRenderTarget(target);
-      renderer.clear(true, true, true);
-      renderer.render(sceneToRender, camera);
-      renderer.setRenderTarget(null);
-      for (const [object, visible] of hidden) object.visible = visible;
+      // same calls as the pre-ViewHost VolumeLayer.captureDepth (first two tabs stay pixel-identical)
+      withHidden(hide, () => {
+        renderer.setRenderTarget(target);
+        renderer.clear(true, true, true);
+        renderer.render(sceneToRender, camera);
+        renderer.setRenderTarget(null);
+      });
     },
     raycaster(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();
