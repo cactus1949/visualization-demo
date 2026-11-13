@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { defineConfig, type Connect, type Plugin } from "vite";
 import vue from "@vitejs/plugin-vue";
+import { viteStaticCopy } from "vite-plugin-static-copy";
 
 // Repo sample cases (data/web/<case>/) are served here; anything else under /data and /api
 // (the dated exports in $WEB_ROOT/<format>/yyyymm/yyyymmdd/) is proxied to the FastAPI service.
@@ -58,8 +59,24 @@ function dataPlugin(): Plugin {
   };
 }
 
+// Cesium's Workers / Assets / Widgets / ThirdParty are fetched at runtime from CESIUM_BASE_URL
+// (same setup as https://github.com/CesiumGS/cesium-vite-example); only the globe tab uses them.
+const cesiumSource = "node_modules/cesium/Build/Cesium";
+const cesiumBaseUrl = "cesium";
+
 export default defineConfig({
-  plugins: [vue(), dataPlugin()],
+  plugins: [
+    vue(),
+    dataPlugin(),
+    viteStaticCopy({
+      targets: ["ThirdParty", "Workers", "Assets", "Widgets"].map((dir) => ({
+        src: `${cesiumSource}/${dir}`,
+        dest: cesiumBaseUrl,
+        rename: { stripBase: 4 },
+      })),
+    }),
+  ],
+  define: { CESIUM_BASE_URL: JSON.stringify(`/${cesiumBaseUrl}`) },
   publicDir: false,
   assetsInclude: ["**/*.wasm"],
   worker: { format: "es" },

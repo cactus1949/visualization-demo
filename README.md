@@ -19,6 +19,7 @@
 | ------------------------ | ----------------------------------------------------- |
 | `pipeline/ncpipe/`       | NetCDF → 按变量配置量化 + Brotli + manifest，与渲染器无关 |
 | `pipeline/bldpipe/`      | 建筑白膜管线：裁剪、投影、拉伸、meshopt 压缩          |
+| `pipeline/geopipe/`      | 地球页地理底座：坐标映射系数、自建 DEM、每列地面高度（见 `docs/globe-geo.md`） |
 | `data/web/lowair_atmos/` | 23 个变量的 `.bin.br` 和 `manifest.json`（约 7.5 MB） |
 | `data/web/lowair_atmos_6h/` | 6 小时 7 帧：`manifest.json`（schema 4）+ `t000/` … `t006/`，每帧 23 个 `.bin.br`（合计约 39.3 MB） |
 | `data/web/buildings/`    | `buildings.glb`（约 6.4 MB）和 `buildings.json`       |
@@ -78,6 +79,8 @@ npx vite preview --port 4173 --strictPort
 ```
 
 默认打开 `data/web/lowair_atmos_6h`（不存在时自动退回单时次 `lowair_atmos`）；`?data=lowair_atmos` 强制单时次，`?t=2.5` 打开指定时刻，`?timeline=0` 隐藏时间轴。
+
+顶部第三个 tab「地球」（`?tab=globe`）用 CesiumJS，懒加载，前两个 tab 不下载 Cesium。它需要先生成地理底座（`pipeline/README.md` 的 geopipe），并在 `web/.env.local` 里写天地图 key `VITE_TIANDITU_TK=...`（参考 `web/.env.example`）。说明见 `docs/globe-geo.md`。
 
 浏览器需要支持 WebGL2 和 `EXT_color_buffer_float`（桌面端 Chrome、Edge、Firefox、Safari 17+ 都支持）。`?embed=1` 会隐藏控制面板；在 iframe 中运行时，组件会向父页面发送 `atmos:ready` 和 `atmos:probe` 消息。
 
