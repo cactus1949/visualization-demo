@@ -179,12 +179,14 @@ export class AnnotationLayer {
   }
 
   /** Debug: per-item state after the last update (ids, anchors, occlusion). */
-  debugItems(): { id: string; kind: string; occluded: boolean; onScreen: boolean; anchor: { x: number; y: number; z: number }; stemTo: { x: number; y: number; z: number } | null }[] {
+  debugItems(): { id: string; kind: string; occluded: boolean; onScreen: boolean; sx: number; sy: number; anchor: { x: number; y: number; z: number }; stemTo: { x: number; y: number; z: number } | null }[] {
     return [...this.items.values()].map((it) => ({
       id: it.id,
       kind: it.desc.kind,
       occluded: it.occluded,
       onScreen: it.onScreen,
+      sx: it.sx,
+      sy: it.sy,
       anchor: { ...it.desc.anchor },
       stemTo: it.desc.stemTo ? { ...it.desc.stemTo } : null,
     }));

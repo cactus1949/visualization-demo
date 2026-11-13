@@ -39,6 +39,7 @@ import { GlobeGround } from "../render/globeGround";
 import { cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../geo/boxEnu";
 import { exactInverse, polyInverse, type EnuFrame } from "../geo/mapping";
 import type { SectionGlobe } from "../render/sections/globe";
+import { readSectionSamples } from "../render/sections/globeDebug";
 import { terrainBlocksSight } from "../geo/lineOfSight";
 import { sampleGrid, type GridField } from "../geo/placement";
 import {
@@ -2163,7 +2164,71 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   }
 }
 
+/** Debug (globe): pending section read-back, served from afterRender so GL work stays in frame hooks. */
+let sectionProbeRequest: { points: [number, number][]; resolve: (r: unknown) => void } | null = null;
+
+// round-to-nearest half float (as the GPU stores HalfFloat targets); three's toHalfFloat truncates
+const f16round: (x: number) => number =
+  (Math as unknown as { f16round?: (x: number) => number }).f16round ?? ((x) => THREE.DataUtils.fromHalfFloat(THREE.DataUtils.toHalfFloat(x)));
+function trilinearAt(read: (i: number) => number, p: { x: number; y: number; z: number }, half: boolean): number {
+  const g = manifest.value!.grid;
+  const nx = g.nx, ny = g.ny, nz = g.nz;
+  const fx = THREE.MathUtils.clamp((p.x / domain.sx + 0.5) * (nx - 1), 0, nx - 1);
+  const fy = THREE.MathUtils.clamp((0.5 - p.z / domain.sz) * (ny - 1), 0, ny - 1);
+  const fz = THREE.MathUtils.clamp((p.y / domain.top) * nz - 0.5, 0, nz - 1);
+  const x0 = Math.min(Math.floor(fx), nx - 2), y0 = Math.min(Math.floor(fy), ny - 2), z0 = Math.min(Math.floor(fz), nz - 2);
+  const ax = fx - x0, ay = fy - y0, az = fz - z0;
+  const at = (ix: number, iy: number, iz: number) => {
+    const v = read(iz * nx * ny + iy * nx + ix);
+    return half ? f16round(v) : v;
+  };
+  let acc = 0;
+  for (const [dz, wz] of [[0, 1 - az], [1, az]] as const)
+    for (const [dy, wy] of [[0, 1 - ay], [1, ay]] as const)
+      for (const [dx, wx] of [[0, 1 - ax], [1, ax]] as const) acc += wx * wy * wz * at(x0 + dx, y0 + dy, z0 + dz);
+  return acc;
+}
+
+function runSectionProbe(points: [number, number][]): unknown {
+  if (!globeMode || !globeOpt() || !host) return null;
+  const meshes: THREE.Mesh[] = [];
+  if (hslice?.group.visible) meshes.push(hslice.mesh);
+  if (vsection?.group.visible) meshes.push(vsection.mesh);
+  if (polyline?.group.visible) meshes.push(polyline.mesh);
+  if (boxStack?.group.visible) for (const c of boxStack.slabs.children) meshes.push(c as THREE.Mesh);
+  const samples = readSectionSamples(host.renderer, host.camera, meshes, points);
+  const name = section.variable;
+  let read: ((i: number) => number) | null = null;
+  if (name === SPEED) {
+    const u = cpuPair("u"), v = cpuPair("v");
+    if (u && v) read = (i) => windAt(u, v, i)[2];
+  } else {
+    const pair = cpuPair(name);
+    if (pair) read = (i) => mixAt(pair, i);
+  }
+  const unit = globeOpt()!.map.enu_unit_m;
+  const rows = samples.map((s) => {
+    const p = { x: s.local[0], y: s.local[1], z: s.local[2] };
+    const exact = boxToEnu(p);
+    const resid = Math.hypot(exact.x - s.enu[0], exact.y - s.enu[1], exact.z - s.enu[2]) * unit * 1000;
+    const cpu = read ? trilinearAt(read, p, false) : NaN;
+    const cpuHalf = read ? trilinearAt(read, p, true) : NaN;
+    return { at: s.at, local: s.local, gpu: s.value, cpu, cpuHalf, diff: s.value - cpu, diffHalf: s.value - cpuHalf, residualMm: resid };
+  });
+  const maxAbs = (f: (r: (typeof rows)[0]) => number) => rows.reduce((m, r) => Math.max(m, Math.abs(f(r))), 0);
+  return {
+    variable: name, f16: "f16round" in Math, meshes: meshes.length, samples: rows.length,
+    maxAbsDiff: maxAbs((r) => r.diff), maxAbsDiffHalf: maxAbs((r) => r.diffHalf), maxResidualMm: maxAbs((r) => r.residualMm),
+    rows,
+  };
+}
+
 function afterRender(_now: number): void {
+  if (sectionProbeRequest) {
+    const req = sectionProbeRequest;
+    sectionProbeRequest = null;
+    try { req.resolve(runSectionProbe(req.points)); } catch (e) { req.resolve({ error: String(e) }); }
+  }
   if (!ready && (particles || globeMode)) {
     wantsDirty = true;
     ready = true;
@@ -2598,6 +2663,24 @@ function exposeApi(): void {
   if (!debugApis) return;
   Object.assign(window.__atmosApi, {
       lastProbeHit: () => lastProbeHit,
+      /** ④ globe: GPU read-back of section value / box km / placed ENU at normalised viewport points. */
+      sectionProbe: (points: [number, number][]) =>
+        new Promise((resolve) => { sectionProbeRequest = { points, resolve }; }),
+      /** ④ globe: section state for measurements (composited flags, box placement). */
+      sectionInfo: () => ({
+        kind: section.kind, enabled: section.enabled, heightM: slice.heightM, offsetKm: section.offsetKm,
+        points: section.points.map((q) => ({ ...q })), box: { ...section.box },
+        composited: {
+          height: hslice?.material.colorWrite === false, vertical: vsection?.material.colorWrite === false,
+          polyline: polyline?.material.colorWrite === false, box: boxStack?.material.colorWrite === false,
+        },
+        visible: {
+          height: Boolean(hslice?.group.visible), vertical: Boolean(vsection?.group.visible),
+          polyline: Boolean(polyline?.group.visible), box: Boolean(boxStack?.group.visible),
+        },
+        slabs: boxStack?.slabs.children.length ?? 0,
+      }),
+      sectionBoxToEnu: (p: { x: number; y: number; z: number }) => boxToEnu(p),
       /** Same pick path as a pointer move (host ray → pickTargets), at client pixel (x, y). */
       probePickAt: (x: number, y: number) => {
         pointerRay = host!.raycaster(x, y);
