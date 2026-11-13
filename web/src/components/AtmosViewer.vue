@@ -37,7 +37,7 @@ import { ShellHeightLabels, shellLabelHeights } from "../render/annotations/shel
 import { GlobeGround } from "../render/globeGround";
 import { cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../geo/boxEnu";
 import type { EnuFrame } from "../geo/mapping";
-import type { GridField } from "../geo/placement";
+import { sampleGrid, type GridField } from "../geo/placement";
 import {
   DEFAULT_PARTICLES,
   WindParticles,
@@ -2300,6 +2300,59 @@ function exposeApi(): void {
       };
     },
     hasData: (name: string) => Boolean(loaded(name)),
+    sampleCell: (name: string, ix: number, iy: number, iz = 0) => {
+      const g = manifest.value?.grid;
+      if (!g) return null;
+      const i = iz * g.nx * g.ny + iy * g.nx + ix;
+      if (name === SPEED || name === "speed" || name === "speed0") {
+        const u = cpuPair("u");
+        const v = cpuPair("v");
+        if (!u || !v) return null;
+        return windAt(u, v, i)[2];
+      }
+      const pair = cpuPair(name);
+      if (!pair) return null;
+      return mixAt(pair, i);
+    },
+    buildingBaseSamples: (count = 6) => {
+      if (!buildings || !globeOpt() || !globeFrame) return null;
+      const gv = globeOpt()!;
+      const ground = globeGroundField();
+      const k = globeK();
+      const samples: Record<string, unknown>[] = [];
+      const posList: { x: number; y: number; z: number }[] = [];
+      buildings.group.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const pos = mesh.geometry.getAttribute("position");
+        if (!pos) return;
+        const m = mesh.matrixWorld;
+        const v = new THREE.Vector3();
+        // a few corners of this batch
+        for (const i of [0, Math.floor(pos.count / 3), Math.floor((2 * pos.count) / 3)]) {
+          if (i >= pos.count) continue;
+          v.fromBufferAttribute(pos, i).applyMatrix4(m);
+          posList.push({ x: v.x, y: v.y, z: v.z });
+          if (posList.length >= 400) return;
+        }
+      });
+      // keep the lowest vertices (building bases, y is real height km)
+      posList.sort((a, b) => a.y - b.y);
+      const seen = new Set<string>();
+      for (const p of posList) {
+        if (p.y > 0.003) continue; // > 3 m, not a base
+        const u = p.x / domain.sx + 0.5;
+        const vuv = 0.5 - p.z / domain.sz;
+        const key = `${u.toFixed(3)},${vuv.toFixed(3)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const placed = placeEnuUnits(gv.grid, gv.map, globeFrame!, u, vuv, 0, k, ground);
+        const g0 = ground ? sampleGrid(ground, u, vuv) : 0;
+        samples.push({ u, v: vuv, boxY_m: p.y * 1000, groundM: g0, enuUp_m: placed[2] * gv.map.enu_unit_m });
+        if (samples.length >= count) break;
+      }
+      return samples;
+    },
     /** Percentiles of a loaded variable (subsampled), for checking what a threshold hides. */
     debugStats: (name: string) => {
       const data = name === SPEED ? speedValuesA() : loaded(name)?.data;
