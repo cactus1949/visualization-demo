@@ -24,6 +24,7 @@ export class AtmosScene {
   private readonly frame: THREE.LineSegments;
   private groundTexture: THREE.DataTexture | null = null;
   private groundFieldTexture: THREE.DataTexture | null = null;
+  private decorations = true;
 
   constructor(readonly domain: Domain) {
     this.root.name = "atmos-root";
@@ -83,10 +84,22 @@ export class AtmosScene {
     this.setTheme("dark");
   }
 
+  /** Globe tab: Cesium draws sky and ground, so no background, fog, floor, grid or frame. */
+  hideDecorations(): void {
+    this.decorations = false;
+    this.scene.background = null;
+    this.scene.fog = null;
+    this.ground.visible = false;
+    this.grid.visible = false;
+    this.frame.visible = false;
+  }
+
   setTheme(theme: Theme): void {
     const t = THEMES[theme];
-    this.scene.background = new THREE.Color(t.background);
-    this.scene.fog = new THREE.Fog(t.fog, 30, 70);
+    if (this.decorations) {
+      this.scene.background = new THREE.Color(t.background);
+      this.scene.fog = new THREE.Fog(t.fog, 30, 70);
+    }
     if (!this.groundTexture) this.ground.material.color.set(t.ground);
     (this.grid.material as THREE.LineBasicMaterial).color.set(t.grid);
     (this.frame.material as THREE.LineBasicMaterial).color.set(t.frame);

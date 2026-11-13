@@ -20,10 +20,14 @@ export interface ViewHost {
   readonly camera: THREE.PerspectiveCamera;
   /** Canvas receiving view input events. */
   readonly element: HTMLCanvasElement;
+  /** How occluder depth is encoded: "linear" (NDC z) or "log" (three's logarithmicDepthBuffer). */
+  readonly depthEncoding: "linear" | "log";
   /** Returns the canvas size in CSS pixels. */
   size(): { width: number; height: number };
   /** Starts the host loop for a scene and its layer hooks. */
   start(scene: THREE.Scene, hooks: FrameHooks): void;
+  /** Renders occluder depth into `target` (scene minus `hide`; a Cesium host adds its terrain proxy). */
+  captureOccluderDepth(target: THREE.WebGLRenderTarget, scene: THREE.Scene, hide: THREE.Object3D[]): void;
   /** Creates a ray through a client-space pointer location. */
   raycaster(clientX: number, clientY: number): THREE.Raycaster;
   /** Enables or disables orbit camera controls. */

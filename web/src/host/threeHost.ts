@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { FrameHooks, ViewHost } from "./types";
+import { applyLayerRendererConfig } from "./rendererConfig";
+import { withHidden } from "./hidden";
 
 export type ThreeHostOptions = {
   initialView?: { position: [number, number, number]; target: [number, number, number] } | null;
@@ -17,9 +19,7 @@ export function createThreeHost(
     antialias: true,
     powerPreference: "high-performance",
   });
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NeutralToneMapping;
-  renderer.toneMappingExposure = 1.0;
+  applyLayerRendererConfig(renderer);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
@@ -75,6 +75,7 @@ export function createThreeHost(
     renderer,
     camera,
     element: canvas,
+    depthEncoding: "linear",
     size,
     start(nextScene, nextHooks) {
       scene = nextScene;
@@ -83,6 +84,15 @@ export function createThreeHost(
       resizeObserver = new ResizeObserver(resize);
       resizeObserver.observe(canvas);
       raf = requestAnimationFrame(frame);
+    },
+    captureOccluderDepth(target, sceneToRender, hide) {
+      // same calls as the pre-ViewHost VolumeLayer.captureDepth (first two tabs stay pixel-identical)
+      withHidden(hide, () => {
+        renderer.setRenderTarget(target);
+        renderer.clear(true, true, true);
+        renderer.render(sceneToRender, camera);
+        renderer.setRenderTarget(null);
+      });
     },
     raycaster(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();

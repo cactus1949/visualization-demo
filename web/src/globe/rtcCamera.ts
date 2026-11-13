@@ -21,7 +21,7 @@ export class RtcCameraSync {
   private readonly tmp = new Matrix4();
   private readonly camEnu = new Cartesian3();
 
-  constructor(lon0: number, lat0: number, private readonly unitM: number, private readonly minNearM = 1) {
+  constructor(lon0: number, lat0: number, readonly unitM: number, private readonly minNearM = 1) {
     this.enuToEcef = Transforms.eastNorthUpToFixedFrame(Cartesian3.fromDegrees(lon0, lat0, 0));
     this.ecefToEnu = Matrix4.inverseTransformation(this.enuToEcef, new Matrix4());
     this.scaled = Matrix4.multiplyByUniformScale(this.enuToEcef, unitM, new Matrix4());
@@ -39,6 +39,10 @@ export class RtcCameraSync {
     const view = Matrix4.multiply(this.unscale, Matrix4.multiply(camera.viewMatrix, this.scaled, this.tmp), this.tmp);
     target.matrixWorldInverse.fromArray(Matrix4.toArray(view));
     target.matrixWorld.copy(target.matrixWorldInverse).invert();
+    // also as position / quaternion: layers read camera.position (volume ray origin), and with
+    // matrix(World)AutoUpdate off nothing rebuilds the matrices from these
+    target.matrix.copy(target.matrixWorld);
+    target.matrix.decompose(target.position, target.quaternion, target.scale);
     const c = this.cameraEnu(camera);
     const d = Math.hypot(c[0] - sphere.center[0], c[1] - sphere.center[1], c[2] - sphere.center[2]);
     const frustum = camera.frustum as PerspectiveFrustum;

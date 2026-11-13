@@ -22,7 +22,7 @@ import {
 import { FETCH_WINDOW_AHEAD, windowFrames } from "../state/fetchWindow";
 import { canShowFrames, planOf, type LayerNeed } from "../state/openVariables";
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
-import { VolumeLayer } from "../render/volume";
+import { VolumeLayer, type CurvedVolumeOptions } from "../render/volume";
 import { DEFAULT_CUTS, clampCuts, cutBounds, type CutState } from "../render/cuts";
 import { PolylineSection } from "../render/sections/polyline";
 import { AxisSection } from "../render/sections/planes";
@@ -82,14 +82,20 @@ const props = withDefaults(defineProps<{
   /** export format = data directory under $WEB_ROOT (see formats/*.ts) */
   format?: FormatDef;
   initialView?: ViewSnapshot | null;
-  createHost?: (canvas: HTMLCanvasElement) => ViewHost;
+  /** Receives the viewer's container; the host picks or creates its own input / render element. */
+  createHost?: (container: HTMLElement) => ViewHost;
+  /** Globe tab: the volume runs in curved-shell mode; box-only layers are off (see docs/globe-geo.md). */
+  globeVolume?: CurvedVolumeOptions | null;
 }>(), {
   manifestUrl: "",
   showPanel: true,
   format: () => ({ id: "current", label: "当前编码", order: 0, fallbackCases: ["lowair_atmos_6h", "lowair_atmos"] }),
   initialView: null,
   createHost: undefined,
+  globeVolume: null,
 });
+const globeMode = props.globeVolume != null;
+const viewerRoot = ref<HTMLDivElement | null>(null);
 const emit = defineEmits<{
   ready: [{ backend: string }];
   probe: [Record<string, unknown>];
@@ -205,6 +211,15 @@ const layers = reactive({
   probe: false,
   probeFollowMouse: false,
 });
+if (globeMode) {
+  // temporarily box-only on the globe: sections ④, particles ⑤, probe / buildings / ground ⑥
+  layers.buildings = false;
+  layers.ground = false;
+  layers.particles = false;
+  layers.volume = true;
+  layers.probe = false;
+  view.exaggeration = 1;
+}
 const particleParams = reactive<ParticleParams>({ ...DEFAULT_PARTICLES });
 const slice = reactive({
   enabled: false,
@@ -1054,8 +1069,12 @@ function syncVolumeSlices(): void {
 function updateComposite(): void { syncVolumeSlices(); }
 
 
+function markReadyStatus(): void {
+  if (status.value === "加载数据清单…") status.value = "风场就绪";
+}
+
 function ensureParticles(): void {
-  if (particles || !host || !manifest.value || !timeFields?.wind.valid) return;
+  if (globeMode || particles || !host || !manifest.value || !timeFields?.wind.valid) return;
   const wMeta = manifest.value.variables.w;
   if (!wMeta) return;
   // The particles sample the blended "current time" wind target; it never needs rebinding.
@@ -1082,13 +1101,14 @@ function ensureParticles(): void {
   );
   atmos.root.add(particles.object);
   speedRange.value = colourSpeed;
-  status.value = "风场就绪";
+  markReadyStatus();
 }
 
-/** Objects excluded from the volume depth pre-pass. Field meshes remain visible when opaque
+/** Objects excluded from the volume depth pre-pass (the volume itself first). Field meshes remain visible when opaque
  * enough to occlude the volume; particles and visual helpers must never write occluder depth. */
 function updateDepthOccluders(): void {
   depthOccluders.length = 0;
+  if (volume) depthOccluders.push(volume.mesh);
   if (particles) depthOccluders.push(particles.object);
   if (hslice) {
     depthOccluders.push(hslice.mesh, hslice.outline);
@@ -1324,6 +1344,7 @@ function stepTime(now: number, dt: number): void {
     updateSlice();
     updateSection();
     updateVolume();
+    if (globeMode) markReadyStatus();
   }
   syncWants(now);
   // CPU readers follow the displayed instant: 10 Hz probe, 4 Hz ground / unfolded while
@@ -1908,7 +1929,7 @@ function beforeCamera(now: number, dt: number, realDt: number): void {
 }
 
 function afterCamera(_now: number, dt: number, _realDt: number): void {
-  atmos.root.scale.y = view.exaggeration;
+  atmos.root.scale.y = globeMode ? 1 : view.exaggeration;
   atmos.root.updateMatrixWorld();
   host!.camera.updateMatrixWorld();
   if (boxStack?.group.visible) boxStack.sortSlabs(host!.camera, atmos.root);
@@ -1923,13 +1944,15 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   }
   if (volume?.mesh.visible) {
     updateDepthOccluders();
-    volume.captureDepth(host!.renderer, atmos.scene, host!.camera, depthOccluders);
+    volume.resize(host!.renderer);
+    host!.captureOccluderDepth(volume.depthTarget, atmos.scene, depthOccluders);
+    volume.markDepthValid();
     volume.update(host!.camera, atmos.root, host!.renderer);
   }
 }
 
 function afterRender(_now: number): void {
-  if (!ready && particles) {
+  if (!ready && (particles || globeMode)) {
     wantsDirty = true;
     ready = true;
     performance.mark("atmos:first-frame");
@@ -1940,8 +1963,8 @@ function afterRender(_now: number): void {
       frames: tl.frames,
       backend: "WebGL2",
       gpu: gpu.value,
-      particlePath: particles.label,
-      particleCount: particles.count,
+      particlePath: particles?.label ?? "",
+      particleCount: particles?.count ?? 0,
       fps: fps.value,
       buildings: buildings?.meta?.count ?? 0,
     };
@@ -2084,6 +2107,7 @@ function exposeApi(): void {
       if (p.cutLowAlpha !== undefined) layers.cutLowAlpha = Boolean(p.cutLowAlpha);
       if (p.cutLowThreshold !== undefined) layers.cutLowThreshold = Number(p.cutLowThreshold);
     },
+    setVolumeSteps: (steps: number) => volume?.setSteps(Number(steps)),
     setCamera: (pos: [number, number, number], target: [number, number, number]) => {
       host!.setView(pos, target);
     },
@@ -2341,6 +2365,18 @@ function exposeApi(): void {
   };
 }
 
+/** The five input listeners start() puts on host.element (removed symmetrically on unmount). */
+let pointerTarget: HTMLElement | null = null;
+function pointerListeners(): Array<[string, EventListener]> {
+  return [
+    ["pointerdown", onPointerDown as EventListener],
+    ["pointermove", onPointerMove as EventListener],
+    ["pointerup", onPointerUp as EventListener],
+    ["contextmenu", onContextMenu as EventListener],
+    ["dblclick", onDoubleClick as EventListener],
+  ];
+}
+
 async function start(): Promise<void> {
   const t0 = performance.now();
   performance.mark("atmos:start");
@@ -2394,10 +2430,9 @@ async function start(): Promise<void> {
     if (requestedAt[n] === undefined) requestedAt[n] = performance.now();
   }
 
-  const element = canvas.value!;
   host = props.createHost
-    ? props.createHost(element)
-    : createThreeHost(element, {
+    ? props.createHost(viewerRoot.value!)
+    : createThreeHost(canvas.value!, {
       ...(props.initialView ? {
         initialView: { position: props.initialView.camera, target: props.initialView.target },
       } : {}),
@@ -2413,7 +2448,8 @@ async function start(): Promise<void> {
   }
 
   atmos = new AtmosScene(domain);
-  annotations = new AnnotationLayer(element.parentElement ?? element, atmos.root);
+  if (globeMode) atmos.hideDecorations();
+  annotations = new AnnotationLayer(host!.element.parentElement ?? host!.element, atmos.root);
   probeMarker = new ProbeMarker(annotations, domain.top);
   hslice = new HorizontalSlice(domain);
   vsection = new AxisSection(domain, "lon");
@@ -2421,7 +2457,10 @@ async function start(): Promise<void> {
   boxStack = new BoxStack(domain, manifest.value.grid.levels_m);
   const initialSize = host!.size();
   boxStack.setResolution(initialSize.width, initialSize.height);
-  volume = new VolumeLayer(domain);
+  volume = new VolumeLayer(domain, props.globeVolume);
+  volume.setDepthEncoding(host!.depthEncoding);
+  // globe only: `?volSteps=` overrides the ray-march step count (box path keeps 128)
+  if (globeMode && query.get("volSteps")) volume.setSteps(Number(query.get("volSteps")));
   hslice.group.visible = false;
   vsection.group.visible = false;
   volume.mesh.visible = false;
@@ -2435,17 +2474,14 @@ async function start(): Promise<void> {
   if (props.initialView) {
     if (props.createHost) host!.setView(props.initialView.camera, props.initialView.target);
     view.exaggeration = props.initialView.exaggeration;
-  } else {
+  } else if (!globeMode) {
     setView("overview");
   }
   const el = host!.element;
-  el.addEventListener("pointerdown", onPointerDown);
-  el.addEventListener("pointermove", onPointerMove);
-  el.addEventListener("pointerup", onPointerUp);
-  el.addEventListener("contextmenu", onContextMenu);
+  pointerTarget = el;
+  for (const [name, listener] of pointerListeners()) el.addEventListener(name, listener);
   window.addEventListener("keydown", onDrawKey);
   window.addEventListener("keydown", onTimeKey);
-  el.addEventListener("dblclick", onDoubleClick);
   exposeApi();
   updateGround();
   host!.start(atmos.scene, { beforeCamera, afterCamera, afterRender, resize });
@@ -2766,11 +2802,24 @@ function overRange(name: string, lo: number, hi: number): { overLow: boolean; ov
   return { overLow: st.data_min < lo - eps, overHigh: st.data_max > hi + eps };
 }
 
-defineExpose({ snapshot });
+/** Globe tab: terrain or exaggeration changed (shared uniforms are already updated). */
+function refreshShell(): void {
+  volume?.refreshShell();
+}
+
+/** Globe tab debug: the curved volume's ENU box and step count. */
+function globeVolumeInfo(): { box: { lo: number[]; hi: number[] } | null; steps: number; visible: boolean } {
+  return { box: volume?.shellBox() ?? null, steps: volume?.steps ?? 0, visible: volume?.mesh.visible ?? false };
+}
+
+defineExpose({ snapshot, refreshShell, globeVolumeInfo });
 
 onMounted(() => void start());
 onBeforeUnmount(() => {
   disposed = true;
+  // the Cesium canvas outlives this component: remove exactly what start() added
+  if (pointerTarget) for (const [name, listener] of pointerListeners()) pointerTarget.removeEventListener(name, listener);
+  pointerTarget = null;
   window.removeEventListener("keydown", onDrawKey);
   window.removeEventListener("keydown", onTimeKey);
   store?.dispose();
@@ -2789,8 +2838,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="viewer" :class="view.theme">
-    <canvas ref="canvas" class="canvas" />
+  <div ref="viewerRoot" class="viewer" :class="[view.theme, { globe: globeMode }]">
+    <canvas v-if="!globeMode" ref="canvas" class="canvas" />
 
     <div class="hud">
       <b>天津低空三维风场</b>
@@ -2860,11 +2909,12 @@ onBeforeUnmount(() => {
         </div>
         <button class="icon" title="收起" @click="panelOpen = false">×</button>
       </div>
+      <p v-if="globeMode" class="panel-warn">地球页暂时关闭剖面、粒子、探针和建筑（④/⑤/⑥ 接入后恢复）</p>
 
       <details open>
         <summary>图层</summary>
         <label class="row"
-          ><input v-model="layers.buildings" type="checkbox" />建筑白膜
+          ><input v-model="layers.buildings" type="checkbox" :disabled="globeMode" />建筑白膜
           <small>{{ buildingsInfo }}</small></label
         >
         <label v-if="layers.buildings" class="slider"
@@ -2886,7 +2936,7 @@ onBeforeUnmount(() => {
           />
         </label>
         <label class="row"
-          ><input v-model="layers.ground" type="checkbox" />地面
+          ><input v-model="layers.ground" type="checkbox" :disabled="globeMode" />地面
           <select v-model="layers.groundVar">
             <option v-for="v in variables2D" :key="v.name" :value="v.name">{{ v.label }}</option>
           </select></label
@@ -2909,9 +2959,9 @@ onBeforeUnmount(() => {
           />
         </div>
         <label class="row"
-          ><input v-model="layers.particles" type="checkbox" />风粒子（GPGPU 流线）</label
+          ><input v-model="layers.particles" type="checkbox" :disabled="globeMode" />风粒子（GPGPU 流线）</label
         >
-        <label class="row"><input v-model="layers.probe" type="checkbox" />探针</label>
+        <label class="row"><input v-model="layers.probe" type="checkbox" :disabled="globeMode" />探针</label>
         <label v-if="layers.probe" class="row"
           ><input v-model="layers.probeFollowMouse" type="checkbox" />跟随鼠标</label
         >
@@ -2979,7 +3029,7 @@ onBeforeUnmount(() => {
         </template>
       </details>
 
-      <details open>
+      <details v-if="!globeMode" open>
         <summary>
           粒子样式 <em>{{ particleParams.count.toLocaleString() }}</em>
         </summary>
@@ -3080,7 +3130,7 @@ onBeforeUnmount(() => {
         </div>
       </details>
 
-      <details open>
+      <details v-if="!globeMode" open>
         <summary>
           剖面 <em>{{ section.enabled ? SECTION_KIND_LABELS[section.kind] : "关" }}</em>
         </summary>
@@ -3180,11 +3230,11 @@ onBeforeUnmount(() => {
 
       <details>
         <summary>视图</summary>
-        <label class="slider"
+        <label v-if="!globeMode" class="slider"
           >垂直夸张 {{ view.exaggeration.toFixed(1) }}×
           <input v-model.number="view.exaggeration" type="range" min="1" max="10" step="0.1"
         /></label>
-        <label class="row"><input v-model="view.shadows" type="checkbox" />建筑阴影</label>
+        <label v-if="!globeMode" class="row"><input v-model="view.shadows" type="checkbox" />建筑阴影</label>
         <label class="row"
           >主题
           <select v-model="view.theme">
@@ -3192,7 +3242,7 @@ onBeforeUnmount(() => {
             <option value="light">浅色</option>
           </select></label
         >
-        <div class="buttons">
+        <div v-if="!globeMode" class="buttons">
           <button @click="setView('overview')">总览</button>
           <button @click="setView('close')">近景</button>
           <button @click="setView('top')">俯视</button>
@@ -3240,6 +3290,19 @@ onBeforeUnmount(() => {
     "PingFang SC",
     "Microsoft YaHei",
     sans-serif;
+}
+/* globe tab: Cesium's canvas sits underneath; only the overlays take input */
+.viewer.globe {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.viewer.globe .hud,
+.viewer.globe .legends,
+.viewer.globe .panel,
+.viewer.globe .open-panel,
+.viewer.globe .timeline {
+  pointer-events: auto;
 }
 .viewer.light {
   --card: rgba(250, 252, 255, 0.82);

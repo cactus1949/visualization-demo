@@ -4,8 +4,22 @@ import { GLSL_DOMAIN, domainUniforms, type Domain } from "./fields";
 import { GLSL_LOW_ALPHA, type ScalarBinding } from "./slices";
 import type { CompositeSurface } from "./sections/composite";
 import { type CutState, cutBounds } from "./cuts";
+import { GEO_GROUND_GLSL, geoInverseGlsl, type GeoUniforms } from "../globe/geoShader";
+import { shellBounds, type GeoGrid, type GeoMap } from "../geo/mapping";
+import { groundSampler, type GridField } from "../geo/placement";
 
 const MAX_SURFACES = 16;
+
+/** Curved-shell (globe) mode: root-local space is centre-ENU in units of map.enu_unit_m. */
+export type CurvedVolumeOptions = {
+  map: GeoMap;
+  grid: GeoGrid;
+  ground: GridField;
+  /** shared with the other globe layers (terrain / k live here) */
+  geo: GeoUniforms;
+};
+
+export type DepthEncoding = "linear" | "log";
 
 const vertexShader = /* glsl */ `
 uniform mat4 uRootInverse;
@@ -234,20 +248,127 @@ void main() {
 }
 `;
 
+/**
+ * Curved-shell variant (globe tab). The ray is straight in centre-ENU; each sample goes back to
+ * grid space with the inverse polynomial, AGL = (h - terrain * g(u, v)) / k, and is then sampled
+ * with the same node / cell convention, filter, threshold, low-alpha onset and colour map as the box.
+ * Per-step alpha uses the step length in un-exaggerated km (vertical part divided by k), matching
+ * the box path whose root-local km are also un-exaggerated.
+ */
+function curvedFragmentShader(map: GeoMap): string {
+  return /* glsl */ `
+precision highp float;
+precision highp sampler3D;
+${geoInverseGlsl(map)}
+${GEO_GROUND_GLSL}
+${GLSL_LOW_ALPHA}
+uniform vec3 uGridN;
+uniform sampler3D uField;
+uniform sampler2D uColormap;
+uniform float uGeoTop;
+uniform vec3 uBoxLo;
+uniform vec3 uBoxHi;
+uniform vec3 uCameraLocal;
+uniform float uMin;
+uniform float uMax;
+uniform float uFilterMin;
+uniform float uFilterMax;
+uniform float uFilterEnable;
+uniform float uThreshold;
+uniform float uOpacity;
+uniform float uSteps;
+uniform vec3 uCutLo;
+uniform vec3 uCutHi;
+uniform sampler2D uDepth;
+uniform float uDepthValid;
+uniform float uDepthEncoding;
+uniform float uLogDepthBufFC;
+uniform vec2 uResolution;
+uniform mat4 uInvProjection;
+uniform mat4 uInvView;
+uniform mat4 uRootInverse;
+in vec3 vWorld;
+out vec4 outColor;
+
+vec2 hitBox(vec3 o, vec3 d, vec3 lo, vec3 hi) {
+  vec3 inv = 1.0 / d;
+  vec3 a = (lo - o) * inv, b = (hi - o) * inv;
+  vec3 mn = min(a, b), mx = max(a, b);
+  return vec2(max(max(mn.x, mn.y), mn.z), min(min(mx.x, mx.y), mx.z));
+}
+// (u, v) node coordinates and r = AGL / top, as localToTex in fields.ts
+vec3 shellToTex(vec2 uv, float r) {
+  return vec3((uv * (uGridN.xy - 1.0) + 0.5) / uGridN.xy, r);
+}
+// Occluder depth -> view-space point. linear: NDC z = d * 2 - 1. log: three's logdepthbuf,
+// gl_FragDepth = log2(1 + w) * FC / 2 with FC = 2 / log2(far + 1), so w = 2^(2 d / FC) - 1.
+vec3 depthToView(vec2 uv, float d) {
+  if (uDepthEncoding > 0.5) {
+    float w = exp2(2.0 * d / uLogDepthBufFC) - 1.0;
+    vec4 far = uInvProjection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+    vec3 dir = far.xyz / far.w;
+    return dir * (w / -dir.z);
+  }
+  vec4 p = uInvProjection * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  return p.xyz / p.w;
+}
+
+void main() {
+  vec3 o = uCameraLocal;
+  vec3 dir = normalize((uRootInverse * vec4(vWorld, 1.0)).xyz - o);
+  vec2 hit = hitBox(o, dir, uBoxLo, uBoxHi);
+  float t0 = max(hit.x, 0.0), tEnd = hit.y;
+  if (uDepthValid > 0.5) {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    float d = texture(uDepth, uv).r;
+    if (d < 1.0) {
+      vec3 hitLocal = (uRootInverse * (uInvView * vec4(depthToView(uv, d), 1.0))).xyz;
+      tEnd = min(tEnd, dot(hitLocal - o, dir));
+    }
+  }
+  if (t0 >= tEnd) discard;
+  float dt = (tEnd - t0) / max(uSteps, 1.0);
+  float stepKm = dt * length(vec3(dir.xy, dir.z / max(uGeoK, 1e-6))) * ${(map.enu_unit_m / 1000).toFixed(6)};
+  float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  vec4 acc = vec4(0.0);
+  for (int i = 0; i < 1024; i++) {
+    if (float(i) >= uSteps || acc.a > 0.97) break;
+    vec3 uvh = geoInverse(o + dir * (t0 + (float(i) + jit) * dt));
+    if (uvh.x < uCutLo.x || uvh.x > uCutHi.x || uvh.y < uCutLo.z || uvh.y > uCutHi.z) continue;
+    float r = (uvh.z * 1e4 - uGeoTerrain * geoGround(uvh.xy)) / (uGeoK * uGeoTop);
+    if (r < uCutLo.y || r > uCutHi.y) continue;
+    float v = texture(uField, shellToTex(uvh.xy, r)).r;
+    if (isnan(v)) continue;
+    if (uFilterEnable > 0.5 && (v < uFilterMin - 1e-6 || v > uFilterMax + 1e-6)) continue;
+    float n = clamp((v - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
+    if (n < uThreshold) continue;
+    vec3 c = texture(uColormap, vec2(n, 0.5)).rgb;
+    float a = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * stepKm * 6.0;
+    acc.rgb += (1.0 - acc.a) * a * c;
+    acc.a += (1.0 - acc.a) * a;
+  }
+  if (acc.a < 0.003) discard;
+  outColor = vec4(acc.rgb / max(acc.a, 1e-8), acc.a);
+}`;
+}
+
 export class VolumeLayer {
   readonly mesh: THREE.Mesh;
   readonly material: THREE.ShaderMaterial;
-  private readonly depthTarget: THREE.WebGLRenderTarget;
+  readonly depthTarget: THREE.WebGLRenderTarget;
   private readonly inverse = new THREE.Matrix4();
   private readonly invProjection = new THREE.Matrix4();
   private readonly invView = new THREE.Matrix4();
-  private hiddenVisibility: boolean[] = [];
   private depthWidth = 1;
   private depthHeight = 1;
   private domain: Domain;
+  /** null = box mode (first two tabs) */
+  private readonly curved: CurvedVolumeOptions | null;
+  private groundStats: ReturnType<typeof groundSampler> | null = null;
 
-  constructor(domain: Domain) {
+  constructor(domain: Domain, curved: CurvedVolumeOptions | null = null) {
     this.domain = domain;
+    this.curved = curved;
     const uniforms: Record<string, THREE.IUniform> = {
       ...domainUniforms(domain),
       uField: { value: null },
@@ -273,7 +394,19 @@ export class VolumeLayer {
       uInvProjection: { value: new THREE.Matrix4() },
       uInvView: { value: new THREE.Matrix4() },
       uRootInverse: { value: new THREE.Matrix4() },
+      uDepthEncoding: { value: 0 },
+      uLogDepthBufFC: { value: 1 },
     };
+    if (curved) {
+      // shared uniform objects: terrain / k written once by the globe reach every layer
+      Object.assign(uniforms, curved.geo, {
+        uGeoTop: { value: curved.grid.top_m },
+        uBoxLo: { value: new THREE.Vector3() },
+        uBoxHi: { value: new THREE.Vector3() },
+      });
+      uniforms.uCutLo.value.set(0, 0, 0);
+      uniforms.uCutHi.value.set(1, 1, 1);
+    }
     for (const n of [
       "Enabled",
       "Kind",
@@ -296,14 +429,16 @@ export class VolumeLayer {
     this.material = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
       vertexShader,
-      fragmentShader,
+      fragmentShader: curved ? curvedFragmentShader(curved.map) : fragmentShader,
       uniforms,
       transparent: true,
       side: THREE.BackSide,
       depthWrite: false,
       depthTest: false,
     });
-    const box = new THREE.BoxGeometry(domain.sx, domain.top, domain.sz).translate(0, domain.top / 2, 0);
+    const box = curved
+      ? new THREE.BoxGeometry(1, 1, 1)
+      : new THREE.BoxGeometry(domain.sx, domain.top, domain.sz).translate(0, domain.top / 2, 0);
     this.mesh = new THREE.Mesh(box, this.material);
     this.mesh.renderOrder = 5;
     this.mesh.name = "volume";
@@ -318,6 +453,33 @@ export class VolumeLayer {
     this.depthTarget.depthTexture.minFilter = THREE.NearestFilter;
     this.depthTarget.depthTexture.magFilter = THREE.NearestFilter;
     this.material.uniforms.uDepth.value = this.depthTarget.depthTexture;
+    if (curved) this.refreshShell();
+  }
+
+  /** Curved mode: rebuild the bounding box after a terrain or exaggeration change (uniforms are shared). */
+  refreshShell(): void {
+    const c = this.curved;
+    if (!c) return;
+    const terrain = c.geo.uGeoTerrain.value > 0.5;
+    const b = shellBounds(c.grid, c.map, terrain ? (this.groundStats ??= groundSampler(c.ground)) : null, c.geo.uGeoK.value);
+    const lo = new THREE.Vector3(...b.lo), hi = new THREE.Vector3(...b.hi);
+    const u = this.material.uniforms;
+    u.uBoxLo.value.copy(lo);
+    u.uBoxHi.value.copy(hi);
+    const size = hi.clone().sub(lo), mid = hi.clone().add(lo).multiplyScalar(0.5);
+    this.mesh.geometry.dispose();
+    this.mesh.geometry = new THREE.BoxGeometry(size.x, size.y, size.z).translate(mid.x, mid.y, mid.z);
+  }
+
+  /** Curved-mode box in ENU units (debug / measurements). */
+  shellBox(): { lo: number[]; hi: number[] } | null {
+    if (!this.curved) return null;
+    const u = this.material.uniforms;
+    return { lo: (u.uBoxLo.value as THREE.Vector3).toArray(), hi: (u.uBoxHi.value as THREE.Vector3).toArray() };
+  }
+
+  get steps(): number {
+    return this.material.uniforms.uSteps.value as number;
   }
 
   /** Last colour mapping handed to the raymarcher (for debug comparisons). */
@@ -341,6 +503,18 @@ export class VolumeLayer {
 
   /** Cuts shrink the raymarched volume only; the mesh stays the full domain so sections still composite outside the cut. */
   setCuts(cuts: CutState): void {
+    if (this.curved) {
+      // (u, AGL fraction, v); box z runs north -> south, v runs south -> north
+      const x0 = Math.min(cuts.x[0], cuts.x[1]);
+      const x1 = Math.max(cuts.x[0], cuts.x[1]);
+      const y0 = Math.min(cuts.y[0], cuts.y[1]);
+      const y1 = Math.max(cuts.y[0], cuts.y[1]);
+      const z0 = 1 - Math.max(cuts.z[0], cuts.z[1]);
+      const z1 = 1 - Math.min(cuts.z[0], cuts.z[1]);
+      this.material.uniforms.uCutLo.value.set(x0, y0, z0);
+      this.material.uniforms.uCutHi.value.set(x1, y1, z1);
+      return;
+    }
     const b = cutBounds(this.domain, cuts);
     this.material.uniforms.uCutLo.value.copy(b.lo);
     this.material.uniforms.uCutHi.value.copy(b.hi);
@@ -398,20 +572,15 @@ export class VolumeLayer {
     this.material.uniforms.uResolution.value.set(w, h);
   }
 
-  captureDepth(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera, hide: THREE.Object3D[]): void {
-    this.resize(renderer);
-    const vis = this.mesh.visible;
-    this.mesh.visible = false;
-    for (let i = 0; i < hide.length; i++) {
-      this.hiddenVisibility[i] = hide[i].visible;
-      hide[i].visible = false;
-    }
-    renderer.setRenderTarget(this.depthTarget);
-    renderer.clear(true, true, true);
-    renderer.render(scene, camera);
-    renderer.setRenderTarget(null);
-    for (let i = 0; i < hide.length; i++) hide[i].visible = this.hiddenVisibility[i];
-    this.mesh.visible = vis;
+  setSteps(steps: number): void {
+    this.material.uniforms.uSteps.value = THREE.MathUtils.clamp(Math.round(steps), 1, 512);
+  }
+
+  setDepthEncoding(mode: DepthEncoding): void {
+    this.material.uniforms.uDepthEncoding.value = mode === "log" ? 1 : 0;
+  }
+
+  markDepthValid(): void {
     this.material.uniforms.uDepthValid.value = 1;
   }
 
@@ -426,6 +595,10 @@ export class VolumeLayer {
     u.uInvView.value.copy(this.invView);
     u.uResolution.value.set(renderer.domElement.width, renderer.domElement.height);
     u.uDepth.value = this.depthTarget.depthTexture;
+    // three's logdepthbuf constant for the current far plane (only read when uDepthEncoding = log)
+    if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
+      u.uLogDepthBufFC.value = 2 / Math.log2((camera as THREE.PerspectiveCamera).far + 1);
+    }
   }
 
   dispose(): void {
