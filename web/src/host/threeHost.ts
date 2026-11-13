@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { FrameHooks, ViewHost } from "./types";
-import { applyLayerRendererConfig } from "./rendererConfig";
+import { applyLayerRendererConfig, beginLayerFrame } from "./rendererConfig";
 import { withHidden } from "./hidden";
 
 export type ThreeHostOptions = {
@@ -62,6 +62,7 @@ export function createThreeHost(
     const realDt = (now - last) / 1000;
     const dt = Math.min(0.1, realDt);
     last = now;
+    beginLayerFrame(renderer);
     hooks.beforeCamera(now, dt, realDt);
     controls.update();
     hooks.afterCamera(now, dt, realDt);
