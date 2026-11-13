@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { geoPlaceGlsl, type GeoUniforms } from "../globe/geoShader";
+import type { GeoMap } from "../geo/mapping";
 
 export interface BuildingsMeta {
   count: number;
@@ -37,6 +39,7 @@ export class Buildings {
     uTintStrength: { value: number };
   } | null = null;
   private shadows = true;
+  private globe: { map: GeoMap; geo: GeoUniforms } | null = null;
 
   constructor() {
     this.group.name = "buildings";
@@ -50,15 +53,39 @@ export class Buildings {
     // cool tint towards the base so dense blocks keep their silhouettes.
     this.material.onBeforeCompile = (shader) => {
       shader.uniforms.uExag = this.exaggeration;
+      const globe = this.globe;
       shader.vertexShader = shader.vertexShader
         .replace(
           "#include <common>",
-          "#include <common>\nvarying float vWorldY;\nvarying vec2 vFieldUv;\nuniform vec2 uFieldDomain;",
+          globe
+            ? `#include <common>
+varying float vWorldY;
+varying vec2 vFieldUv;
+uniform vec2 uFieldDomain;
+${geoPlaceGlsl(globe.map)}`
+            : "#include <common>\nvarying float vWorldY;\nvarying vec2 vFieldUv;\nuniform vec2 uFieldDomain;",
+        )
+        .replace(
+          "#include <project_vertex>",
+          globe
+            ? `vec3 boxKm = (modelMatrix * vec4(transformed, 1.0)).xyz;
+vec3 uvAgl = vec3(boxKm.x / max(uFieldDomain.x, 1e-3) + 0.5, 0.5 - boxKm.z / max(uFieldDomain.y, 1e-3), boxKm.y * 1000.0);
+vec3 enu = geoPlace(uvAgl);
+vWorldY = boxKm.y;
+vFieldUv = uvAgl.xy;
+vec4 mvPosition = viewMatrix * vec4(enu, 1.0);
+gl_Position = projectionMatrix * mvPosition;`
+            : "#include <project_vertex>",
         )
         .replace(
           "#include <worldpos_vertex>",
-          "#include <worldpos_vertex>\nvec3 rootPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvWorldY = rootPosition.y;\nvFieldUv = vec2(rootPosition.x / max(uFieldDomain.x, 1e-3) + 0.5, 0.5 - rootPosition.z / max(uFieldDomain.y, 1e-3));",
+          globe
+            ? `#if defined( USE_ENVMAP ) || defined( DISTANCE ) || defined ( USE_SHADOWMAP ) || defined ( USE_TRANSMISSION ) || NUM_SPOT_LIGHT_COORDS > 0
+	vec4 worldPosition = vec4(enu, 1.0);
+#endif`
+            : "#include <worldpos_vertex>\nvec3 rootPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvWorldY = rootPosition.y;\nvFieldUv = vec2(rootPosition.x / max(uFieldDomain.x, 1e-3) + 0.5, 0.5 - rootPosition.z / max(uFieldDomain.y, 1e-3));",
         );
+      if (globe) Object.assign(shader.uniforms, globe.geo);
       shader.fragmentShader = shader.fragmentShader
         .replace(
           "#include <common>",
@@ -116,6 +143,16 @@ export class Buildings {
       console.warn("buildings unavailable", error);
       return false;
     }
+  }
+
+  /**
+   * Place the box-km mesh onto the curved shell in the vertex shader:
+   * (x, z) → (u, v), y km → AGL metres, then h = g + k * AGL.
+   * Call before the material is compiled (before the first render with this mesh).
+   */
+  enableGlobe(map: GeoMap, geo: GeoUniforms): void {
+    this.globe = { map, geo };
+    this.material.needsUpdate = true;
   }
 
   setExaggeration(value: number): void {

@@ -198,6 +198,23 @@ export class AtmosScene {
   setShadows(on: boolean): void {
     this.sun.castShadow = on;
   }
+
+  /**
+   * Re-aim the key light for centre-ENU (x east, y north, z up). The default
+   * Y-up box setup would light from the north and miss the shadow frustum.
+   */
+  alignLightsForEnu(): void {
+    this.sun.position.set(-3.6, -2.8, 7.5);
+    this.sun.target.position.set(0, 0, 0);
+    const cam = this.sun.shadow.camera;
+    cam.left = -4.5;
+    cam.right = 4.5;
+    cam.top = 4.5;
+    cam.bottom = -4.5;
+    cam.near = 0.4;
+    cam.far = 18;
+    cam.updateProjectionMatrix();
+  }
 }
 
 /** Value reader for a decoded 2D variable (physical floats). */

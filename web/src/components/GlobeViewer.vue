@@ -2,8 +2,8 @@
 /**
  * Third tab "地球": Cesium globe (Tianditu imagery, optional self-built terrain) with the data layers
  * of AtmosViewer drawn by three.js in the same WebGL context through the Cesium ViewHost
- * (globe/overlay.ts). PR ③: the volume runs on the curved shell; sections, particles, probe,
- * buildings and ground are off on this tab until ④⑤⑥ map them.
+ * (globe/overlay.ts). PR ③: the volume runs on the curved shell. PR ⑥: probe, height labels,
+ * buildings, ground and legends are on this tab; sections (④) and particles (⑤) stay off.
  */
 import { onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowRef } from "vue";
 import { Cartesian3, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
@@ -186,7 +186,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   overlay.value.layers.add(createTestLayer(meta.map, geoUniforms, meta.grid.top_m));
   overlay.value.layers.visible = ui.testLayer;
   outline = viewer.scene.primitives.add(new PolylineCollection());
-  volumeOptions.value = { map: meta.map, grid: meta.grid, ground, geo: geoUniforms };
+  volumeOptions.value = { map: meta.map, grid: meta.grid, ground, geo: geoUniforms, dem };
   setExaggeration(ui.k);
   setTerrain(ui.terrain);
   setView("overview");

@@ -107,6 +107,9 @@ export class AnnotationLayer {
   private readonly clipB = Array.from({ length: 8 }, () => new THREE.Vector4());
   private occluder: HeightOccluder | null = null;
   private occluderEnabled = true;
+  /** How root-local anchors are interpreted. Box tabs stay on "box"; the globe uses centre-ENU. */
+  private coordinates: "box" | "enu" = "box";
+  private occlusionAdapter: ((camLocal: THREE.Vector3, anchor: THREE.Vector3) => boolean) | null = null;
   private frame = 0;
   private lastCam = new THREE.Vector3();
   private readonly camLocal = new THREE.Vector3();
@@ -128,6 +131,19 @@ export class AnnotationLayer {
 
   setOcclusionEnabled(on: boolean): void {
     this.occluderEnabled = on;
+  }
+
+  /**
+   * "box": x east, y height, z south, ground rings at y = 0 (first two tabs).
+   * "enu": x east, y north, z up, ground rings in the xy plane at the anchor (globe).
+   */
+  setCoordinateFrame(frame: "box" | "enu"): void {
+    this.coordinates = frame;
+  }
+
+  /** Optional occlusion test in the same coordinates as the anchors (globe ENU → box occluder). */
+  setOcclusionAdapter(fn: ((camLocal: THREE.Vector3, anchor: THREE.Vector3) => boolean) | null): void {
+    this.occlusionAdapter = fn;
   }
 
   addMarker(id: string, desc: Omit<AnnotationDesc, "kind">): void {
@@ -258,9 +274,9 @@ export class AnnotationLayer {
     }
     const checkOcc =
       this.occluderEnabled &&
-      this.occluder !== null &&
+      (this.occluder !== null || this.occlusionAdapter !== null) &&
       (this.frame % 4 === 1 || camera.position.distanceToSquared(this.lastCam) > 1e-6);
-    if (this.occluderEnabled && (this.occluder !== null || hasAnalyticOcclusion)) {
+    if (this.occluderEnabled && (this.occluder !== null || this.occlusionAdapter !== null || hasAnalyticOcclusion)) {
       this.camLocal.copy(camera.position);
       this.root.worldToLocal(this.camLocal);
       if (checkOcc) this.lastCam.copy(camera.position);
@@ -460,7 +476,13 @@ export class AnnotationLayer {
     fill(tmpAnchor, desc.anchor);
     // For a stem, test mid-height so a blocked ground point does not hide the mast.
     if (desc.stemTo) {
-      tmpAnchor.y = (desc.anchor.y + desc.stemTo.y) * 0.35;
+      if (this.coordinates === "enu") {
+        tmpAnchor.x = desc.anchor.x * 0.65 + desc.stemTo.x * 0.35;
+        tmpAnchor.y = desc.anchor.y * 0.65 + desc.stemTo.y * 0.35;
+        tmpAnchor.z = desc.anchor.z * 0.65 + desc.stemTo.z * 0.35;
+      } else {
+        tmpAnchor.y = (desc.anchor.y + desc.stemTo.y) * 0.35;
+      }
     }
     if (desc.kind === "handle") {
       item.occluded = Boolean(
@@ -469,6 +491,8 @@ export class AnnotationLayer {
       if (checkOcc && this.occluder && desc.occlusionTest) {
         item.occluded = item.occluded || this.occluder.blocked(this.camLocal, tmpAnchor);
       }
+    } else if (this.occluderEnabled && this.occlusionAdapter) {
+      if (checkOcc || this.frame % 4 === 1) item.occluded = this.occlusionAdapter(this.camLocal, tmpAnchor);
     } else if (checkOcc && this.occluder) {
       item.occluded = this.occluder.blocked(this.camLocal, tmpAnchor);
     }
@@ -546,16 +570,20 @@ export class AnnotationLayer {
   private updateRing(item: Item, camera: THREE.Camera, rect: DOMRect, opacity: number): void {
     const ring = item.ring!;
     const a = item.desc.anchor;
-    fill(tmpLocal, { x: a.x, y: 0, z: a.z });
+    const enu = this.coordinates === "enu";
+    // box: ring in the y = 0 (xz) ground plane; enu: ring in the local horizontal (xy) at the anchor.
+    const at = (dx: number, dz: number) =>
+      enu ? { x: a.x + dx, y: a.y + dz, z: a.z } : { x: a.x + dx, y: 0, z: a.z + dz };
+    fill(tmpLocal, at(0, 0));
     if (!this.projectToScreen(tmpLocal, camera, rect, tmpA)) {
       ring.style.display = "none";
       return;
     }
     const trial = 0.06;
-    fill(tmpLocal, { x: a.x + trial, y: 0, z: a.z });
+    fill(tmpLocal, at(trial, 0));
     this.projectToScreen(tmpLocal, camera, rect, tmpB);
     const rx = Math.hypot(tmpB.x - tmpA.x, tmpB.y - tmpA.y);
-    fill(tmpLocal, { x: a.x, y: 0, z: a.z + trial });
+    fill(tmpLocal, at(0, trial));
     this.projectToScreen(tmpLocal, camera, rect, tmpB);
     const rz = Math.hypot(tmpB.x - tmpA.x, tmpB.y - tmpA.y);
     const mean = 0.5 * (rx + rz) || 1e-6;
@@ -564,7 +592,7 @@ export class AnnotationLayer {
     const n = 24;
     for (let i = 0; i < n; i += 1) {
       const ang = (i / n) * Math.PI * 2;
-      fill(tmpLocal, { x: a.x + Math.cos(ang) * worldR, y: 0, z: a.z + Math.sin(ang) * worldR });
+      fill(tmpLocal, at(Math.cos(ang) * worldR, Math.sin(ang) * worldR));
       if (!this.projectToScreen(tmpLocal, camera, rect, tmpB)) continue;
       pts.push(`${tmpB.x.toFixed(1)},${tmpB.y.toFixed(1)}`);
     }
