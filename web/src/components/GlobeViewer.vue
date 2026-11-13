@@ -11,7 +11,7 @@ import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
 import type { FormatDef } from "../formats/types";
 import type { CurvedVolumeOptions } from "../render/volume";
-import { geoBaseUrl, lastDecodeMs, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
+import { GeoDecodeError, geoBaseUrl, lastDecodeMs, lastDecodeWhere, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
 import { applyBasemap } from "../globe/basemap";
 import { pickBasemapSource, type BasemapStyle } from "../globe/basemapChoice";
 import { terrainSwitch, type TerrainSwitch } from "../globe/terrain";
@@ -149,6 +149,12 @@ function setDepthView(range: number, pitch: number): void {
   viewer.camera.lookAtTransform(Matrix4.IDENTITY);
 }
 
+/** ?depthFaceAgl= (debug only): a finite number of metres, otherwise the default 50 m face. */
+function depthFaceAglParam(raw: string | null): number {
+  const v = raw === null || raw.trim() === "" ? NaN : Number(raw);
+  return Number.isFinite(v) ? v : 50;
+}
+
 let unmounted = false;
 
 onMounted(async () => {
@@ -160,7 +166,10 @@ onMounted(async () => {
     geo.value = loaded;
   } catch (e) {
     if (unmounted) return;
-    error.value = `没有地理底座数据（${geoBaseUrl()}geo.json）：先运行 python -m geopipe，见 pipeline/README.md。${String(e)}`;
+    error.value =
+      e instanceof GeoDecodeError
+        ? `地理底座数据已下载，但解码失败（${geoBaseUrl()}）：${e.message}`
+        : `没有地理底座数据（${geoBaseUrl()}geo.json）：先运行 python -m geopipe，见 pipeline/README.md。${String(e)}`;
     status.value = "加载失败";
     return;
   }
@@ -202,7 +211,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
     },
   });
   geoUniforms = createGeoUniforms(meta.map, ground);
-  overlay.value.layers.add(createTestLayer(meta.map, geoUniforms, meta.grid.top_m, debug ? Number(query.get("depthFaceAgl") ?? 50) : 50));
+  overlay.value.layers.add(createTestLayer(meta.map, geoUniforms, meta.grid.top_m, debug ? depthFaceAglParam(query.get("depthFaceAgl")) : 50));
   overlay.value.layers.visible = ui.testLayer;
   outline = viewer.scene.primitives.add(new PolylineCollection());
   volumeOptions.value = { map: meta.map, grid: meta.grid, ground, geo: geoUniforms, dem };
@@ -227,7 +236,7 @@ function exposeApi(meta: GeoFoundation["meta"], ground: GeoFoundation["ground"])
     tilesLoaded: () => viewer!.scene.globe.tilesLoaded,
     measureAlignment: () => measureAlignment(viewer!.scene, o.camera, o.sync, meta.grid, meta.map, ui.terrain ? ground : null, ui.k),
     camera: () => ({ near: o.camera.near, far: o.camera.far, fov: o.camera.fov, aspect: o.camera.aspect, sphere: o.sphere, box: o.box, camEnu: o.sync.cameraEnu(viewer!.camera) }),
-    status: () => ({ ...ui, source, depthMode, depthEncoding: o.depthEncoding, decodeMs: lastDecodeMs, tileErrors: tileErrors.value, drawCalls: o.drawCalls, residualFromPipeline: meta.map.residual_m }),
+    status: () => ({ ...ui, source, depthMode, depthEncoding: o.depthEncoding, decodeMs: lastDecodeMs, decodeWhere: lastDecodeWhere, tileErrors: tileErrors.value, drawCalls: o.drawCalls, residualFromPipeline: meta.map.residual_m }),
   };
   if (!debug) return;
   Object.assign(window.__globeApi, {

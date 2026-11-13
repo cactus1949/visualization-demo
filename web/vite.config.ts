@@ -64,10 +64,15 @@ function dataPlugin(): Plugin {
 const cesiumSource = "node_modules/cesium/Build/Cesium";
 const cesiumBaseUrl = "cesium";
 
-/** CESIUM_BASE_URL = <vite base>cesium, so `vite build --base /sub/` (or `base` in config) finds the copied assets. */
+/**
+ * CESIUM_BASE_URL = <vite base>cesium, so `vite build --base /sub/` (or `base` in config) finds the copied
+ * assets. A relative base ("./", "" ) stays relative ("./cesium"): Cesium resolves CESIUM_BASE_URL against
+ * the page, so a build opened from any directory still finds its own copy.
+ */
 export function cesiumBaseFor(base: string | undefined): string {
-  const b = base && base !== "./" ? base : "/";
-  return `${b.endsWith("/") ? b : `${b}/`}${cesiumBaseUrl}`;
+  if (base === undefined) return `/${cesiumBaseUrl}`;
+  if (base === "" || base === "./" || base === ".") return `./${cesiumBaseUrl}`;
+  return `${base.endsWith("/") ? base : `${base}/`}${cesiumBaseUrl}`;
 }
 
 function cesiumBasePlugin(): Plugin {

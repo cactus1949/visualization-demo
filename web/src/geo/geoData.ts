@@ -6,6 +6,7 @@
 import type { GeoGrid, GeoMap } from "./mapping";
 import type { GridField } from "./placement";
 import { dequantize, type DecodeReply, type DecodeRequest, type Dem, type QuantizedMeta } from "./geoGrid";
+import { dataBase } from "../data/dataBase";
 
 export { dequantize, demHeightAt, type Dem, type QuantizedMeta } from "./geoGrid";
 
@@ -29,10 +30,19 @@ export interface GeoFoundation {
 export let lastDecodeMs = 0;
 
 export function geoBaseUrl(): string {
-  const configured = import.meta.env.VITE_DATA_BASE;
-  const base = configured ?? import.meta.env.BASE_URL;
-  return `${base.replace(/\/$/, "")}/data/geo/`;
+  return `${dataBase()}/data/geo/`;
 }
+
+/** The geo files arrived but could not be decoded (worker and main-thread fallback both failed). */
+export class GeoDecodeError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "GeoDecodeError";
+  }
+}
+
+/** Where the last load decoded: "worker", or "main" after a worker failure / without Worker support. */
+export let lastDecodeWhere: "worker" | "main" = "worker";
 
 async function fetchOk(url: string): Promise<Response> {
   const r = await fetch(url);
@@ -47,7 +57,7 @@ export async function loadGeoFoundation(base = geoBaseUrl()): Promise<GeoFoundat
     fetchOk(base + meta.ground.file).then((r) => r.arrayBuffer()),
   ]);
   const d = meta.dem;
-  const decoded = await decodeInWorker(demRaw, groundRaw, d, meta.ground);
+  const decoded = await decodeGeo(demRaw, groundRaw, d, meta.ground);
   lastDecodeMs = decoded.ms;
   return {
     meta,
@@ -56,9 +66,39 @@ export async function loadGeoFoundation(base = geoBaseUrl()): Promise<GeoFoundat
   };
 }
 
-/** u16 -> float32 for the DEM and ground grid off the main thread (module worker, buffers transferred). */
+function decodeOnMain(dem: ArrayBuffer, ground: ArrayBuffer, demMeta: QuantizedMeta, groundMeta: QuantizedMeta): DecodeReply {
+  const t0 = performance.now();
+  try {
+    return { dem: dequantize(dem, demMeta), ground: dequantize(ground, groundMeta), ms: performance.now() - t0 };
+  } catch (e) {
+    throw new GeoDecodeError(`DEM / 地面网格解码失败：${String(e)}`, { cause: e });
+  }
+}
+
+/**
+ * u16 -> float32 for the DEM and ground grid: module worker first (buffers transferred); if the worker
+ * cannot start or fails, decode the same bytes on the main thread. The buffers are only transferred
+ * after the worker is up, so a copy is kept for the fallback.
+ */
+async function decodeGeo(dem: ArrayBuffer, ground: ArrayBuffer, demMeta: QuantizedMeta, groundMeta: QuantizedMeta): Promise<DecodeReply> {
+  if (typeof Worker === "undefined") {
+    lastDecodeWhere = "main";
+    return decodeOnMain(dem, ground, demMeta, groundMeta);
+  }
+  const demCopy = dem.slice(0);
+  const groundCopy = ground.slice(0);
+  try {
+    const reply = await decodeInWorker(dem, ground, demMeta, groundMeta);
+    lastDecodeWhere = "worker";
+    return reply;
+  } catch (e) {
+    console.warn("[geo] worker decode failed, decoding on the main thread:", e);
+    lastDecodeWhere = "main";
+    return decodeOnMain(demCopy, groundCopy, demMeta, groundMeta);
+  }
+}
+
 async function decodeInWorker(dem: ArrayBuffer, ground: ArrayBuffer, demMeta: QuantizedMeta, groundMeta: QuantizedMeta): Promise<DecodeReply> {
-  if (typeof Worker === "undefined") return { dem: dequantize(dem, demMeta), ground: dequantize(ground, groundMeta), ms: 0 };
   const worker = new Worker(new URL("./geoDecode.worker.ts", import.meta.url), { type: "module" });
   try {
     return await new Promise<DecodeReply>((resolve, reject) => {

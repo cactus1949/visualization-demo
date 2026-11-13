@@ -6,6 +6,7 @@ import { createThreeHost } from "../host/threeHost";
 import type { Manifest, VariableMeta } from "../data/manifest";
 import type { FormatDef } from "../formats/types";
 import { DataStore } from "../data/store";
+import { dataBase as resolvedDataBase } from "../data/dataBase";
 import { AtmosScene, field2D, type Theme } from "../render/scene";
 import { floatRange, domainOf, textureUploadMs, type Domain } from "../render/fields";
 import { TimeFields, type TimeResource } from "../render/timeFields";
@@ -114,7 +115,7 @@ const embed = query.has("embed") && query.get("embed") !== "0";
  *  - `?date=YYYYMMDD` that day of this format: /data/<format>/yyyymm/yyyymmdd/manifest.json
  *  - otherwise the latest day of this format from /api/days, then the format's repo fallbacks
  */
-const dataBase = (import.meta.env.VITE_DATA_BASE ?? "").replace(/\/$/, "");
+const dataBase = resolvedDataBase();
 const dateParam = (query.get("date") ?? "").replace(/-/g, "");
 const dateOk = /^\d{8}$/.test(dateParam);
 const caseParam = (query.get("data") ?? "").replace(/[^\w-]/g, "");
@@ -2702,7 +2703,7 @@ async function start(): Promise<void> {
   if (globeMode && globeOpt()) buildings.enableGlobe(globeOpt()!.map, globeOpt()!.geo);
   atmos.root.add(buildings.group);
   const tb = performance.now();
-  const ok = await buildings.load();
+  const ok = await buildings.load(`${dataBase}/data/buildings`);
   loadMs.buildings = Math.round(performance.now() - tb);
   buildingsInfo.value = ok
     ? `${buildings.meta!.count.toLocaleString()} 栋 · 最高 ${buildings.meta!.max_height_m.toFixed(0)} m`
