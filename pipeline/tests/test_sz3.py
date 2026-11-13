@@ -245,3 +245,23 @@ def test_missing_input_of_a_derived_field_keeps_manifest_strict_json(tmp_path):
     strict((out / "sz3_report.json").read_text())
     assert m["variables"]["u"]["nan_count"] == 12
     assert m["variables"]["u_gust"]["encoding"] == "derived" and np.isfinite(m["variables"]["u_gust"]["frames"][0]["max_err"])
+
+
+def test_shipped_p_is_never_looser_than_half_a_colour_step():
+    from pathlib import Path
+    import yaml
+    cfg_dir = Path(module.__file__).resolve().parents[1] / "config"
+    sz3_cfg = yaml.safe_load((cfg_dir / "sz3_config.yaml").read_text())
+    display = yaml.safe_load((cfg_dir / "quant_config_6h.yaml").read_text())
+    checked = []
+    for name, spec in sz3_cfg.items():
+        if not isinstance(spec, dict) or name == "defaults" or spec.get("transform") or not isinstance(spec.get("P"), float):
+            continue
+        rng = (display.get(name) or {}).get("display_range")
+        if rng:
+            # 3 % slack: t2m 0.05 K is the rounded colour half step 25/512 = 0.0488
+            assert spec["P"] <= (rng[1] - rng[0]) / 512 * 1.03, name
+            checked.append(name)
+    assert {"w", "icing_index", "u", "tke"} <= set(checked)
+    # probe shows 3 decimals for 0.01-1: w and icing_index use its half last digit
+    assert sz3_cfg["w"]["P"] == 0.0005 and sz3_cfg["icing_index"]["P"] == 0.0005
