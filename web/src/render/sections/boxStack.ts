@@ -175,7 +175,8 @@ export class BoxStack {
     for (let i = 0; i < inRange.length; i += this.params.stepLevels) {
       const h = inRange[i]!;
       const y = h / 1000;
-      const g = this.globe ? new THREE.PlaneGeometry(w, d, segmentsFor(w), segmentsFor(d)) : new THREE.PlaneGeometry(w, d);
+      // globe: up to 160 x 160 cells per slab (a stack can have dozens of slabs)
+      const g = this.globe ? new THREE.PlaneGeometry(w, d, segmentsFor(w, 160), segmentsFor(d, 160)) : new THREE.PlaneGeometry(w, d);
       g.rotateX(-Math.PI / 2);
       const m = new THREE.Mesh(g, this.material);
       m.position.set(cx, y, cz);

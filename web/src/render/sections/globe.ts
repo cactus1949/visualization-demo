@@ -24,10 +24,14 @@ export interface SectionGlobe {
   geo: GeoUniforms;
 }
 
-/** Subdivision step on the shell (km): curvature sag over 0.15 km is < 0.5 mm, DEM cells are ~0.09 km. */
-export const GLOBE_SEGMENT_KM = 0.15;
+/**
+ * Subdivision step on the shell (km). With terrain on, the shell follows the 300 x 300 ground grid
+ * (~0.06 km cells) and triangles are flat in between, so the step matches the ground cell; with
+ * terrain off, curvature sag over 0.06 km is far below a millimetre.
+ */
+export const GLOBE_SEGMENT_KM = 0.06;
 
-export function segmentsFor(lengthKm: number, max = 256): number {
+export function segmentsFor(lengthKm: number, max = 320): number {
   return Math.max(1, Math.min(max, Math.ceil(Math.abs(lengthKm) / GLOBE_SEGMENT_KM)));
 }
 

@@ -202,7 +202,8 @@ export class HorizontalSlice {
   constructor(private readonly domain: Domain, private readonly globe: SectionGlobe | null = null) {
     this.material = new SliceMaterial(domain, globe);
     const geometry = globe
-      ? new THREE.PlaneGeometry(domain.sx, domain.sz, segmentsFor(domain.sx), segmentsFor(domain.sz))
+      // one quad per grid cell: vertices sit on the ground-grid nodes the terrain is defined on
+      ? new THREE.PlaneGeometry(domain.sx, domain.sz, Math.max(1, domain.nx - 1), Math.max(1, domain.ny - 1))
       : new THREE.PlaneGeometry(domain.sx, domain.sz);
     geometry.rotateX(-Math.PI / 2);
     this.mesh = new THREE.Mesh(geometry, this.material);
