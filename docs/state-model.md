@@ -4,6 +4,10 @@
 
 解码后的 `Float32Array` 中，`NaN` 统一表示缺测。渲染采样到缺测时丢弃该片元，时间混合只要任一帧缺测就保持缺测；图例、统计和粒子采样跳过或重生，探针显示「缺测」。
 
+## 渲染宿主
+
+`AtmosViewer` 通过 `ViewHost` 使用 renderer、相机、输入目标、尺寸、射线、相机控制、绘制模式、指针捕获和视图读写；宿主负责自己的循环与资源释放。每帧 hook 顺序固定为：`beforeCamera` → 控件更新 → `afterCamera` → 渲染 → `afterRender`，其中 `beforeCamera` 保持统计、指针处理和时间步进的顺序。当前实现是 Three.js，globe tab 后续会提供 Cesium 宿主。接口和图层挂载方式见 `docs/view-host.md`。
+
 ## 体渲染
 
 | 控件 | 含义 |

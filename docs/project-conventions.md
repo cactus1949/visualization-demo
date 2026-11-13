@@ -24,6 +24,7 @@
 - `docs/state-model.md`：前端状态模型。
 - `docs/annotation-style.md`：三维标注样式。
 - `docs/volume-section-consistency.md`：体渲染和剖面的一致性约定。
+- `docs/view-host.md`：渲染宿主接口（ViewHost）和图层挂载方式。
 
 ## 提交规矩
 
