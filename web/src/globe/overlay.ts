@@ -199,14 +199,16 @@ export class GlobeOverlay implements ViewHost {
     return Matrix4.multiplyByPoint(this.sync.enuToEcef, new Cartesian3(p[0] * s, p[1] * s, p[2] * s), new Cartesian3());
   }
 
-  /** Debug: render n full Cesium frames (globe + this overlay) synchronously, ms per frame incl. gl.finish(). */
+  /** Debug: render n full Cesium frames (globe + this overlay) synchronously; a 1-pixel readPixels waits for the GPU. */
   benchFrames(n: number): { n: number; mean: number; median: number; p90: number } {
     const gl = this.renderer.getContext();
+    const px = new Uint8Array(4);
     const times: number[] = [];
     for (let i = 0; i < n; i++) {
       const t0 = performance.now();
+      this.cesium.requestRender();
       this.cesium.render();
-      gl.finish();
+      this.resyncAfter(() => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px));
       times.push(performance.now() - t0);
     }
     times.sort((a, b) => a - b);
