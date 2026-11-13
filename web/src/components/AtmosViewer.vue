@@ -36,7 +36,7 @@ import { AnnotationLayer, HeightOccluder } from "../render/annotations";
 import { ShellHeightLabels, shellLabelHeights } from "../render/annotations/shellLabels";
 import { GlobeGround } from "../render/globeGround";
 import { cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../geo/boxEnu";
-import type { EnuFrame } from "../geo/mapping";
+import { polyInverse, type EnuFrame } from "../geo/mapping";
 import { sampleGrid, type GridField } from "../geo/placement";
 import {
   DEFAULT_PARTICLES,
@@ -141,6 +141,8 @@ async function manifestCandidates(): Promise<string[]> {
   return [...(latest ? [dayUrl(latest)] : []), ...(props.format.fallbackCases ?? []).map(caseUrl)];
 }
 const timelineHidden = query.get("timeline") === "0";
+/** Debug-only measurement hooks on __atmosApi (sampleCell, buildingBaseSamples). */
+const debugApis = import.meta.env.DEV || query.get("globeDebug") === "1";
 const MAX_SPEED = 25; // m/s, scale of the derived speed byte
 const SPEED = "speed";
 
@@ -980,8 +982,37 @@ function globeEnuOf(u: number, v: number, aglM: number): { x: number; y: number;
   const p = placeEnuUnits(g.grid, g.map, globeFrame!, u, v, aglM, globeK(), globeGroundField());
   return { x: p[0], y: p[1], z: p[2] };
 }
+/**
+ * Terrain between camera and anchor (terrain on). The building occluder below works in (u, v, AGL),
+ * where the ground is flat by construction, so relief has to be tested on the real ENU segment:
+ * two consecutive samples more than 1 m under the DEM ground hide the anchor.
+ */
+function globeTerrainOccluded(camEnu: THREE.Vector3, anchorEnu: THREE.Vector3): boolean {
+  const g = globeOpt()!;
+  const ground = globeGroundField();
+  if (!ground) return false;
+  const s = g.map.enu_unit_m;
+  const n = 64;
+  let hits = 0;
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    if (t > 0.98) break;
+    const x = camEnu.x + (anchorEnu.x - camEnu.x) * t;
+    const y = camEnu.y + (anchorEnu.y - camEnu.y) * t;
+    const z = camEnu.z + (anchorEnu.z - camEnu.z) * t;
+    const inv = polyInverse(g.map, [x * s, y * s, z * s]);
+    if (inv.u < 0 || inv.u > 1 || inv.v < 0 || inv.v > 1) { hits = 0; continue; }
+    if (inv.h < sampleGrid(ground, inv.u, inv.v) - 1) {
+      if (++hits >= 2) return true;
+    } else hits = 0;
+  }
+  return false;
+}
+
 function globeOccluded(camEnu: THREE.Vector3, anchorEnu: THREE.Vector3): boolean {
-  if (!heightOccluder || !globeOpt()) return false;
+  if (!globeOpt()) return false;
+  if (globeTerrainOccluded(camEnu, anchorEnu)) return true;
+  if (!heightOccluder || !layers.buildings) return false;
   const g = globeOpt()!;
   const ground = globeGroundField();
   const cam = enuUnitsToUvAgl(g.map, [camEnu.x, camEnu.y, camEnu.z], globeK(), ground);
@@ -1536,6 +1567,9 @@ function updateMarker(): void {
   }
 }
 
+/** Debug: root-local point of the last probe pick (ENU units on the globe). */
+let lastProbeHit: [number, number, number] | null = null;
+
 function pickTargets(): THREE.Object3D[] {
   const list: THREE.Object3D[] = [];
   if (vsection?.group.visible) list.push(vsection.group);
@@ -1549,6 +1583,7 @@ function probeFromPointer(pin: boolean): boolean {
   const hit = pointerRay!.intersectObjects(pickTargets(), true)[0];
   if (!hit) return false;
   const local = atmos.root.worldToLocal(hit.point.clone());
+  lastProbeHit = [local.x, local.y, local.z];
   const g = manifest.value!.grid;
   if (globeMode && globeOpt()) {
     const inv = enuUnitsToUvAgl(globeOpt()!.map, [local.x, local.y, local.z], globeK(), globeGroundField());
@@ -2300,59 +2335,6 @@ function exposeApi(): void {
       };
     },
     hasData: (name: string) => Boolean(loaded(name)),
-    sampleCell: (name: string, ix: number, iy: number, iz = 0) => {
-      const g = manifest.value?.grid;
-      if (!g) return null;
-      const i = iz * g.nx * g.ny + iy * g.nx + ix;
-      if (name === SPEED || name === "speed" || name === "speed0") {
-        const u = cpuPair("u");
-        const v = cpuPair("v");
-        if (!u || !v) return null;
-        return windAt(u, v, i)[2];
-      }
-      const pair = cpuPair(name);
-      if (!pair) return null;
-      return mixAt(pair, i);
-    },
-    buildingBaseSamples: (count = 6) => {
-      if (!buildings || !globeOpt() || !globeFrame) return null;
-      const gv = globeOpt()!;
-      const ground = globeGroundField();
-      const k = globeK();
-      const samples: Record<string, unknown>[] = [];
-      const posList: { x: number; y: number; z: number }[] = [];
-      buildings.group.traverse((child) => {
-        const mesh = child as THREE.Mesh;
-        if (!mesh.isMesh) return;
-        const pos = mesh.geometry.getAttribute("position");
-        if (!pos) return;
-        const m = mesh.matrixWorld;
-        const v = new THREE.Vector3();
-        // a few corners of this batch
-        for (const i of [0, Math.floor(pos.count / 3), Math.floor((2 * pos.count) / 3)]) {
-          if (i >= pos.count) continue;
-          v.fromBufferAttribute(pos, i).applyMatrix4(m);
-          posList.push({ x: v.x, y: v.y, z: v.z });
-          if (posList.length >= 400) return;
-        }
-      });
-      // keep the lowest vertices (building bases, y is real height km)
-      posList.sort((a, b) => a.y - b.y);
-      const seen = new Set<string>();
-      for (const p of posList) {
-        if (p.y > 0.003) continue; // > 3 m, not a base
-        const u = p.x / domain.sx + 0.5;
-        const vuv = 0.5 - p.z / domain.sz;
-        const key = `${u.toFixed(3)},${vuv.toFixed(3)}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const placed = placeEnuUnits(gv.grid, gv.map, globeFrame!, u, vuv, 0, k, ground);
-        const g0 = ground ? sampleGrid(ground, u, vuv) : 0;
-        samples.push({ u, v: vuv, boxY_m: p.y * 1000, groundM: g0, enuUp_m: placed[2] * gv.map.enu_unit_m });
-        if (samples.length >= count) break;
-      }
-      return samples;
-    },
     /** Percentiles of a loaded variable (subsampled), for checking what a threshold hides. */
     debugStats: (name: string) => {
       const data = name === SPEED ? speedValuesA() : loaded(name)?.data;
@@ -2502,6 +2484,74 @@ function exposeApi(): void {
         : {},
     }),
   };
+  // measurement hooks only in dev or with ?globeDebug=1 (same rule as GlobeViewer's __globeApi)
+  if (!debugApis) return;
+  Object.assign(window.__atmosApi, {
+      lastProbeHit: () => lastProbeHit,
+      /** Same pick path as a pointer move (host ray → pickTargets), at client pixel (x, y). */
+      probePickAt: (x: number, y: number) => {
+        pointerRay = host!.raycaster(x, y);
+        return probeFromPointer(false) ? lastProbeHit : null;
+      },
+      annotationStates: () => {
+        const cam = host!.camera.getWorldPosition(new THREE.Vector3());
+        atmos.root.worldToLocal(cam);
+        return { camLocal: [cam.x, cam.y, cam.z], items: annotations?.debugItems() ?? [] };
+      },
+      sampleCell: (name: string, ix: number, iy: number, iz = 0) => {
+        const g = manifest.value?.grid;
+        if (!g) return null;
+        const i = iz * g.nx * g.ny + iy * g.nx + ix;
+        if (name === SPEED || name === "speed" || name === "speed0") {
+          const u = cpuPair("u");
+          const v = cpuPair("v");
+          if (!u || !v) return null;
+          return windAt(u, v, i)[2];
+        }
+        const pair = cpuPair(name);
+        if (!pair) return null;
+        return mixAt(pair, i);
+      },
+      buildingBaseSamples: (count = 6) => {
+        if (!buildings || !globeOpt() || !globeFrame) return null;
+        const gv = globeOpt()!;
+        const ground = globeGroundField();
+        const k = globeK();
+        const samples: Record<string, unknown>[] = [];
+        const posList: { x: number; y: number; z: number }[] = [];
+        buildings.group.traverse((child) => {
+          const mesh = child as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          const pos = mesh.geometry.getAttribute("position");
+          if (!pos) return;
+          const m = mesh.matrixWorld;
+          const v = new THREE.Vector3();
+          // a few corners of this batch
+          for (const i of [0, Math.floor(pos.count / 3), Math.floor((2 * pos.count) / 3)]) {
+            if (i >= pos.count) continue;
+            v.fromBufferAttribute(pos, i).applyMatrix4(m);
+            posList.push({ x: v.x, y: v.y, z: v.z });
+            if (posList.length >= 400) return;
+          }
+        });
+        // keep the lowest vertices (building bases, y is real height km)
+        posList.sort((a, b) => a.y - b.y);
+        const seen = new Set<string>();
+        for (const p of posList) {
+          if (p.y > 0.003) continue; // > 3 m, not a base
+          const u = p.x / domain.sx + 0.5;
+          const vuv = 0.5 - p.z / domain.sz;
+          const key = `${u.toFixed(3)},${vuv.toFixed(3)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const placed = placeEnuUnits(gv.grid, gv.map, globeFrame!, u, vuv, 0, k, ground);
+          const g0 = ground ? sampleGrid(ground, u, vuv) : 0;
+          samples.push({ u, v: vuv, boxY_m: p.y * 1000, groundM: g0, enuUp_m: placed[2] * gv.map.enu_unit_m });
+          if (samples.length >= count) break;
+        }
+        return samples;
+      },
+  });
 }
 
 /** The five input listeners start() puts on host.element (removed symmetrically on unmount). */
@@ -2661,7 +2711,7 @@ async function start(): Promise<void> {
   if (ok && annotations) {
     heightOccluder = new HeightOccluder(domain.sx, domain.sz);
     heightOccluder.ingestObject(buildings.group, atmos.root);
-    annotations.setOccluder(heightOccluder, layers.buildings);
+    annotations.setOccluder(heightOccluder, globeMode || layers.buildings);
   }
   applyBuildings();
 }
@@ -2811,7 +2861,8 @@ watch(
 );
 watch(
   () => layers.buildings,
-  (on) => annotations?.setOcclusionEnabled(Boolean(on)),
+  // globe: terrain occlusion still applies with buildings off (globeOccluded checks the layer)
+  (on) => annotations?.setOcclusionEnabled(globeMode || Boolean(on)),
 );
 watch(
   () => [

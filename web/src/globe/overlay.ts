@@ -16,7 +16,7 @@ import type { GeoMap } from "../geo/mapping";
 import { DepthProxy } from "./depthProxy";
 import { RtcCameraSync, type EnuSphere } from "./rtcCamera";
 import { DEFAULT_DEPTH_MODE, depthEncodingOf, depthModeFromQuery, type Box3Like, type GlobeDepthMode } from "./depthMode";
-import { applyLayerRendererConfig } from "../host/rendererConfig";
+import { applyLayerRendererConfig, beginLayerFrame } from "../host/rendererConfig";
 import { withHidden } from "../host/hidden";
 import type { FrameHooks, ViewHost } from "../host/types";
 
@@ -111,6 +111,7 @@ export class GlobeOverlay implements ViewHost {
     this.last = now;
     this.trackSize();
     // beforeCamera reads last frame's draw calls for the HUD; count this frame from here
+    beginLayerFrame(this.renderer);
     this.hooks?.beforeCamera(now, dt, realDt);
     this.renderer.info.reset();
     this.sync.sync(this.cesium.camera, this.camera, this.sphere, this.box);
