@@ -29,15 +29,33 @@ function material(map: GeoMap, geo: GeoUniforms, color: number, alpha: number, o
     side: DoubleSide,
     uniforms: { ...geo, uColor: { value: new Color().setHex(color, LinearSRGBColorSpace) } /* raw hex, the shader writes it as-is */, uAlpha: { value: alpha } },
     vertexShader: `${geoPlaceGlsl(map)}
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+out float vFragDepth;
+out float vIsPerspective;
+bool isPerspectiveMatrix(const in mat4 m) { return m[2][3] == -1.0; }
+#endif
 out float vAgl;
 void main() {
   vAgl = position.z;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(geoPlace(position), 1.0);
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+  vFragDepth = 1.0 + gl_Position.w;
+  vIsPerspective = float(isPerspectiveMatrix(projectionMatrix));
+#endif
 }`,
     fragmentShader: `precision highp float;
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+uniform float logDepthBufFC;
+in float vFragDepth;
+in float vIsPerspective;
+#endif
 uniform vec3 uColor; uniform float uAlpha;
 in float vAgl; out vec4 o;
 void main() {
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+  // write gl_FragDepth even when depthWrite is false, so the depth test matches the log buffer
+  gl_FragDepth = vIsPerspective == 0.0 ? gl_FragCoord.z : log2(vFragDepth) * logDepthBufFC * 0.5;
+#endif
   vec3 c = ${opts.curtain ? "vAgl < 0.0 ? vec3(0.9, 0.05, 0.05) : uColor" : "uColor"};
   o = vec4(c, uAlpha);
 }`,

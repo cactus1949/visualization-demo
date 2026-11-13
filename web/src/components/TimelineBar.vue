@@ -205,6 +205,7 @@ function toggleSmooth(): void {
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
   user-select: none;
+  pointer-events: auto;
 }
 .buttons {
   display: flex;

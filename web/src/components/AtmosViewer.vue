@@ -1069,6 +1069,10 @@ function syncVolumeSlices(): void {
 function updateComposite(): void { syncVolumeSlices(); }
 
 
+function markReadyStatus(): void {
+  if (status.value === "加载数据清单…") status.value = "风场就绪";
+}
+
 function ensureParticles(): void {
   if (globeMode || particles || !host || !manifest.value || !timeFields?.wind.valid) return;
   const wMeta = manifest.value.variables.w;
@@ -1097,7 +1101,7 @@ function ensureParticles(): void {
   );
   atmos.root.add(particles.object);
   speedRange.value = colourSpeed;
-  status.value = "风场就绪";
+  markReadyStatus();
 }
 
 /** Objects excluded from the volume depth pre-pass (the volume itself first). Field meshes remain visible when opaque
@@ -1340,6 +1344,7 @@ function stepTime(now: number, dt: number): void {
     updateSlice();
     updateSection();
     updateVolume();
+    if (globeMode) markReadyStatus();
   }
   syncWants(now);
   // CPU readers follow the displayed instant: 10 Hz probe, 4 Hz ground / unfolded while
@@ -3225,11 +3230,11 @@ onBeforeUnmount(() => {
 
       <details>
         <summary>视图</summary>
-        <label class="slider"
+        <label v-if="!globeMode" class="slider"
           >垂直夸张 {{ view.exaggeration.toFixed(1) }}×
           <input v-model.number="view.exaggeration" type="range" min="1" max="10" step="0.1"
         /></label>
-        <label class="row"><input v-model="view.shadows" type="checkbox" />建筑阴影</label>
+        <label v-if="!globeMode" class="row"><input v-model="view.shadows" type="checkbox" />建筑阴影</label>
         <label class="row"
           >主题
           <select v-model="view.theme">
@@ -3237,7 +3242,7 @@ onBeforeUnmount(() => {
             <option value="light">浅色</option>
           </select></label
         >
-        <div class="buttons">
+        <div v-if="!globeMode" class="buttons">
           <button @click="setView('overview')">总览</button>
           <button @click="setView('close')">近景</button>
           <button @click="setView('top')">俯视</button>
@@ -3295,7 +3300,8 @@ onBeforeUnmount(() => {
 .viewer.globe .hud,
 .viewer.globe .legends,
 .viewer.globe .panel,
-.viewer.globe .open-panel {
+.viewer.globe .open-panel,
+.viewer.globe .timeline {
   pointer-events: auto;
 }
 .viewer.light {
