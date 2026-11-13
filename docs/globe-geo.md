@@ -41,7 +41,14 @@ DEM 处理：Copernicus GLO-30 → 150 m 开运算 + 闭运算 + 轻微高斯 �
 
 - 相机（`globe/rtcCamera.ts`）：在 JS 里用 float64 算 `Cesium viewMatrix × 中心 ENU × 单位缩放`，交给 three，GPU 上的坐标只有几个单位大。three 的 near/far 按图层包围球单独算。
 - 每帧在 Cesium 的 `postRender` 里：`resetState()`，清深度，画只写深度的地形代理网格（`globe/depthProxy.ts`，同一份 DEM，关地形时是弯曲椭球面片），再画图层，最后 `resetState()`。Cesium 画完后的深度不能直接用，所以靠代理网格做遮挡。
-- WebGL 上下文取自 `scene.context._gl`，Cesium 没有公开接口，升级 Cesium 时要复查。
+- WebGL 上下文丢失（`webglcontextlost`）时停止 three 绘制，页面提示刷新。卸载 tab 时释放 `layers` 下所有几何体和材质、代理网格、three 渲染器和 Viewer。
+
+### 升级 Cesium 要复查的私有字段
+
+Cesium 没有公开接口，`globe/overlay.ts` 直接用了 `scene.context` 上这些字段：
+
+- `_gl`：共用的 WebGL 上下文。
+- `_currentRenderState`、`_defaultRenderState`、`_currentPassState`、`_defaultPassState`、`_currentFramebuffer`：three 每帧结束 `resetState()` 把 GL 状态恢复成默认值，之后把 Cesium 缓存的当前状态也设回默认（帧缓冲设为 `undefined`）。不这样做，Cesium 下一帧只按它以为的状态差异去设置，和真实 GL 状态对不上。
 
 ## 底图
 

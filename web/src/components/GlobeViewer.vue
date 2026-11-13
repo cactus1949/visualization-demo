@@ -123,11 +123,17 @@ function setView(name: string): void {
   viewer.camera.lookAtTransform(Matrix4.IDENTITY);
 }
 
+let unmounted = false;
+
 onMounted(async () => {
   window.__globeReady = false;
   try {
-    geo.value = await loadGeoFoundation();
+    const loaded = await loadGeoFoundation();
+    // the tab may have been closed while the geo files were loading: don't build a Viewer on a detached node
+    if (unmounted) return;
+    geo.value = loaded;
   } catch (e) {
+    if (unmounted) return;
     error.value = `没有地理底座数据（${geoBaseUrl()}geo.json）：先运行 python -m geopipe，见 pipeline/README.md。${String(e)}`;
     status.value = "加载失败";
     return;
@@ -161,7 +167,11 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   viewer.scene.verticalExaggeration = 1;
   setBasemap(ui.style);
   const proxy = new DepthProxy(meta.grid, meta.map, dem);
-  overlay = new GlobeOverlay(viewer.scene, meta.map, proxy);
+  overlay = new GlobeOverlay(viewer.scene, meta.map, proxy, () => {
+    window.__globeReady = false;
+    status.value = "WebGL 上下文丢失";
+    error.value = "WebGL 上下文丢失（显卡重置或显存不足），请刷新页面。";
+  });
   geoUniforms = createGeoUniforms(meta.map, ground);
   overlay.layers.add(createTestLayer(meta.map, geoUniforms, meta.grid.top_m));
   outline = viewer.scene.primitives.add(new PolylineCollection());
@@ -188,11 +198,17 @@ function start({ meta, dem, ground }: GeoFoundation): void {
 }
 
 onBeforeUnmount(() => {
+  unmounted = true;
   window.__globeReady = false;
   delete window.__globeApi;
   overlay?.dispose();
   viewer?.destroy();
   geoUniforms?.uGeoGround.value.dispose();
+  overlay = null;
+  viewer = null;
+  outline = null;
+  terrains = null;
+  geoUniforms = null;
 });
 </script>
 
