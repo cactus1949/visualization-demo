@@ -1,7 +1,14 @@
 import json
 
 import numpy as np
-from shapely.geometry import Polygon
+import pytest
+
+# building pipeline needs the geo stack; skip (not abort the whole run) where it is not installed
+pytest.importorskip("shapely")
+pytest.importorskip("pyogrio")
+pytest.importorskip("mapbox_earcut")
+
+from shapely.geometry import Polygon  # noqa: E402
 
 from bldpipe.build import GridFrame, extrude, write_glb
 

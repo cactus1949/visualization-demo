@@ -141,6 +141,25 @@ location /data/ {
 }
 ```
 
+### 部署在子路径（例：`/viz/`）
+
+用 `npm run build -- --base /viz/` 构建。前端所有请求都会带上 base：页面和资源在 `/viz/`、`/viz/assets/`，Cesium 在 `/viz/cesium/`，数据在 `/viz/data/`，接口在 `/viz/api/`（`VITE_DATA_BASE` 设成非空值时，数据和接口改走它）。`vite preview` 和 dev 会自动把 `/viz/data`、`/viz/api` 代理到 `DATA_API`，并去掉前缀。生产环境由 nginx 做同样的转发：
+
+```nginx
+location /viz/ {
+    alias /srv/atmos/dist/;          # vite build 的输出
+    try_files $uri $uri/ /viz/index.html;
+}
+location /viz/data/ {
+    proxy_pass http://127.0.0.1:8000/data/;   # 末尾的 /data/ 会把 /viz 前缀去掉
+}
+location /viz/api/ {
+    proxy_pass http://127.0.0.1:8000/api/;
+}
+```
+
+如果 `/viz/data/` 不经接口、直接由 nginx 提供静态文件，`.bin.br` 和 `.glb` 的写法和上面根路径的例子一样，只是把 `location /data/` 换成 `location /viz/data/`，`root` 换成 `alias`。漏配 `/viz/data/` 或 `/viz/api/` 时，`try_files` 会把请求回落到 index.html（200 text/html），页面不报错，但拿不到数据。
+
 ## 分支规划
 
 `main` 保留原始数据，`three` 是本方案。`cesium` 等其他方案的分支可以复用 `pipeline/` 和 `data/web/`，只替换 `web/`。

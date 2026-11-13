@@ -134,6 +134,7 @@ vFieldUv = uvAgl.xy;`
     };
   }
 
+  /** `baseUrl`: callers pass `${dataBase()}/data/buildings` so a sub-path build fetches under its base. */
   async load(baseUrl = "/data/buildings"): Promise<boolean> {
     try {
       const response = await fetch(`${baseUrl}/buildings.json`);

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { defineConfig, type Connect, type Plugin } from "vite";
+import { defineConfig, type Connect, type Plugin, type ProxyOptions } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
@@ -44,14 +44,49 @@ function serveData(
   response.end(fs.readFileSync(file));
 }
 
+/**
+ * Path prefixes the data routes are mounted on: always "/", plus the vite base when it is an absolute
+ * sub path (`--base /viz/` gives "/viz/"), so `${base}data` and `${base}api` work in dev and preview
+ * exactly like the root ones. A relative ("./") or full-URL base adds nothing: the page then resolves
+ * data against its own location, which only a real server (see README 生产部署) can map.
+ */
+export function routePrefixes(base: string | undefined): string[] {
+  const b = base && base.startsWith("/") ? (base.endsWith("/") ? base : `${base}/`) : "/";
+  return b === "/" ? ["/"] : ["/", b];
+}
+
+/** dev / preview proxy for /api and /data under every prefix; the sub-path copies strip their prefix. */
+export function dataProxy(base: string | undefined, target: string): Record<string, ProxyOptions> {
+  const proxy: Record<string, ProxyOptions> = {};
+  for (const prefix of routePrefixes(base)) {
+    for (const route of ["api", "data"]) {
+      const from = `${prefix}${route}`;
+      const strip = prefix.slice(0, -1);
+      proxy[from] = strip
+        ? { target, changeOrigin: true, rewrite: (p) => (p.startsWith(strip) ? p.slice(strip.length) : p) }
+        : { target, changeOrigin: true };
+    }
+  }
+  return proxy;
+}
+
 function dataPlugin(): Plugin {
+  let prefixes = ["/"];
   return {
     name: "serve-external-data",
+    // proxy follows the merged config, CLI --base included
+    config(config) {
+      const proxy = dataProxy(config.base, dataApi);
+      return { server: { proxy }, preview: { proxy } };
+    },
+    configResolved(config) {
+      prefixes = routePrefixes(config.base);
+    },
     configureServer(server) {
-      server.middlewares.use("/data", serveData);
+      for (const prefix of prefixes) server.middlewares.use(`${prefix}data`, serveData);
     },
     configurePreviewServer(server) {
-      server.middlewares.use("/data", serveData);
+      for (const prefix of prefixes) server.middlewares.use(`${prefix}data`, serveData);
     },
     closeBundle() {
       fs.cpSync(dataRoot, path.resolve(__dirname, "dist/data"), { recursive: true });
@@ -64,10 +99,15 @@ function dataPlugin(): Plugin {
 const cesiumSource = "node_modules/cesium/Build/Cesium";
 const cesiumBaseUrl = "cesium";
 
-/** CESIUM_BASE_URL = <vite base>cesium, so `vite build --base /sub/` (or `base` in config) finds the copied assets. */
+/**
+ * CESIUM_BASE_URL = <vite base>cesium, so `vite build --base /sub/` (or `base` in config) finds the copied
+ * assets. A relative base ("./", "" ) stays relative ("./cesium"): Cesium resolves CESIUM_BASE_URL against
+ * the page, so a build opened from any directory still finds its own copy.
+ */
 export function cesiumBaseFor(base: string | undefined): string {
-  const b = base && base !== "./" ? base : "/";
-  return `${b.endsWith("/") ? b : `${b}/`}${cesiumBaseUrl}`;
+  if (base === undefined) return `/${cesiumBaseUrl}`;
+  if (base === "" || base === "./" || base === ".") return `./${cesiumBaseUrl}`;
+  return `${base.endsWith("/") ? base : `${base}/`}${cesiumBaseUrl}`;
 }
 
 function cesiumBasePlugin(): Plugin {
@@ -96,17 +136,8 @@ export default defineConfig({
   publicDir: false,
   assetsInclude: ["**/*.wasm"],
   worker: { format: "es" },
+  // /api and /data proxies (root and `${base}`) come from dataPlugin's config hook
   server: {
     host: "0.0.0.0",
-    proxy: {
-      "/api": { target: dataApi, changeOrigin: true },
-      "/data": { target: dataApi, changeOrigin: true },
-    },
-  },
-  preview: {
-    proxy: {
-      "/api": { target: dataApi, changeOrigin: true },
-      "/data": { target: dataApi, changeOrigin: true },
-    },
   },
 });
