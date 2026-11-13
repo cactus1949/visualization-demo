@@ -137,6 +137,7 @@ export function isSparseVar(
   let low = 0;
   let total = 0;
   for (let i = 0; i < data.length; i += step) {
+    if (!Number.isFinite(data[i]!)) continue;
     total += 1;
     if (data[i]! <= cut) low += 1;
   }
@@ -166,6 +167,7 @@ export function discardedFraction(
   for (let i = 0; i < data.length; i += step) {
     total += 1;
     const v = data[i]!;
+    if (!Number.isFinite(v)) { total -= 1; continue; }
     if (
       opts.filterEnable &&
       (v < (opts.filterMin ?? -Infinity) - 1e-6 || v > (opts.filterMax ?? Infinity) + 1e-6)

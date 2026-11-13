@@ -130,6 +130,14 @@ export class AtmosScene {
     };
     for (let i = 0; i < nx * ny; i += 1) {
       const value = values(i);
+      if (!Number.isFinite(value)) {
+        fieldBytes[i * 4 + 3] = 0;
+        bytes[i * 4] = base.r * 255;
+        bytes[i * 4 + 1] = base.g * 255;
+        bytes[i * 4 + 2] = base.b * 255;
+        bytes[i * 4 + 3] = 255;
+        continue;
+      }
       // Colour mapping stays on the fixed `range`; the filter only masks.
       const t = THREE.MathUtils.clamp((value - range[0]) / (range[1] - range[0] || 1), 0, 1);
       const j = Math.round(t * 255) * 4;

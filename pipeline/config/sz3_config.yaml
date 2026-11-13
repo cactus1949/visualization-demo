@@ -1,26 +1,72 @@
 # SZ3 export format (pipeline/sz3pipe). Only used by `python -m nc_export --format sz3`.
 # Delete this file together with pipeline/sz3pipe/ when the SZ3 format is dropped.
+# Rules and file layout: docs/sz3-error-bound.md.
 #
-# tier T1L: every 3D field is compressed level by level (one SZ3 stream per level),
-# 2D fields as one stream. Error bound (absolute, in the transform domain):
-#   f16_err       = this frame's float16 max rounding error (what the current f16 file has)
-#   u8_half_step  = half of this frame's own 8-bit step (per level for 3D) = current u8 max error
-#   integer       = 0.49 and rounded after decoding (lossless for categories)
-# derive: not stored. The browser recomputes it from already-stored fields. The exporter
-# checks every frame: the formula must hold on the nc values (error <= 5% of the half step)
-# and the value recomputed from the decoded inputs must stay within max_err (physical units),
-# or within one 8-bit step per level when max_err is not given. Otherwise the field is
-# stored with SZ3 in every frame.
-# u_gust max_err 0.0094 m/s = the smallest per-level u_gust error of the current format (6h case).
+# tier T1L: 3D fields one SZ3 stream per level, 2D fields one stream.
+# Per level and frame, in the transform domain:  eb = min(P, ratio * finite range of the level)
+#   constant level (range 0, or all NaN) -> one value in the index, no bytes.
+# Acceptance after decoding: per-level max_err <= eb, per-level rmse <= rmse_ratio * eb,
+#   |field max/min error| <= eb, argmax/argmin same cell or a tie within 2 * eb.
+#   Failing -> eb * ladder[1], eb * ladder[2], then quantised (fallback: u8 | f16) for that frame.
+# codec: sz3 | quant | auto (default). auto = quant when the frame's non-zero finite fraction
+#   is below sparse_frac (near-zero fields: icing, precip, cloud), otherwise sz3.
+#
+# P (physical lower bound, physical units; log10 domain for transform: log10). Basis for every
+# variable = the stricter of
+#   probe  : half of the last digit the probe shows (web/src/state/fieldStyle.ts formatValue:
+#            >=100 -> 0 decimals, >=10 -> 1, >=1 -> 2, >=0.01 -> 3, smaller -> 2 significant digits)
+#            at the variable's usual magnitude;
+#   colour : half a colour step, display_range span / 512 (256-entry LUT, quant_config_6h.yaml).
+# Derived fields (derive:) are not stored; their P applies only when the formula check fails and
+# the field is stored instead.
 tier: T1L
-defaults: {bound: u8_half_step}
-u: {bound: f16_err}
-v: {bound: f16_err}
-wind_shear: {transform: log10}
-visibility: {transform: log10}
-risk_level: {bound: integer}
-sigma_u: {derive: {op: profile, from: ustar, coef: 2.4, exponent: 0.3333333333333333}}
-sigma_v: {derive: {op: profile, from: ustar, coef: 1.8, exponent: 0.3333333333333333}}
-sigma_w: {derive: {op: profile, from: ustar, coef: 1.2, exponent: 0.3333333333333333}}
-u_gust: {derive: {op: gust, u: u, v: v, sigma: sigma_u}, max_err: 0.0094}
-cloud_low: {derive: {op: copy, from: cloud}}
+defaults: {ratio: 0.001953125, rmse_ratio: 0.6, ladder: [1.0, 0.25, 0.0625], codec: auto, sparse_frac: 0.01, fallback: u8}
+
+# P = 0.004: set by the task (probe 1-10 m/s -> 2 decimals -> 0.005; colour 30/512 = 0.059).
+#   0.004 also matches the float16 rounding error of the current format below 16 m/s (0.0039).
+u: {P: 0.004, fallback: f16}
+v: {P: 0.004, fallback: f16}
+# plan value: colour 0.5/512 = 0.00098. The probe (0.01-1 -> 3 decimals) would give 0.0005;
+#   kept at the colour step as agreed in the plan, so the 3rd decimal can differ by 1.
+w: {P: 0.001}
+# probe 1-10 -> 2 decimals -> 0.005 (colour 13/512 = 0.025)
+tke: {P: 0.005}
+# plan value, log10 domain: relative 0.46 %, at 0.1 1/s error 0.00046 < probe 3rd-decimal half (0.0005)
+wind_shear: {transform: log10, P: 0.002}
+# probe 0.01-1 -> 3 decimals -> 0.0005 (colour 0.6/512 = 0.0012)
+dirdz: {P: 0.0005}
+# plan value: colour 1/512 = 0.002 (probe 3 decimals would give 0.0005; kept at the colour step)
+icing_index: {P: 0.002}
+# usual magnitude 10-100 assumed (no icing in the sample day) -> 1 decimal -> 0.05 (colour 600/512 = 1.17)
+icing_accum: {P: 0.05}
+# colour 25/512 = 0.049 -> 0.05 (probe >= 100 shows integers -> 0.5)
+t2m: {P: 0.05}
+# colour 0.008/512 = 1.6e-5 (probe: 2 significant digits at 1e-3 -> 5e-5)
+q2m: {P: 1.5e-5}
+# probe 1-10 -> 2 decimals -> 0.005 (colour 16/512 = 0.031)
+u10m: {P: 0.005}
+v10m: {P: 0.005}
+# probe 0.01-1 -> 3 decimals -> 0.0005 (colour 2/512 = 0.0039). Tightened to 0.0002 because
+#   sigma_u/v/w are recomputed from ustar (x2.4 at most): 2.4 * 0.0002 = 0.00048 <= sigma P.
+ustar: {P: 0.0002}
+# probe 0.01-1 -> 3 decimals -> 0.0005 (colour 2.5/512 = 0.0049)
+precip: {P: 0.0005}
+# probe 10-100 % -> 1 decimal -> 0.05 (colour 100/512 = 0.195)
+cloud: {P: 0.05}
+# log10 domain. probe >= 100 shows whole metres -> 0.5 m; at 30000 m (top of the colour scale)
+#   relative 1.7e-5 -> log10 7e-6 (colour log10(30000/200)/512 = 0.0042)
+visibility: {transform: log10, P: 7.0e-6}
+# probe >= 100 shows whole Pa -> 0.5 (colour 3000/512 = 5.9)
+p: {P: 0.5}
+# categories: lossless, quantised as u8 integers (smaller than SZ3 integer mode, see the spec)
+risk_level: {P: integer, codec: quant}
+# derived (stored only if the formula check fails)
+# probe 0.01-1 -> 3 decimals -> 0.0005 (colour 4/512, 3/512, 2/512 = 0.0078 / 0.0059 / 0.0039)
+sigma_u: {P: 0.0005, derive: {op: profile, from: ustar, coef: 2.4, exponent: 0.3333333333333333}}
+sigma_v: {P: 0.0005, derive: {op: profile, from: ustar, coef: 1.8, exponent: 0.3333333333333333}}
+sigma_w: {P: 0.0005, derive: {op: profile, from: ustar, coef: 1.2, exponent: 0.3333333333333333}}
+# probe 1-10 -> 2 decimals -> 0.005 (colour 25/512 = 0.049). Recomputed from u, v, sigma_u; the
+#   derive check allows max_err 0.0094 m/s = the smallest per-level u_gust error of the current format.
+u_gust: {P: 0.005, derive: {op: gust, u: u, v: v, sigma: sigma_u}, max_err: 0.0094}
+# same as cloud
+cloud_low: {P: 0.05, derive: {op: copy, from: cloud}}

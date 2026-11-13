@@ -114,6 +114,7 @@ out vec4 outState;
 // grid-space velocity: gx, gy per second and km per second for height
 vec3 velocity(vec3 g) {
   vec3 w = windMs(windRaw(g));
+  if (isnan(w.x) || isnan(w.y) || isnan(w.z)) return vec3(0.0 / 0.0);
   return vec3(w.x / (uDomain.x * 1000.0), w.y / (uDomain.y * 1000.0), w.z * uWExag / 1000.0);
 }
 
@@ -134,7 +135,9 @@ void main() {
   if (s.w > life) { outState = spawn(id, false, life); return; }
   // RK2 midpoint
   vec3 k1 = velocity(s.xyz);
+  if (isnan(k1.x) || isnan(k1.y) || isnan(k1.z)) { outState = spawn(id, false, life); return; }
   vec3 k2 = velocity(s.xyz + 0.5 * uDt * k1);
+  if (isnan(k2.x) || isnan(k2.y) || isnan(k2.z)) { outState = spawn(id, false, life); return; }
   vec3 next = s.xyz + uDt * k2;
   bool outside = next.x < 0.0 || next.x > 1.0 || next.y < 0.0 || next.y > 1.0 ||
                  next.z < uHeight.x - 0.02 || next.z > uHeight.y + 0.02 ||

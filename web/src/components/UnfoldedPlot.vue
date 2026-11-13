@@ -26,9 +26,11 @@ const pixels = computed(() => {
   const span = Math.max(1e-9, props.max - props.min);
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < columns; x++) {
-      const n = Math.max(0, Math.min(1, (values[y * columns + x] - props.min) / span));
-      const ci = Math.round(n * 255) * 4;
+      const value = values[y * columns + x]!;
       const i = ((rows - 1 - y) * columns + x) * 4;
+      if (!Number.isFinite(value)) { img.data[i + 3] = 0; continue; }
+      const n = Math.max(0, Math.min(1, (value - props.min) / span));
+      const ci = Math.round(n * 255) * 4;
       img.data[i] = cmap[ci]!;
       img.data[i + 1] = cmap[ci + 1]!;
       img.data[i + 2] = cmap[ci + 2]!;

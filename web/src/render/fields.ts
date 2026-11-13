@@ -163,16 +163,16 @@ export function floatRange(
   const n = end - start;
   if (n <= 0) return [0, 1];
   const maxSample = 200_000;
-  let slice: Float32Array;
-  if (n <= maxSample) {
-    slice = values.subarray(start, end).slice();
-  } else {
-    slice = new Float32Array(maxSample);
-    const step = n / maxSample;
-    for (let i = 0; i < maxSample; i += 1) slice[i] = values[start + Math.floor(i * step)]!;
+  const sample: number[] = [];
+  const count = Math.min(maxSample, n);
+  const step = n / count;
+  for (let i = 0; i < count; i += 1) {
+    const value = values[start + Math.floor(i * step)]!;
+    if (Number.isFinite(value)) sample.push(value);
   }
-  slice.sort();
-  const at = (p: number) => slice[Math.min(slice.length - 1, Math.max(0, Math.floor(p * (slice.length - 1))))]!;
+  if (!sample.length) return [0, 1];
+  sample.sort((a, b) => a - b);
+  const at = (p: number) => sample[Math.min(sample.length - 1, Math.max(0, Math.floor(p * (sample.length - 1))))]!;
   const lo = at(lowPct), hi = at(highPct);
   return [lo, hi > lo ? hi : lo + 1e-9];
 }

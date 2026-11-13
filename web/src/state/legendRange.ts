@@ -8,7 +8,10 @@ export type DataRange = { min: number; max: number };
  * min(s * (maxB - minB), (1 - s) * (maxA - minA)) on each side.
  */
 export function blendRange(a: DataRange, b: DataRange | null, s: number): DataRange {
-  if (!b || s === 0) return { min: a.min, max: a.max };
+  const aValid = Number.isFinite(a.min) && Number.isFinite(a.max);
+  const bValid = Boolean(b && Number.isFinite(b.min) && Number.isFinite(b.max));
+  if (!aValid) return bValid ? { min: b!.min, max: b!.max } : { min: a.min, max: a.max };
+  if (!b || !bValid || s === 0) return { min: a.min, max: a.max };
   if (s === 1) return { min: b.min, max: b.max };
   const t = Math.max(0, Math.min(1, s));
   return { min: a.min + (b.min - a.min) * t, max: a.max + (b.max - a.max) * t };
@@ -21,7 +24,7 @@ export function rangeOfArray(data: Float32Array, start = 0, end = data.length): 
   const hi = Math.min(data.length, Math.max(lo, Math.floor(end)));
   for (let i = lo; i < hi; i += 1) {
     const value = data[i]!;
-    if (Number.isNaN(value)) continue;
+    if (!Number.isFinite(value)) continue;
     if (value < min) min = value;
     if (value > max) max = value;
   }
@@ -57,7 +60,8 @@ export function isAllZero(r: DataRange, eps = 1e-9): boolean {
 }
 
 export function emptyHint(name: string, r: DataRange | null): string | null {
-  if (!r || !isAllZero(r)) return null;
+  if (!r || !Number.isFinite(r.min) || !Number.isFinite(r.max)) return "当前无数据";
+  if (!isAllZero(r)) return null;
   return name === "icing_index" || name === "icing_accum" ? "本日无积冰" : "当前无数据";
 }
 

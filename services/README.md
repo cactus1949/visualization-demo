@@ -38,9 +38,10 @@ $WEB_ROOT/sz3/202611/20261111/manifest.json       t000/u.sz3pack + u.json …
 每种格式先写到同级的 `.20261111.tmp`，写完再整体改名替换，导到一半失败时旧数据不受影响。
 
 SZ3 的设置在 `pipeline/config/sz3_config.yaml`：
-- u、v、w、tke、wind_shear、dirdz 用 T1L，和测速报告用的是同一套设置，输出逐字节相同。
-- 其余存储的变量也用 SZ3。3D 变量按层压，2D 变量整块压。误差上限是该帧自己 8 位步长的一半。risk_level 的误差上限是 0.49，解码后取整，所以没有误差。
-- sigma_u、sigma_v、sigma_w、u_gust、cloud_low 不存，浏览器从 ustar、u、v、cloud 现算。导出时每帧都会核对公式，误差超限就改成存储。
+- 每个变量、每帧、每层在变换域使用 `min(P, ratio × 有限值范围)` 作为上限；常数层只写常数。
+- `codec: quant` 或自动识别到稀疏帧时使用独立的 u8/f16 量化，其余帧使用 SZ3 并按验收阶梯降档。实际 codec、tier、fallback、缺测数和层类型写入 index v2、manifest 和 `sz3_report.json`。
+- `risk_level` 以 u8 整数精确保存。`sigma_u`、`sigma_v`、`sigma_w`、`u_gust`、`cloud_low` 默认由浏览器派生；导出时公式检查失败才改为存储。
+- 规则细节见 `docs/sz3-error-bound.md`。导出按帧并行，进程数取 CPU 数减 1 和可用内存 / 2.5 GB 中较小的（40×300×300 单帧峰值约 1.9 GB）。
 
 ## 取数接口
 
