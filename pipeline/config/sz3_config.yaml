@@ -26,17 +26,16 @@ defaults: {ratio: 0.001953125, rmse_ratio: 0.6, ladder: [1.0, 0.25, 0.0625], cod
 #   0.004 also matches the float16 rounding error of the current format below 16 m/s (0.0039).
 u: {P: 0.004, fallback: f16}
 v: {P: 0.004, fallback: f16}
-# plan value: colour 0.5/512 = 0.00098. The probe (0.01-1 -> 3 decimals) would give 0.0005;
-#   kept at the colour step as agreed in the plan, so the 3rd decimal can differ by 1.
-w: {P: 0.001}
+# probe 0.01-1 -> 3 decimals -> 0.0005 (colour 0.5/512 = 0.00098)
+w: {P: 0.0005}
 # probe 1-10 -> 2 decimals -> 0.005 (colour 13/512 = 0.025)
 tke: {P: 0.005}
 # plan value, log10 domain: relative 0.46 %, at 0.1 1/s error 0.00046 < probe 3rd-decimal half (0.0005)
 wind_shear: {transform: log10, P: 0.002}
 # probe 0.01-1 -> 3 decimals -> 0.0005 (colour 0.6/512 = 0.0012)
 dirdz: {P: 0.0005}
-# plan value: colour 1/512 = 0.002 (probe 3 decimals would give 0.0005; kept at the colour step)
-icing_index: {P: 0.002}
+# probe 0.01-1 -> 3 decimals -> 0.0005 (colour 1/512 = 0.002)
+icing_index: {P: 0.0005}
 # usual magnitude 10-100 assumed (no icing in the sample day) -> 1 decimal -> 0.05 (colour 600/512 = 1.17)
 icing_accum: {P: 0.05}
 # colour 25/512 = 0.049 -> 0.05 (probe >= 100 shows integers -> 0.5)
