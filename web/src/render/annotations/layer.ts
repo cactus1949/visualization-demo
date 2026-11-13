@@ -146,6 +146,18 @@ export class AnnotationLayer {
     this.occlusionAdapter = fn;
   }
 
+  /** Debug: per-item state after the last update (ids, anchors, occlusion). */
+  debugItems(): { id: string; kind: string; occluded: boolean; onScreen: boolean; anchor: { x: number; y: number; z: number }; stemTo: { x: number; y: number; z: number } | null }[] {
+    return [...this.items.values()].map((it) => ({
+      id: it.id,
+      kind: it.desc.kind,
+      occluded: it.occluded,
+      onScreen: it.onScreen,
+      anchor: { ...it.desc.anchor },
+      stemTo: it.desc.stemTo ? { ...it.desc.stemTo } : null,
+    }));
+  }
+
   addMarker(id: string, desc: Omit<AnnotationDesc, "kind">): void {
     this.upsert(id, { ...desc, kind: "marker" });
   }

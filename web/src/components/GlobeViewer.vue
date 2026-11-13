@@ -66,11 +66,20 @@ function setBasemap(style: BasemapStyle): void {
   }
 }
 
-/** Bounding box and sphere (ENU units) of everything three draws: the shell box plus the test curtain / proxy margin. */
+/** Bounding box and sphere (ENU units) of everything three draws: the shell box (plus the test curtain margin) and the depth proxy. */
 function updateSphere(): void {
   if (!overlay.value || !geo.value) return;
   const { grid, map } = geo.value.meta;
   const b = shellBounds(grid, map, ui.terrain ? groundSampler(geo.value.ground) : null, ui.k, { samples: 11, marginM: 400 });
+  // The depth proxy reaches 1500 m past the domain: without it in the box, a low camera just outside
+  // the domain gets a near plane beyond the proxy ground in front of it, which then gets clipped.
+  const proxyGeom = overlay.value.proxy.mesh.geometry;
+  if (!proxyGeom.boundingBox) proxyGeom.computeBoundingBox();
+  const pb = proxyGeom.boundingBox!;
+  for (let c = 0; c < 3; c++) {
+    b.lo[c] = Math.min(b.lo[c]!, pb.min.getComponent(c));
+    b.hi[c] = Math.max(b.hi[c]!, pb.max.getComponent(c));
+  }
   overlay.value.box = { min: b.lo, max: b.hi };
   const center = b.lo.map((x, i) => (x + b.hi[i]!) / 2) as [number, number, number];
   overlay.value.sphere = { center, radius: Math.hypot(...b.hi.map((x, i) => x - b.lo[i]!)) / 2 };
