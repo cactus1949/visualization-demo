@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 *.pyc
 data/web/**/*.u16.bin.br
+data/web/geo/
 
 # dropped nc and date-stamped web exports (not committed)
 data/nc/
@@ -19,3 +20,6 @@ web/src/data/codecs/sz3/obj/
 web/src/data/codecs/sz3/gen/
 services/.env
 .env
+
+# local env files (Tianditu key lives in web/.env.local)
+*.local

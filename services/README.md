@@ -12,6 +12,10 @@
 | `WEB_ROOT` | `/data/web` | 导出到 `$WEB_ROOT/<格式>/yyyymm/yyyymmdd/` |
 | `DATA_API` | `http://127.0.0.1:8000` | 只给 `npm run dev` 用，Vite 把 `/api`、`/data` 转发到这里 |
 | `VITE_DATA_BASE` | 空 | 前端单独部署时，接口的完整地址 |
+| `VITE_TIANDITU_TK` | 空 | 地球页天地图 key，写在 `web/.env.local`（不提交） |
+| `VITE_DEV_BASEMAP` | 空 | 设为 `esri` 时地球页在 `npm run dev` 下改用 Esri 影像；生产构建忽略 |
+
+地球页的地理底座放在 `$WEB_ROOT/geo/`（`python -m geopipe` 生成，见 `pipeline/README.md`），接口按静态文件提供，`.br` 文件带 `Content-Encoding: br`。
 
 `/data/nc`、`/data/web` 不在仓库里，要自己建好目录，或者把这两个变量改到别的路径。
 
