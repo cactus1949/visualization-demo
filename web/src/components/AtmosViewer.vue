@@ -40,6 +40,7 @@ import { cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../
 import { exactInverse, polyInverse, type EnuFrame } from "../geo/mapping";
 import type { SectionGlobe } from "../render/sections/globe";
 import { readSectionSamples } from "../render/sections/globeDebug";
+import { pickSections, type PickSurface } from "../render/sections/globePick";
 import { terrainBlocksSight } from "../geo/lineOfSight";
 import { sampleGrid, type GridField } from "../geo/placement";
 import {
@@ -1149,10 +1150,19 @@ function syncVolumeSlices(): void {
     volumeField: volumeWanted() ? binding(layers.volumeVar) : null,
     volumeStyle: cutFaceStyle(),
   });
+  // Polyline walls go into the raymarch only when all of them fit in the 16 surface slots; otherwise
+  // the whole polyline falls back to plain mesh drawing (like box-select below) instead of losing walls.
+  let polyComposited = false;
   if (polyOn && vb && s) {
-    for (let i = 0; i < section.points.length - 1 && surfaces.length < 16; i += 1) {
-      const a = section.points[i], b = section.points[i + 1]; const dx = b.x - a.x, dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
-      surfaces.push({ ...s, kind: "vertical", normalX: -dz / len, normalZ: dx / len, offset: (-dz / len) * a.x + (dx / len) * a.z, ax: a.x, az: a.z, bx: b.x, bz: b.z });
+    const walls = section.points.length - 1;
+    if (surfaces.length + walls <= 16) {
+      for (let i = 0; i < walls; i += 1) {
+        const a = section.points[i], b = section.points[i + 1]; const dx = b.x - a.x, dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
+        surfaces.push({ ...s, kind: "vertical", normalX: -dz / len, normalZ: dx / len, offset: (-dz / len) * a.x + (dx / len) * a.z, ax: a.x, az: a.z, bx: b.x, bz: b.z });
+      }
+      polyComposited = true;
+    } else if (compositing) {
+      warnSurfaceOverflow("polyline", surfaces.length, walls);
     }
   }
   // ④ globe: box-select slabs also go into the raymarch when they fit (ray-ordered blending with the
@@ -1175,14 +1185,25 @@ function syncVolumeSlices(): void {
         });
       }
       boxComposited = true;
+    } else if (bb && levels.length) {
+      warnSurfaceOverflow("box", surfaces.length, levels.length);
     }
   }
   volume.setSurfaces(surfaces);
   volume.setCuts(cuts);
   hslice?.material.setVolumeComposited(compositing && Boolean(hslice?.group.visible) && Boolean(hb));
   vsection?.material.setVolumeComposited(compositing && Boolean(vsection?.group.visible) && Boolean(vb));
-  polyline?.material.setVolumeComposited(compositing && Boolean(polyline?.group.visible) && Boolean(vb));
+  polyline?.material.setVolumeComposited(compositing && Boolean(polyline?.group.visible) && polyComposited);
   boxStack?.material.setVolumeComposited(boxComposited);
+}
+
+/** Section + volume ray compositing is limited to 16 surfaces (only reachable in debug coexist mode). */
+let lastOverflowWarning = "";
+function warnSurfaceOverflow(kind: "polyline" | "box", used: number, wanted: number): void {
+  const key = `${kind}:${used}:${wanted}`;
+  if (key === lastOverflowWarning) return;
+  lastOverflowWarning = key;
+  console.warn(`[sections] ${kind}: ${wanted} surfaces do not fit next to ${used} others (max 16); drawn as meshes, not ray-composited with the volume`);
 }
 
 function updateComposite(): void { syncVolumeSlices(); }
@@ -1617,20 +1638,72 @@ let lastProbeHit: [number, number, number] | null = null;
 
 function pickTargets(): THREE.Object3D[] {
   const list: THREE.Object3D[] = [];
-  if (vsection?.group.visible) list.push(vsection.group);
-  if (hslice?.group.visible) list.push(hslice.mesh);
+  // globe: section meshes are box km placed in the shader (raycast disabled); globeSectionPick() covers them
+  if (!globeMode) {
+    if (vsection?.group.visible) list.push(vsection.group);
+    if (hslice?.group.visible) list.push(hslice.mesh);
+  }
   if (globeGround) list.push(globeGround.mesh);
   else if (atmos.ground.visible) list.push(atmos.ground);
   return list;
 }
 
+/**
+ * Globe: the same probe targets as the first two tabs (height slice, lon/lat wall; the polyline is not
+ * a probe target there either), picked analytically: the ENU pointer ray is clipped to the shell's
+ * bounding sphere and to the ground hit, then render/sections/globePick finds the first crossing of each
+ * section's box-km equation (sign change + bisection). Returns the hit in box km and in ENU units.
+ */
+function globeSectionPick(groundLocal: THREE.Vector3 | null): { box: THREE.Vector3; enu: THREE.Vector3 } | null {
+  const surfaces: PickSurface[] = [];
+  if (hslice?.group.visible) surfaces.push({ kind: "height", y: hslice.group.position.y, hx: domain.sx / 2, hz: domain.sz / 2 });
+  if (vsection?.group.visible) {
+    const c = vsection.chord();
+    if (c) surfaces.push({ kind: "wall", ax: c[0].x, az: c[0].y, bx: c[1].x, bz: c[1].y, top: domain.top });
+  }
+  if (!surfaces.length || !globeFrame) return null;
+  const o = atmos.root.worldToLocal(pointerRay!.ray.origin.clone());
+  const d = atmos.root.worldToLocal(pointerRay!.ray.origin.clone().add(pointerRay!.ray.direction)).sub(o);
+  // bounding sphere of the shell (8 box corners, exact placement)
+  const centre = new THREE.Vector3().copy(boxToEnu({ x: 0, y: domain.top / 2, z: 0 }) as THREE.Vector3);
+  let radius = 0;
+  for (const x of [-1, 1]) for (const y of [0, 1]) for (const z of [-1, 1])
+    radius = Math.max(radius, centre.distanceTo(boxToEnu({ x: (x * domain.sx) / 2, y: y * domain.top, z: (z * domain.sz) / 2 }) as THREE.Vector3));
+  radius *= 1.05;
+  const oc = o.clone().sub(centre);
+  const a = d.lengthSq(), b = oc.dot(d), c = oc.lengthSq() - radius * radius;
+  const disc = b * b - a * c;
+  if (disc < 0) return null;
+  const t0 = Math.max(0, (-b - Math.sqrt(disc)) / a);
+  let t1 = (-b + Math.sqrt(disc)) / a;
+  if (groundLocal) t1 = Math.min(t1, groundLocal.clone().sub(o).dot(d) / a);
+  if (!(t1 > t0)) return null;
+  const tmpEnu = new THREE.Vector3();
+  const tmpBox = new THREE.Vector3();
+  const hit = pickSections([o.x, o.y, o.z], [d.x, d.y, d.z], t0, t1, (p) => {
+    enuToBox(tmpEnu.set(p[0], p[1], p[2]), tmpBox);
+    return [tmpBox.x, tmpBox.y, tmpBox.z];
+  }, surfaces);
+  if (!hit) return null;
+  const box = new THREE.Vector3(hit.box[0], hit.box[1], hit.box[2]);
+  return { box, enu: new THREE.Vector3().copy(boxToEnu(box) as THREE.Vector3) };
+}
+
 function probeFromPointer(pin: boolean): boolean {
   const hit = pointerRay!.intersectObjects(pickTargets(), true)[0];
-  if (!hit) return false;
-  const local = atmos.root.worldToLocal(hit.point.clone());
+  const globe = globeMode && globeOpt() && globeFrame;
+  let local = hit ? atmos.root.worldToLocal(hit.point.clone()) : null;
+  const sec = globe ? globeSectionPick(local) : null;
+  if (sec) local = sec.enu;
+  if (!local) return false;
   lastProbeHit = [local.x, local.y, local.z];
   const g = manifest.value!.grid;
-  if (globeMode && globeOpt()) {
+  if (sec) {
+    // section hit: the cell under the box-km point, exactly as on the first two tabs
+    const cell = uvToCell(g.nx, g.ny, sec.box.x / domain.sx + 0.5, 0.5 - sec.box.z / domain.sz);
+    previewCell.ix = cell.ix;
+    previewCell.iy = cell.iy;
+  } else if (globe) {
     const inv = enuUnitsToUvAgl(globeOpt()!.map, [local.x, local.y, local.z], globeK(), globeGroundField());
     const cell = uvToCell(g.nx, g.ny, inv.u, inv.v);
     previewCell.ix = cell.ix;

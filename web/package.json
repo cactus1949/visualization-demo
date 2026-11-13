@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "vue-tsc --noEmit",
-    "test": "node --test --experimental-strip-types src/state/fetchWindow.test.ts src/state/timeline.test.ts src/state/openVariables.test.ts src/state/legendRange.test.ts src/data/windowCache.test.ts src/data/dataBase.test.ts src/data/codecs/current/decode.test.ts src/data/codecs/sz3/slabs.test.ts src/geo/mapping.test.ts src/geo/placement.test.ts src/geo/boxEnu.test.ts src/geo/geoGrid.test.ts src/geo/shellBounds.test.ts src/geo/lineOfSight.test.ts src/globe/basemapChoice.test.ts src/globe/depthMode.test.ts",
+    "test": "node --test --experimental-strip-types src/state/fetchWindow.test.ts src/state/timeline.test.ts src/state/openVariables.test.ts src/state/legendRange.test.ts src/data/windowCache.test.ts src/data/dataBase.test.ts src/data/codecs/current/decode.test.ts src/data/codecs/sz3/slabs.test.ts src/geo/mapping.test.ts src/geo/placement.test.ts src/geo/boxEnu.test.ts src/geo/geoGrid.test.ts src/geo/shellBounds.test.ts src/geo/lineOfSight.test.ts src/render/sections/globePick.test.ts src/globe/basemapChoice.test.ts src/globe/depthMode.test.ts",
     "build": "npm run typecheck && vite build",
     "format": "prettier --write src scripts vite.config.ts index.html"
   },

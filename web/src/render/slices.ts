@@ -409,8 +409,8 @@ export class VerticalSection {
     this.setPlacement(this.normal().multiplyScalar(offsetKm), this.azimuthDeg);
   }
 
-  /** Clip the infinite line center + t·dir against the domain rectangle (Liang–Barsky). */
-  private chord(): [THREE.Vector2, THREE.Vector2] | null {
+  /** Clip the infinite line center + t·dir against the domain rectangle (Liang–Barsky). Box km (x, z). */
+  chord(): [THREE.Vector2, THREE.Vector2] | null {
     const d = this.direction();
     const hx = this.domain.sx / 2;
     const hz = this.domain.sz / 2;
