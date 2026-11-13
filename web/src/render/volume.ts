@@ -23,33 +23,8 @@ export type CurvedVolumeOptions = {
 
 export type DepthEncoding = "linear" | "log";
 
-const vertexShader = /* glsl */ `
-uniform mat4 uRootInverse;
-out vec3 vWorld;
-void main() {
-  vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}
-`;
-
-const fragmentShader = /* glsl */ `
-precision highp float;
-precision highp sampler3D;
-${GLSL_DOMAIN}
-uniform sampler3D uField;
-uniform sampler2D uColormap;
-uniform vec3 uCameraLocal;
-uniform float uMin;
-uniform float uMax;
-uniform float uFilterMin;
-uniform float uFilterMax;
-uniform float uFilterEnable;
-uniform float uThreshold;
-uniform float uOpacity;
-uniform float uSteps;
-uniform vec3 uCutLo;
-uniform vec3 uCutHi;
-uniform sampler3D uSliceField;
+/** Section surfaces composited inside the raymarch (box tabs and, since ④, the globe). */
+const SURF_UNIFORMS_GLSL = /* glsl */ `uniform sampler3D uSliceField;
 uniform sampler2D uSliceColormap;
 uniform sampler3D uSectionField;
 uniform sampler2D uSectionColormap;
@@ -67,24 +42,8 @@ uniform float uSurfFilterEnable[16];
 uniform float uSurfContours[16];
 uniform float uSurfLowAlpha[16];
 uniform float uSurfLowThreshold[16];
-${GLSL_LOW_ALPHA}
-uniform sampler2D uDepth;
-uniform float uDepthValid;
-uniform vec2 uResolution;
-uniform mat4 uInvProjection;
-uniform mat4 uInvView;
-uniform mat4 uRootInverse;
-in vec3 vWorld;
-out vec4 outColor;
-
-vec2 hitBox(vec3 o, vec3 d, vec3 lo, vec3 hi) {
-  vec3 inv = 1.0 / d;
-  vec3 a = (lo - o) * inv, b = (hi - o) * inv;
-  vec3 mn = min(a, b), mx = max(a, b);
-  return vec2(max(max(mn.x, mn.y), mn.z), min(min(mx.x, mx.y), mx.z));
-}
-
-bool insideAA(vec3 p, vec4 p0, vec4 p1) {
+`;
+const SURF_SPAN_GLSL = /* glsl */ `bool insideAA(vec3 p, vec4 p0, vec4 p1) {
   return p.x >= p0.w - 1e-5 && p.x <= p1.x + 1e-5 && p.z >= p1.y - 1e-5 && p.z <= p1.z + 1e-5;
 }
 
@@ -97,34 +56,9 @@ bool onSegment(vec3 p, vec4 p0, vec4 p1) {
   return t >= -1e-4 && t <= 1.0 + 1e-4;
 }
 
-float surfT(int i, vec3 o, vec3 d) {
-  float q = 1e30;
-  if (uSurfKind[i] < 0.5) {
-    if (abs(d.y) > 1e-7) {
-      q = (uSurfP0[i].x - o.y) / d.y;
-      vec3 p = o + d * q;
-      if (p.x < uSurfP0[i].y - 1e-5 || p.x > uSurfP0[i].z + 1e-5 || p.z < uSurfP0[i].w - 1e-5 || p.z > uSurfP1[i].x + 1e-5)
-        q = 1e30;
-    }
-  } else {
-    vec2 n = uSurfP0[i].xy;
-    float den = n.x * d.x + n.y * d.z;
-    if (abs(den) > 1e-7) {
-      q = (uSurfP0[i].z - n.x * o.x - n.y * o.z) / den;
-      vec3 p = o + d * q;
-      bool yOk;
-      if (uSurfBinding[i] > 1.5)
-        yOk = p.y >= uCutLo.y - 1e-5 && p.y <= uCutHi.y + 1e-5;
-      else
-        yOk = p.y >= 0.0 && p.y <= uDomain.z;
-      bool spanOk = uSurfP1[i].w > 0.5 ? onSegment(p, uSurfP0[i], uSurfP1[i]) : insideAA(p, uSurfP0[i], uSurfP1[i]);
-      if (!yOk || !spanOk) q = 1e30;
-    }
-  }
-  return q;
-}
-
-vec4 surfaceColor(int i, vec3 p) {
+`;
+/** Needs uField / uColormap, localToTex (GLSL_DOMAIN) and lowAlphaFactor (GLSL_LOW_ALPHA). */
+const SURF_COLOR_GLSL = /* glsl */ `vec4 surfaceColor(int i, vec3 p) {
   float v;
   vec4 c;
   if (uSurfBinding[i] < 0.5) {
@@ -152,7 +86,79 @@ vec4 surfaceColor(int i, vec3 p) {
   return c;
 }
 
+`;
+
+const vertexShader = /* glsl */ `
+uniform mat4 uRootInverse;
+out vec3 vWorld;
 void main() {
+  vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const fragmentShader = /* glsl */ `
+precision highp float;
+precision highp sampler3D;
+${GLSL_DOMAIN}
+uniform sampler3D uField;
+uniform sampler2D uColormap;
+uniform vec3 uCameraLocal;
+uniform float uMin;
+uniform float uMax;
+uniform float uFilterMin;
+uniform float uFilterMax;
+uniform float uFilterEnable;
+uniform float uThreshold;
+uniform float uOpacity;
+uniform float uSteps;
+uniform vec3 uCutLo;
+uniform vec3 uCutHi;
+${SURF_UNIFORMS_GLSL}${GLSL_LOW_ALPHA}
+uniform sampler2D uDepth;
+uniform float uDepthValid;
+uniform vec2 uResolution;
+uniform mat4 uInvProjection;
+uniform mat4 uInvView;
+uniform mat4 uRootInverse;
+in vec3 vWorld;
+out vec4 outColor;
+
+vec2 hitBox(vec3 o, vec3 d, vec3 lo, vec3 hi) {
+  vec3 inv = 1.0 / d;
+  vec3 a = (lo - o) * inv, b = (hi - o) * inv;
+  vec3 mn = min(a, b), mx = max(a, b);
+  return vec2(max(max(mn.x, mn.y), mn.z), min(min(mx.x, mx.y), mx.z));
+}
+
+${SURF_SPAN_GLSL}float surfT(int i, vec3 o, vec3 d) {
+  float q = 1e30;
+  if (uSurfKind[i] < 0.5) {
+    if (abs(d.y) > 1e-7) {
+      q = (uSurfP0[i].x - o.y) / d.y;
+      vec3 p = o + d * q;
+      if (p.x < uSurfP0[i].y - 1e-5 || p.x > uSurfP0[i].z + 1e-5 || p.z < uSurfP0[i].w - 1e-5 || p.z > uSurfP1[i].x + 1e-5)
+        q = 1e30;
+    }
+  } else {
+    vec2 n = uSurfP0[i].xy;
+    float den = n.x * d.x + n.y * d.z;
+    if (abs(den) > 1e-7) {
+      q = (uSurfP0[i].z - n.x * o.x - n.y * o.z) / den;
+      vec3 p = o + d * q;
+      bool yOk;
+      if (uSurfBinding[i] > 1.5)
+        yOk = p.y >= uCutLo.y - 1e-5 && p.y <= uCutHi.y + 1e-5;
+      else
+        yOk = p.y >= 0.0 && p.y <= uDomain.z;
+      bool spanOk = uSurfP1[i].w > 0.5 ? onSegment(p, uSurfP0[i], uSurfP1[i]) : insideAA(p, uSurfP0[i], uSurfP1[i]);
+      if (!yOk || !spanOk) q = 1e30;
+    }
+  }
+  return q;
+}
+
+${SURF_COLOR_GLSL}void main() {
   vec3 rayLocal = (uRootInverse * vec4(vWorld, 1.0)).xyz;
   vec3 dir = normalize(rayLocal - uCameraLocal);
   vec3 domainLo = vec3(-uDomain.x * 0.5, 0.0, -uDomain.y * 0.5);
@@ -264,9 +270,10 @@ precision highp sampler3D;
 ${geoInverseGlsl(map)}
 ${GEO_GROUND_GLSL}
 ${GLSL_LOW_ALPHA}
-uniform vec3 uGridN;
+${GLSL_DOMAIN}
 uniform sampler3D uField;
 uniform sampler2D uColormap;
+${SURF_UNIFORMS_GLSL}
 uniform float uGeoTop;
 uniform vec3 uBoxLo;
 uniform vec3 uBoxHi;
@@ -302,6 +309,41 @@ vec2 hitBox(vec3 o, vec3 d, vec3 lo, vec3 hi) {
 vec3 shellToTex(vec2 uv, float r) {
   return vec3((uv * (uGridN.xy - 1.0) + 0.5) / uGridN.xy, r);
 }
+${SURF_SPAN_GLSL}
+${SURF_COLOR_GLSL}
+// ④ sections on the globe: surfaces are planes in first-two-tab box km, so test every ray step
+// in box km. Ray position -> (u, v, h) -> AGL r -> box (x east, y = r * top km, z south).
+vec3 boxOfUvh(vec3 uvh) {
+  float r = (uvh.z * 1e4 - uGeoTerrain * geoGround(uvh.xy)) / (uGeoK * uGeoTop);
+  return vec3((uvh.x - 0.5) * uDomain.x, r * uDomain.z, (0.5 - uvh.y) * uDomain.y);
+}
+vec3 boxAt(vec3 o, vec3 dir, float t) {
+  return boxOfUvh(geoInverse(o + dir * t));
+}
+// signed distance-like value whose zero set is surface i (box km)
+float surfF(int i, vec3 p) {
+  if (uSurfKind[i] < 0.5) return p.y - uSurfP0[i].x;
+  return uSurfP0[i].x * p.x + uSurfP0[i].y * p.z - uSurfP0[i].z;
+}
+// same span tests as surfT() on the box tabs, at a point already on surface i
+bool surfSpan(int i, vec3 p) {
+  if (uSurfKind[i] < 0.5)
+    return !(p.x < uSurfP0[i].y - 1e-5 || p.x > uSurfP0[i].z + 1e-5 || p.z < uSurfP0[i].w - 1e-5 || p.z > uSurfP1[i].x + 1e-5);
+  bool yOk = uSurfBinding[i] > 1.5
+    ? p.y >= uCutLo.y * uDomain.z - 1e-5 && p.y <= uCutHi.y * uDomain.z + 1e-5
+    : p.y >= 0.0 && p.y <= uDomain.z;
+  bool spanOk = uSurfP1[i].w > 0.5 ? onSegment(p, uSurfP0[i], uSurfP1[i]) : insideAA(p, uSurfP0[i], uSurfP1[i]);
+  return yOk && spanOk;
+}
+// crossing of surface i between ray params a (value fa) and b (fb), two regula-falsi steps
+float surfCross(int i, vec3 o, vec3 dir, float a, float fa, float b, float fb) {
+  for (int k = 0; k < 2; k++) {
+    float t = a + (b - a) * fa / (fa - fb);
+    float ft = surfF(i, boxAt(o, dir, t));
+    if ((ft < 0.0) == (fa < 0.0)) { a = t; fa = ft; } else { b = t; fb = ft; }
+  }
+  return a + (b - a) * fa / (fa - fb);
+}
 // Occluder depth -> view-space point. linear: NDC z = d * 2 - 1. log: three's logdepthbuf,
 // gl_FragDepth = log2(1 + w) * FC / 2 with FC = 2 / log2(far + 1), so w = 2^(2 d / FC) - 1.
 vec3 depthToView(vec2 uv, float d) {
@@ -333,9 +375,50 @@ void main() {
   float stepKm = dt * length(vec3(dir.xy, dir.z / max(uGeoK, 1e-6))) * ${(map.enu_unit_m / 1000).toFixed(6)};
   float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
   vec4 acc = vec4(0.0);
-  for (int i = 0; i < 1024; i++) {
-    if (float(i) >= uSteps || acc.a > 0.97) break;
-    vec3 uvh = geoInverse(o + dir * (t0 + (float(i) + jit) * dt));
+  bool contributed = false;
+  bool anySurf = false;
+  float fPrev[16];
+  vec3 pPrev = boxAt(o, dir, t0);
+  for (int j = 0; j < 16; j++) {
+    fPrev[j] = 0.0;
+    if (uSurfEnabled[j] > 0.5) { anySurf = true; fPrev[j] = surfF(j, pPrev); }
+  }
+  float tPrev = t0;
+  // i == uSteps is the closing interval up to tEnd (surfaces only, no volume sample)
+  for (int i = 0; i < 1025; i++) {
+    if (float(i) > uSteps || acc.a > 0.97) break;
+    bool closing = float(i) >= uSteps;
+    float sampleT = closing ? tEnd : t0 + (float(i) + jit) * dt;
+    vec3 uvh = geoInverse(o + dir * sampleT);
+    if (anySurf) {
+      // surfaces crossed in (tPrev, sampleT], composited in ray order before this volume sample
+      vec3 pNow = boxOfUvh(uvh);
+      float tc[16];
+      for (int j = 0; j < 16; j++) {
+        tc[j] = 1e30;
+        if (uSurfEnabled[j] < 0.5) continue;
+        float f = surfF(j, pNow);
+        if ((f < 0.0) != (fPrev[j] < 0.0) && fPrev[j] != f) tc[j] = surfCross(j, o, dir, tPrev, fPrev[j], sampleT, f);
+        fPrev[j] = f;
+      }
+      for (int pass = 0; pass < 16; pass++) {
+        int best = -1;
+        float bt = 1e30;
+        for (int j = 0; j < 16; j++) if (tc[j] < bt) { bt = tc[j]; best = j; }
+        if (best < 0) break;
+        tc[best] = 1e30;
+        vec3 ps = boxAt(o, dir, bt);
+        if (!surfSpan(best, ps)) continue;
+        vec4 sc = surfaceColor(best, ps);
+        if (sc.a > 0.0) {
+          acc.rgb += (1.0 - acc.a) * sc.a * sc.rgb;
+          acc.a += (1.0 - acc.a) * sc.a;
+          contributed = true;
+        }
+      }
+      tPrev = sampleT;
+    }
+    if (closing || acc.a > 0.97) break;
     if (uvh.x < uCutLo.x || uvh.x > uCutHi.x || uvh.y < uCutLo.z || uvh.y > uCutHi.z) continue;
     float r = (uvh.z * 1e4 - uGeoTerrain * geoGround(uvh.xy)) / (uGeoK * uGeoTop);
     if (r < uCutLo.y || r > uCutHi.y) continue;
@@ -349,7 +432,7 @@ void main() {
     acc.rgb += (1.0 - acc.a) * a * c;
     acc.a += (1.0 - acc.a) * a;
   }
-  if (acc.a < 0.003) discard;
+  if (acc.a < 0.003 && !contributed) discard;
   outColor = vec4(acc.rgb / max(acc.a, 1e-8), acc.a);
 }`;
 }

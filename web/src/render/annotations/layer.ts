@@ -36,6 +36,18 @@ export interface AnnotationDesc {
   cluster?: string;
   /** Optional analytic test for handle occlusion in root-local coordinates. */
   occlusionTest?: (camLocal: THREE.Vector3, anchor: THREE.Vector3) => boolean;
+  /**
+   * "box": anchor / stemTo / awayFrom are first-two-tab box km even when the layer runs in "enu"
+   * (globe sections); they go through setBoxPlacement() every update, so k / terrain changes follow.
+   * Ignored without a box placement (box tabs).
+   */
+  space?: "box";
+}
+
+/** Globe: box km -> scene frame (exact placement) and back (camera position for analytic tests). */
+export interface BoxPlacement {
+  toFrame(p: Vec3): Vec3;
+  toBox(p: THREE.Vector3, out: THREE.Vector3): THREE.Vector3;
 }
 
 export interface AnnotationHit {
@@ -47,6 +59,7 @@ export interface AnnotationHit {
 
 interface PolygonItem {
   anchors: readonly Vec3[];
+  space?: "box";
   el: SVGGElement;
   halo: SVGPolygonElement;
   face: SVGPolygonElement;
@@ -113,6 +126,8 @@ export class AnnotationLayer {
   private frame = 0;
   private lastCam = new THREE.Vector3();
   private readonly camLocal = new THREE.Vector3();
+  private boxPlacement: BoxPlacement | null = null;
+  private readonly camBox = new THREE.Vector3();
 
   constructor(container: HTMLElement, root: THREE.Object3D) {
     this.root = root;
@@ -141,18 +156,37 @@ export class AnnotationLayer {
     this.coordinates = frame;
   }
 
+  /** Globe: how `space: "box"` items reach the scene frame (null: box tabs, anchors used as given). */
+  setBoxPlacement(placement: BoxPlacement | null): void {
+    this.boxPlacement = placement;
+  }
+
+  /** desc with box-km points mapped into the layer frame (same object when nothing to map). */
+  private placed(desc: AnnotationDesc): AnnotationDesc {
+    const bp = this.boxPlacement;
+    if (!bp || desc.space !== "box") return desc;
+    return {
+      ...desc,
+      anchor: bp.toFrame(desc.anchor),
+      stemTo: desc.stemTo ? bp.toFrame(desc.stemTo) : undefined,
+      awayFrom: desc.awayFrom ? bp.toFrame(desc.awayFrom) : undefined,
+    };
+  }
+
   /** Optional occlusion test in the same coordinates as the anchors (globe ENU → box occluder). */
   setOcclusionAdapter(fn: ((camLocal: THREE.Vector3, anchor: THREE.Vector3) => boolean) | null): void {
     this.occlusionAdapter = fn;
   }
 
   /** Debug: per-item state after the last update (ids, anchors, occlusion). */
-  debugItems(): { id: string; kind: string; occluded: boolean; onScreen: boolean; anchor: { x: number; y: number; z: number }; stemTo: { x: number; y: number; z: number } | null }[] {
+  debugItems(): { id: string; kind: string; occluded: boolean; onScreen: boolean; sx: number; sy: number; anchor: { x: number; y: number; z: number }; stemTo: { x: number; y: number; z: number } | null }[] {
     return [...this.items.values()].map((it) => ({
       id: it.id,
       kind: it.desc.kind,
       occluded: it.occluded,
       onScreen: it.onScreen,
+      sx: it.sx,
+      sy: it.sy,
       anchor: { ...it.desc.anchor },
       stemTo: it.desc.stemTo ? { ...it.desc.stemTo } : null,
     }));
@@ -171,7 +205,7 @@ export class AnnotationLayer {
   }
 
   /** Ground selection overlay, always above the scene, with CSS-pixel strokes. */
-  addPolygon(id: string, anchors: readonly Vec3[], role: AnnotationRole): void {
+  addPolygon(id: string, anchors: readonly Vec3[], role: AnnotationRole, space?: "box"): void {
     let item = this.polygons.get(id);
     if (!item) {
       const el = document.createElementNS(this.svg.namespaceURI, "g") as SVGGElement;
@@ -189,6 +223,7 @@ export class AnnotationLayer {
       this.polygons.set(id, item);
     }
     item.anchors = anchors;
+    item.space = space;
     const color = roleColor(role, "idle");
     item.face.setAttribute("stroke", color);
     item.face.setAttribute("fill", color);
@@ -292,6 +327,7 @@ export class AnnotationLayer {
       this.camLocal.copy(camera.position);
       this.root.worldToLocal(this.camLocal);
       if (checkOcc) this.lastCam.copy(camera.position);
+      if (this.boxPlacement) this.boxPlacement.toBox(this.camLocal, this.camBox);
     }
 
     this.polygonMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(this.root.matrixWorld);
@@ -311,7 +347,7 @@ export class AnnotationLayer {
     let output = this.clipB;
     let count = Math.min(item.anchors.length, 4);
     for (let i = 0; i < count; i += 1) {
-      const p = item.anchors[i]!;
+      const p = item.space === "box" && this.boxPlacement ? this.boxPlacement.toFrame(item.anchors[i]!) : item.anchors[i]!;
       input[i]!.set(p.x, p.y, p.z, 1).applyMatrix4(this.polygonMatrix);
     }
     // Clip near/far in homogeneous space so zooming through a corner does not
@@ -465,7 +501,7 @@ export class AnnotationLayer {
   }
 
   private projectItem(item: Item, camera: THREE.Camera, rect: DOMRect, checkOcc: boolean): void {
-    const { desc } = item;
+    const desc = this.placed(item.desc);
     if (desc.visible === false) {
       this.hide(item);
       return;
@@ -497,11 +533,13 @@ export class AnnotationLayer {
       }
     }
     if (desc.kind === "handle") {
-      item.occluded = Boolean(
-        this.occluderEnabled && desc.occlusionTest?.(this.camLocal, tmpAnchor),
-      );
+      // analytic tests are written in box km: give them the box-space camera on the globe
+      const boxed = item.desc.space === "box" && this.boxPlacement !== null;
+      const cam = boxed ? this.camBox : this.camLocal;
+      const anchor = boxed ? fill(tmpB, item.desc.anchor) : tmpAnchor;
+      item.occluded = Boolean(this.occluderEnabled && desc.occlusionTest?.(cam, anchor));
       if (checkOcc && this.occluder && desc.occlusionTest) {
-        item.occluded = item.occluded || this.occluder.blocked(this.camLocal, tmpAnchor);
+        item.occluded = item.occluded || this.occluder.blocked(cam, anchor);
       }
     } else if (this.occluderEnabled && this.occlusionAdapter) {
       if (checkOcc || this.frame % 4 === 1) item.occluded = this.occlusionAdapter(this.camLocal, tmpAnchor);
@@ -581,7 +619,7 @@ export class AnnotationLayer {
 
   private updateRing(item: Item, camera: THREE.Camera, rect: DOMRect, opacity: number): void {
     const ring = item.ring!;
-    const a = item.desc.anchor;
+    const a = this.placed(item.desc).anchor;
     const enu = this.coordinates === "enu";
     // box: ring in the y = 0 (xz) ground plane; enu: ring in the local horizontal (xy) at the anchor.
     const at = (dx: number, dz: number) =>

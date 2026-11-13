@@ -5,6 +5,9 @@ import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { SliceMaterial } from "../slices";
 import type { Domain } from "../fields";
 import { ANNOTATION_TOKENS as T, type AnnotationLayer } from "../annotations";
+import { segmentsFor, type SectionGlobe } from "./globe";
+
+type P3 = { x: number; y: number; z: number };
 
 export interface BoxStackParams {
   x0: number; z0: number; x1: number; z1: number;
@@ -34,10 +37,14 @@ export class BoxStack {
   private readonly faceLine: LineSegments2;
   private readonly hiddenLine: LineSegments2;
   private outlineKey = "";
+  private readonly globe: SectionGlobe | null;
+  /** Globe: box km -> scene (centre-ENU units), exact float64; used for the fat outline lines. */
+  private place: ((p: P3) => P3) | null = null;
 
-  constructor(domain: Domain, levels: number[]) {
+  constructor(domain: Domain, levels: number[], globe: SectionGlobe | null = null) {
     this.domain = domain;
-    this.material = new SliceMaterial(domain);
+    this.globe = globe;
+    this.material = new SliceMaterial(domain, globe);
     // Push slabs back a little so the outline lying on the bottom slab's perimeter wins.
     this.material.polygonOffset = true;
     this.material.polygonOffsetFactor = 1;
@@ -105,6 +112,18 @@ export class BoxStack {
     this.hiddenMaterial.resolution.set(w, h);
   }
 
+  /** Globe: how outline points go from box km to the scene. Call refreshPlacement() when k / terrain change. */
+  setPlacement(fn: ((p: P3) => P3) | null): void {
+    this.place = fn;
+    this.refreshPlacement();
+  }
+
+  /** Re-place the outline after a terrain or exaggeration change (surfaces follow the shared uniforms). */
+  refreshPlacement(): void {
+    this.outlineKey = "";
+    if (this.params.defined && !this.params.drawing) this.rebuildOutline(true);
+  }
+
   setAnnotationLayer(layer: AnnotationLayer | null): void {
     this.clearAnnotations();
     this.layer = layer;
@@ -112,9 +131,10 @@ export class BoxStack {
   }
 
   /** Sort translucent slabs back-to-front in root-local space. */
-  sortSlabs(camera: THREE.Camera, root: THREE.Object3D): void {
+  sortSlabs(camera: THREE.Camera, root: THREE.Object3D, camBox?: THREE.Vector3): void {
     if (this.slabs.children.length < 2) return;
-    const cam = root.worldToLocal(camera.position.clone());
+    // globe: root-local is ENU, slabs are in box km -> the caller passes the camera in box km
+    const cam = camBox ? camBox.clone() : root.worldToLocal(camera.position.clone());
     const items = this.slabs.children.slice();
     items.sort((a, b) => cam.distanceToSquared(b.position) - cam.distanceToSquared(a.position));
     for (let i = 0; i < items.length; i += 1) this.slabs.children[i] = items[i]!;
@@ -155,7 +175,8 @@ export class BoxStack {
     for (let i = 0; i < inRange.length; i += this.params.stepLevels) {
       const h = inRange[i]!;
       const y = h / 1000;
-      const g = new THREE.PlaneGeometry(w, d);
+      // globe: up to 160 x 160 cells per slab (a stack can have dozens of slabs)
+      const g = this.globe ? new THREE.PlaneGeometry(w, d, segmentsFor(w, 160), segmentsFor(d, 160)) : new THREE.PlaneGeometry(w, d);
       g.rotateX(-Math.PI / 2);
       const m = new THREE.Mesh(g, this.material);
       m.position.set(cx, y, cz);
@@ -163,6 +184,13 @@ export class BoxStack {
       m.userData.levelM = h;
       m.userData.pickable = "box-stack";
       this.slabs.add(m);
+      if (this.globe) {
+        // placed in the vertex shader: box-km raycasts / culling would be wrong. No depth twins on
+        // the globe: they exist for the box tabs' particles (⑤ is still off here).
+        m.raycast = () => {};
+        m.frustumCulled = false;
+        continue;
+      }
       const depth = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
         color: 0xffffff,
         colorWrite: false,
@@ -207,7 +235,7 @@ export class BoxStack {
       this.layer?.addPolygon(OUTLINE_ID, [
         { x: x0, y: 0, z: z0 }, { x: x1, y: 0, z: z0 },
         { x: x1, y: 0, z: z1 }, { x: x0, y: 0, z: z1 },
-      ], "preview");
+      ], "preview", "box");
     }
     if (!on) {
       this.outlineKey = "";
@@ -234,12 +262,13 @@ export class BoxStack {
       return;
     }
     this.outlineKey = key;
-    const positions = [
+    let positions = [
       x0, baseY, z0, x1, baseY, z0,
       x1, baseY, z0, x1, baseY, z1,
       x1, baseY, z1, x0, baseY, z1,
       x0, baseY, z1, x0, baseY, z0,
     ];
+    if (this.globe && this.place) positions = this.placeOutline(positions);
     for (const line of [this.haloLine, this.faceLine, this.hiddenLine]) {
       const geometry = new LineSegmentsGeometry();
       geometry.setPositions(positions);
@@ -248,6 +277,24 @@ export class BoxStack {
       line.visible = true;
     }
     this.hiddenLine.computeLineDistances();
+  }
+
+  /** Globe: split each box-km edge so the line follows the shell, then place every point. */
+  private placeOutline(edges: number[]): number[] {
+    const out: number[] = [];
+    for (let e = 0; e < edges.length; e += 6) {
+      const ax = edges[e]!, ay = edges[e + 1]!, az = edges[e + 2]!;
+      const bx = edges[e + 3]!, by = edges[e + 4]!, bz = edges[e + 5]!;
+      const n = segmentsFor(Math.hypot(bx - ax, bz - az));
+      let prev = this.place!({ x: ax, y: ay, z: az });
+      for (let j = 1; j <= n; j++) {
+        const t = j / n;
+        const next = this.place!({ x: ax + (bx - ax) * t, y: ay + (by - ay) * t, z: az + (bz - az) * t });
+        out.push(prev.x, prev.y, prev.z, next.x, next.y, next.z);
+        prev = next;
+      }
+    }
+    return out;
   }
 
   /** True when the camera-to-anchor segment crosses a displayed slab footprint. */
@@ -293,6 +340,7 @@ export class BoxStack {
       used.add(id);
       this.layer!.addLabel(id, {
         anchor: { x: this.params.x0, y, z: this.params.z0 },
+        space: "box",
         text: `${h.toFixed(1)} m`,
         leader: true,
         awayFrom: { x: cx, y, z: cz },
@@ -320,6 +368,7 @@ export class BoxStack {
     corners.forEach((c, i) => {
       this.layer!.addHandle(`${HANDLE_PREFIX}${i}`, {
         anchor: { x: c.x, y: this.params.defined ? this.outlineY() : 0, z: c.z },
+        space: "box",
         role: this.params.drawing ? "preview" : "fixed",
         draggable: Boolean(this.params.defined),
         visible: true,

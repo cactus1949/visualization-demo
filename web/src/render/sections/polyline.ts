@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { SliceMaterial } from "../slices";
 import type { Domain } from "../fields";
 import type { AnnotationLayer } from "../annotations";
+import { gridQuad, segmentsFor, type SectionGlobe } from "./globe";
 
 export const MAX_POLYLINE_POINTS = 16;
 const HANDLE_PREFIX = "polyline-v-";
@@ -16,11 +17,16 @@ export class PolylineSection {
   private layer: AnnotationLayer | null = null;
   private selected = -1;
 
-  constructor(domain: Domain) {
+  private readonly globe: SectionGlobe | null;
+
+  constructor(domain: Domain, globe: SectionGlobe | null = null) {
     this.domain = domain;
-    this.material = new SliceMaterial(domain);
+    this.globe = globe;
+    this.material = new SliceMaterial(domain, globe);
     this.mesh = new THREE.Mesh(this.geometry, this.material);
     this.mesh.frustumCulled = false;
+    // globe: box-km geometry, CPU raycasts would hit the wrong place (vertices are dragged by handle)
+    if (globe) this.mesh.raycast = () => {};
     this.mesh.renderOrder = 3;
     this.mesh.userData.pickable = "polyline";
     this.group.add(this.mesh);
@@ -46,6 +52,10 @@ export class PolylineSection {
   }
 
   private rebuild(): void {
+    if (this.globe) {
+      this.rebuildGlobe();
+      return;
+    }
     const n = this.points.length;
     const top = this.domain.top;
     const pos = new Float32Array(Math.max(0, n - 1) * 12);
@@ -65,6 +75,38 @@ export class PolylineSection {
     this.syncHandles();
   }
 
+  /** Globe: every wall segment subdivided along its length so it follows the curved shell. */
+  private rebuildGlobe(): void {
+    const n = this.points.length;
+    const top = this.domain.top;
+    const parts: THREE.BufferGeometry[] = [];
+    for (let i = 0; i < n - 1; i += 1) {
+      const a = this.points[i]!, b = this.points[i + 1]!;
+      parts.push(gridQuad(
+        new THREE.Vector3(a.x, 0, a.z), new THREE.Vector3(b.x, 0, b.z),
+        new THREE.Vector3(b.x, top, b.z), new THREE.Vector3(a.x, top, a.z),
+        segmentsFor(Math.hypot(b.x - a.x, b.z - a.z)), 4,
+      ));
+    }
+    const count = parts.reduce((m, g) => m + g.getAttribute("position").count, 0);
+    const pos = new Float32Array(count * 3);
+    const idx: number[] = [];
+    let base = 0;
+    for (const g of parts) {
+      pos.set(g.getAttribute("position").array as Float32Array, base * 3);
+      for (const k of g.getIndex()!.array) idx.push(k + base);
+      base += g.getAttribute("position").count;
+      g.dispose();
+    }
+    this.geometry.dispose();
+    this.geometry = new THREE.BufferGeometry();
+    this.geometry.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    this.geometry.setIndex(idx);
+    this.mesh.geometry = this.geometry;
+    this.group.visible = n >= 2;
+    this.syncHandles();
+  }
+
   private syncHandles(): void {
     if (!this.layer) return;
     // A single vertex must still show its handle; the wall itself needs ≥2 points.
@@ -73,6 +115,7 @@ export class PolylineSection {
       const id = `${HANDLE_PREFIX}${i}`;
       this.layer!.addHandle(id, {
         anchor: { x: p.x, y: 0, z: p.z },
+        space: "box",
         role: "preview",
         draggable: true,
         visible,
