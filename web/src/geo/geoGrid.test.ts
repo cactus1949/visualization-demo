@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { demHeightAt, dequantize } from "./geoData.ts";
+import { demHeightAt, dequantize } from "./geoGrid.ts";
 
 describe("geo foundation files", () => {
   it("u16 little-endian samples decode to offset + q * scale", () => {

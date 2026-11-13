@@ -11,12 +11,12 @@ import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
 import type { FormatDef } from "../formats/types";
 import type { CurvedVolumeOptions } from "../render/volume";
-import { geoBaseUrl, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
+import { geoBaseUrl, lastDecodeMs, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
 import { applyBasemap } from "../globe/basemap";
 import { pickBasemapSource, type BasemapStyle } from "../globe/basemapChoice";
 import { terrainSwitch, type TerrainSwitch } from "../globe/terrain";
 import { DepthProxy } from "../globe/depthProxy";
-import { GlobeOverlay, depthEncodingFromUrl } from "../globe/overlay";
+import { GlobeOverlay } from "../globe/overlay";
 import { createGeoUniforms, type GeoUniforms } from "../globe/geoShader";
 import { createTestLayer } from "../globe/testLayer";
 import { buildReferenceOutline } from "../globe/referenceOutline";
@@ -24,6 +24,7 @@ import { measureAlignment } from "../globe/alignment";
 import { measureInverseResidualGpu } from "../globe/inverseResidual";
 import { shellBounds } from "../geo/mapping";
 import { groundSampler } from "../geo/placement";
+import { depthModeFromQuery, type GlobeDepthMode } from "../globe/depthMode";
 
 declare global {
   interface Window {
@@ -42,6 +43,7 @@ const tileErrors = ref(0);
 const tk = import.meta.env.VITE_TIANDITU_TK ?? "";
 const query = new URLSearchParams(location.search);
 const source = pickBasemapSource({ dev: import.meta.env.DEV, devFlag: import.meta.env.VITE_DEV_BASEMAP, query: query.get("devBasemap") });
+const depthMode: GlobeDepthMode = depthModeFromQuery(location.search);
 // measurement hooks only in dev or with ?globeDebug=1
 const debug = import.meta.env.DEV || query.get("globeDebug") === "1";
 const ui = reactive({ style: "img" as BasemapStyle, terrain: false, testLayer: false, proxy: true, k: 1 });
@@ -64,11 +66,12 @@ function setBasemap(style: BasemapStyle): void {
   }
 }
 
-/** Bounding sphere (ENU units) of everything three draws: the shell box plus the test curtain / proxy margin. */
+/** Bounding box and sphere (ENU units) of everything three draws: the shell box plus the test curtain / proxy margin. */
 function updateSphere(): void {
   if (!overlay.value || !geo.value) return;
   const { grid, map } = geo.value.meta;
   const b = shellBounds(grid, map, ui.terrain ? groundSampler(geo.value.ground) : null, ui.k, { samples: 11, marginM: 400 });
+  overlay.value.box = { min: b.lo, max: b.hi };
   const center = b.lo.map((x, i) => (x + b.hi[i]!) / 2) as [number, number, number];
   overlay.value.sphere = { center, radius: Math.hypot(...b.hi.map((x, i) => x - b.lo[i]!)) / 2 };
 }
@@ -130,6 +133,13 @@ function setView(name: string): void {
   viewer.camera.lookAtTransform(Matrix4.IDENTITY);
 }
 
+function setDepthView(range: number, pitch: number): void {
+  if (!viewer || !geo.value) return;
+  const g = geo.value.meta.grid;
+  viewer.camera.lookAt(Cartesian3.fromDegrees((g.lon_min + g.lon_max) / 2, (g.lat_min + g.lat_max) / 2, 0), new HeadingPitchRange(0, CMath.toRadians(pitch), range));
+  viewer.camera.lookAtTransform(Matrix4.IDENTITY);
+}
+
 let unmounted = false;
 
 onMounted(async () => {
@@ -175,7 +185,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   setBasemap(ui.style);
   const proxy = new DepthProxy(meta.grid, meta.map, dem);
   overlay.value = new GlobeOverlay(viewer.scene, meta.map, proxy, {
-    depthEncoding: depthEncodingFromUrl(),
+    depthMode,
     onContextLost: () => {
       window.__globeReady = false;
       status.value = "WebGL 上下文丢失";
@@ -183,7 +193,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
     },
   });
   geoUniforms = createGeoUniforms(meta.map, ground);
-  overlay.value.layers.add(createTestLayer(meta.map, geoUniforms, meta.grid.top_m));
+  overlay.value.layers.add(createTestLayer(meta.map, geoUniforms, meta.grid.top_m, debug ? Number(query.get("depthFaceAgl") ?? 50) : 50));
   overlay.value.layers.visible = ui.testLayer;
   outline = viewer.scene.primitives.add(new PolylineCollection());
   volumeOptions.value = { map: meta.map, grid: meta.grid, ground, geo: geoUniforms, dem };
@@ -207,11 +217,18 @@ function exposeApi(meta: GeoFoundation["meta"], ground: GeoFoundation["ground"])
     setView: (name: string) => setView(name),
     tilesLoaded: () => viewer!.scene.globe.tilesLoaded,
     measureAlignment: () => measureAlignment(viewer!.scene, o.camera, o.sync, meta.grid, meta.map, ui.terrain ? ground : null, ui.k),
-    camera: () => ({ near: o.camera.near, far: o.camera.far, fov: o.camera.fov, aspect: o.camera.aspect, sphere: o.sphere, camEnu: o.sync.cameraEnu(viewer!.camera) }),
-    status: () => ({ ...ui, source, tileErrors: tileErrors.value, drawCalls: o.drawCalls, depthEncoding: o.depthEncoding, residualFromPipeline: meta.map.residual_m }),
+    camera: () => ({ near: o.camera.near, far: o.camera.far, fov: o.camera.fov, aspect: o.camera.aspect, sphere: o.sphere, box: o.box, camEnu: o.sync.cameraEnu(viewer!.camera) }),
+    status: () => ({ ...ui, source, depthMode, depthEncoding: o.depthEncoding, decodeMs: lastDecodeMs, tileErrors: tileErrors.value, drawCalls: o.drawCalls, residualFromPipeline: meta.map.residual_m }),
   };
   if (!debug) return;
   Object.assign(window.__globeApi, {
+    // on: only the 50 m (or ?depthFaceAgl=) AGL face is drawn so its pixels can be counted
+    setDepthTestFace: (on: boolean) => {
+      o.layers.traverse((x) => { if (x.parent?.name === "globe-test-layer") x.visible = x.name === "depth-test-face" ? on : !on; });
+      if (outline) outline.show = !on && ui.testLayer;
+    },
+    setDepthView: (range: number, pitch: number) => setDepthView(range, pitch),
+    nudgeCamera: (right: number, up: number) => { viewer!.camera.moveRight(right); viewer!.camera.moveUp(up); },
     measureInverseResidual: (opts: { samples?: number } = {}) => {
       let r: unknown = null;
       o.resyncAfter(() => { r = measureInverseResidualGpu(o.renderer, meta.grid, meta.map, geoUniforms!, opts.samples ?? 101); });

@@ -15,6 +15,7 @@ import { Group, Mesh, PerspectiveCamera, Raycaster, Scene, Vector2, WebGLRendere
 import type { GeoMap } from "../geo/mapping";
 import { DepthProxy } from "./depthProxy";
 import { RtcCameraSync, type EnuSphere } from "./rtcCamera";
+import { DEFAULT_DEPTH_MODE, depthEncodingOf, depthModeFromQuery, type Box3Like, type GlobeDepthMode } from "./depthMode";
 import { applyLayerRendererConfig } from "../host/rendererConfig";
 import { withHidden } from "../host/hidden";
 import type { FrameHooks, ViewHost } from "../host/types";
@@ -22,14 +23,16 @@ import type { FrameHooks, ViewHost } from "../host/types";
 export type DepthEncoding = ViewHost["depthEncoding"];
 
 export interface CesiumHostOptions {
-  /** "log" (default, three logarithmicDepthBuffer) or "linear" (NDC z). `?globeDepth=linear` selects linear. */
+  /** "log" (default) or "linear" (NDC z). Prefer `depthMode` when legacy/near/log must be distinguished. */
   depthEncoding?: DepthEncoding;
+  /** legacy | near | log; `?globeDepth=linear` is an alias of near. Overrides depthEncoding when set. */
+  depthMode?: GlobeDepthMode;
   onContextLost?: () => void;
 }
 
-/** Default is log (three logarithmicDepthBuffer). `?globeDepth=linear` switches to a linear depth buffer. */
+/** Default is log. `?globeDepth=linear` (or `near`) uses a linear buffer; `legacy` is the PR ① sphere frustum. */
 export function depthEncodingFromUrl(search = location.search): DepthEncoding {
-  return new URLSearchParams(search).get("globeDepth") === "linear" ? "linear" : "log";
+  return depthEncodingOf(depthModeFromQuery(search));
 }
 
 export class GlobeOverlay implements ViewHost {
@@ -37,12 +40,15 @@ export class GlobeOverlay implements ViewHost {
   readonly camera = new PerspectiveCamera();
   readonly element: HTMLCanvasElement;
   readonly depthEncoding: DepthEncoding;
+  readonly depthMode: GlobeDepthMode;
   /** host-owned extras drawn after the proxy (the alignment test layer lives in `layers`) */
   readonly scene = new Scene();
   readonly layers = new Group();
   readonly sync: RtcCameraSync;
-  /** ENU bounding sphere of everything three draws; drives near / far (owned by the host) */
+  /** ENU bounding sphere of everything three draws; legacy near / far still use this */
   sphere: EnuSphere = { center: [0, 0, 0], radius: 1.5 };
+  /** ENU axis-aligned box of the same content; log / near frustums use this */
+  box: Box3Like = { min: [-1.5, -1.5, -1.5], max: [1.5, 1.5, 1.5] };
   drawCalls = 0;
   private readonly proxyScene = new Scene();
   private readonly ctx: CesiumContextInternals;
@@ -61,7 +67,8 @@ export class GlobeOverlay implements ViewHost {
   constructor(private readonly cesium: CesiumScene, map: GeoMap, readonly proxy: DepthProxy, opts: CesiumHostOptions = {}) {
     this.ctx = (cesium as unknown as { context: CesiumContextInternals }).context;
     this.element = cesium.canvas;
-    this.depthEncoding = opts.depthEncoding ?? "log";
+    this.depthMode = opts.depthMode ?? (opts.depthEncoding === "linear" ? "near" : opts.depthEncoding === "log" ? "log" : DEFAULT_DEPTH_MODE);
+    this.depthEncoding = depthEncodingOf(this.depthMode);
     this.onContextLost = opts.onContextLost ?? (() => {});
     this.renderer = new WebGLRenderer({ canvas: cesium.canvas, context: this.ctx._gl, logarithmicDepthBuffer: this.depthEncoding === "log" });
     this.renderer.autoClear = false;
@@ -71,7 +78,7 @@ export class GlobeOverlay implements ViewHost {
     // RTC sync writes the matrices; afterCamera's updateMatrixWorld() must not rebuild them from position
     this.camera.matrixAutoUpdate = false;
     this.camera.matrixWorldAutoUpdate = false;
-    this.sync = new RtcCameraSync(map.lon0, map.lat0, map.enu_unit_m);
+    this.sync = new RtcCameraSync(map.lon0, map.lat0, map.enu_unit_m, 1, this.depthMode);
     this.proxyScene.add(proxy.mesh);
     this.scene.add(this.layers);
     cesium.canvas.addEventListener("webglcontextlost", this.handleLost);
@@ -106,7 +113,7 @@ export class GlobeOverlay implements ViewHost {
     // beforeCamera reads last frame's draw calls for the HUD; count this frame from here
     this.hooks?.beforeCamera(now, dt, realDt);
     this.renderer.info.reset();
-    this.sync.sync(this.cesium.camera, this.camera, this.sphere);
+    this.sync.sync(this.cesium.camera, this.camera, this.sphere, this.box);
     this.hooks?.afterCamera(now, dt, realDt);
     this.resyncAfter(() => {
       const gl = this.renderer.getContext();

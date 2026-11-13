@@ -5,14 +5,9 @@
  */
 import type { GeoGrid, GeoMap } from "./mapping";
 import type { GridField } from "./placement";
+import { dequantize, type DecodeReply, type DecodeRequest, type Dem, type QuantizedMeta } from "./geoGrid";
 
-interface QuantizedMeta {
-  file: string;
-  nx: number;
-  ny: number;
-  offset: number;
-  scale: number;
-}
+export { dequantize, demHeightAt, type Dem, type QuantizedMeta } from "./geoGrid";
 
 export interface GeoJson {
   version: number;
@@ -23,17 +18,6 @@ export interface GeoJson {
   source?: Record<string, unknown>;
 }
 
-/** Ellipsoidal DEM, rows north -> south, columns west -> east, bounds are pixel centres. */
-export interface Dem {
-  nx: number;
-  ny: number;
-  west: number;
-  east: number;
-  south: number;
-  north: number;
-  values: Float32Array;
-}
-
 export interface GeoFoundation {
   meta: GeoJson;
   dem: Dem;
@@ -41,17 +25,13 @@ export interface GeoFoundation {
   ground: GridField;
 }
 
-export function geoBaseUrl(): string {
-  return `${(import.meta.env.VITE_DATA_BASE ?? "").replace(/\/$/, "")}/data/geo/`;
-}
+/** Worker-side decode time of the last load (ms), for the in-page check. */
+export let lastDecodeMs = 0;
 
-export function dequantize(raw: ArrayBuffer, q: QuantizedMeta): Float32Array {
-  const view = new DataView(raw);
-  const n = q.nx * q.ny;
-  if (raw.byteLength !== n * 2) throw new Error(`${q.file}: ${raw.byteLength} bytes, expected ${n * 2}`);
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) out[i] = q.offset + view.getUint16(i * 2, true) * q.scale;
-  return out;
+export function geoBaseUrl(): string {
+  const configured = import.meta.env.VITE_DATA_BASE;
+  const base = configured ?? import.meta.env.BASE_URL;
+  return `${base.replace(/\/$/, "")}/data/geo/`;
 }
 
 async function fetchOk(url: string): Promise<Response> {
@@ -67,20 +47,28 @@ export async function loadGeoFoundation(base = geoBaseUrl()): Promise<GeoFoundat
     fetchOk(base + meta.ground.file).then((r) => r.arrayBuffer()),
   ]);
   const d = meta.dem;
+  const decoded = await decodeInWorker(demRaw, groundRaw, d, meta.ground);
+  lastDecodeMs = decoded.ms;
   return {
     meta,
-    dem: { nx: d.nx, ny: d.ny, west: d.west, east: d.east, south: d.south, north: d.north, values: dequantize(demRaw, d) },
-    ground: { nx: meta.ground.nx, ny: meta.ground.ny, values: dequantize(groundRaw, meta.ground) },
+    dem: { nx: d.nx, ny: d.ny, west: d.west, east: d.east, south: d.south, north: d.north, values: decoded.dem },
+    ground: { nx: meta.ground.nx, ny: meta.ground.ny, values: decoded.ground },
   };
 }
 
-/** Bilinear DEM height at (lon, lat); `outside` beyond the DEM extent. */
-export function demHeightAt(dem: Dem, lon: number, lat: number, outside = 0): number {
-  const fx = ((lon - dem.west) / (dem.east - dem.west)) * (dem.nx - 1);
-  const fy = ((dem.north - lat) / (dem.north - dem.south)) * (dem.ny - 1);
-  if (!(fx >= 0 && fy >= 0 && fx <= dem.nx - 1 && fy <= dem.ny - 1)) return outside;
-  const x0 = Math.min(Math.floor(fx), dem.nx - 2), y0 = Math.min(Math.floor(fy), dem.ny - 2);
-  const ax = fx - x0, ay = fy - y0;
-  const at = (x: number, y: number) => dem.values[y * dem.nx + x]!;
-  return (at(x0, y0) * (1 - ax) + at(x0 + 1, y0) * ax) * (1 - ay) + (at(x0, y0 + 1) * (1 - ax) + at(x0 + 1, y0 + 1) * ax) * ay;
+/** u16 -> float32 for the DEM and ground grid off the main thread (module worker, buffers transferred). */
+async function decodeInWorker(dem: ArrayBuffer, ground: ArrayBuffer, demMeta: QuantizedMeta, groundMeta: QuantizedMeta): Promise<DecodeReply> {
+  if (typeof Worker === "undefined") return { dem: dequantize(dem, demMeta), ground: dequantize(ground, groundMeta), ms: 0 };
+  const worker = new Worker(new URL("./geoDecode.worker.ts", import.meta.url), { type: "module" });
+  try {
+    return await new Promise<DecodeReply>((resolve, reject) => {
+      worker.onmessage = (event: MessageEvent<DecodeReply | { error: string }>) =>
+        "error" in event.data ? reject(new Error(event.data.error)) : resolve(event.data);
+      worker.onerror = (event) => reject(event.error ?? new Error(`geo decode worker failed: ${event.message}`));
+      const req: DecodeRequest = { dem, ground, demMeta, groundMeta };
+      worker.postMessage(req, [dem, ground]);
+    });
+  } finally {
+    worker.terminate();
+  }
 }

@@ -1,11 +1,12 @@
 /**
  * Relative-to-centre camera sync. Cesium's view matrix is multiplied with the centre-ENU frame
  * in float64 (JS) before it reaches three, so GPU positions stay within a few ENU units instead
- * of ~6.4e6 m ECEF values. three gets its own near/far from the overlay's bounding sphere,
+ * of ~6.4e6 m ECEF values. three gets its own near/far from the overlay's bounding box (or, in legacy mode, the sphere),
  * not Cesium's huge frustum.
  */
 import { Cartesian3, Matrix4, PerspectiveFrustum, Transforms, type Camera as CesiumCamera } from "cesium";
 import type { PerspectiveCamera } from "three";
+import { DEFAULT_DEPTH_MODE, frustumDistances, type Box3Like, type GlobeDepthMode } from "./depthMode";
 
 export interface EnuSphere {
   /** centre in ENU units */
@@ -21,7 +22,7 @@ export class RtcCameraSync {
   private readonly tmp = new Matrix4();
   private readonly camEnu = new Cartesian3();
 
-  constructor(lon0: number, lat0: number, readonly unitM: number, private readonly minNearM = 1) {
+  constructor(lon0: number, lat0: number, readonly unitM: number, private readonly minNearM = 1, readonly depthMode: GlobeDepthMode = DEFAULT_DEPTH_MODE) {
     this.enuToEcef = Transforms.eastNorthUpToFixedFrame(Cartesian3.fromDegrees(lon0, lat0, 0));
     this.ecefToEnu = Matrix4.inverseTransformation(this.enuToEcef, new Matrix4());
     this.scaled = Matrix4.multiplyByUniformScale(this.enuToEcef, unitM, new Matrix4());
@@ -34,7 +35,7 @@ export class RtcCameraSync {
     return [p.x / this.unitM, p.y / this.unitM, p.z / this.unitM];
   }
 
-  sync(camera: CesiumCamera, target: PerspectiveCamera, sphere: EnuSphere): void {
+  sync(camera: CesiumCamera, target: PerspectiveCamera, sphere: EnuSphere, box: Box3Like): void {
     // ENU units in, view space in ENU units out (so near/far below are in the same units)
     const view = Matrix4.multiply(this.unscale, Matrix4.multiply(camera.viewMatrix, this.scaled, this.tmp), this.tmp);
     target.matrixWorldInverse.fromArray(Matrix4.toArray(view));
@@ -44,12 +45,12 @@ export class RtcCameraSync {
     target.matrix.copy(target.matrixWorld);
     target.matrix.decompose(target.position, target.quaternion, target.scale);
     const c = this.cameraEnu(camera);
-    const d = Math.hypot(c[0] - sphere.center[0], c[1] - sphere.center[1], c[2] - sphere.center[2]);
     const frustum = camera.frustum as PerspectiveFrustum;
     target.fov = ((frustum.fovy ?? Math.PI / 3) * 180) / Math.PI;
     target.aspect = frustum.aspectRatio ?? 1;
-    target.near = Math.max(d - sphere.radius, this.minNearM / this.unitM);
-    target.far = d + sphere.radius;
+    const nf = frustumDistances({ mode: this.depthMode, camera: c, box, sphere, minNear: this.minNearM / this.unitM });
+    target.near = nf.near;
+    target.far = nf.far;
     target.updateProjectionMatrix();
   }
 }

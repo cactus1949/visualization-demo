@@ -70,7 +70,7 @@ function surface(cols: number, rows: number, at: Parameters<typeof gridSurface>[
   return g;
 }
 
-export function createTestLayer(map: GeoMap, geo: GeoUniforms, topM: number): Group {
+export function createTestLayer(map: GeoMap, geo: GeoUniforms, topM: number, faceAglM = 50): Group {
   const group = new Group();
   group.name = "globe-test-layer";
   const segs: number[] = [];
@@ -78,6 +78,10 @@ export function createTestLayer(map: GeoMap, geo: GeoUniforms, topM: number): Gr
   const edges = new BufferGeometry();
   edges.setAttribute("position", new BufferAttribute(new Float32Array(segs), 3));
   group.add(new LineSegments(edges, material(map, geo, 0xff00ff, 1, { depthTest: false })));
+  const debugFace = new Mesh(surface(80, 80, (s, t) => [s, t, faceAglM]), material(map, geo, 0x00d4ff, 1, { depthTest: true }));
+  debugFace.name = "depth-test-face"; // depth-precision check only, off by default
+  debugFace.visible = false;
+  group.add(debugFace);
   const colors = [0x3b82f6, 0x22c55e, 0xeab308];
   SLICE_AGL_M.forEach((agl, n) => {
     const slice = new Mesh(surface(60, 60, (s, t) => [s, t, agl]), material(map, geo, colors[n]!, 0.35, { depthTest: true }));
