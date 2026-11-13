@@ -48,7 +48,7 @@ export class ShellHeightLabels {
         text: `${Number.isInteger(h) ? h.toFixed(0) : h.toFixed(1)} m`,
         leader: true,
         awayFrom: { x: inside[0], y: inside[1], z: inside[2] },
-        priority: h === 0 ? 20 : Math.round(1000 - h),
+        priority: h,
         cluster: "shell-height",
       });
     }

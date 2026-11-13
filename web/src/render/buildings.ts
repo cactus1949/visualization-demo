@@ -4,6 +4,17 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { geoPlaceGlsl, type GeoUniforms } from "../globe/geoShader";
 import type { GeoMap } from "../geo/mapping";
 
+/**
+ * Box km → (u, v, AGL m) → curved-shell ENU, then the usual view/projection. Shared by the
+ * colour material and the shadow depth material so casters and receivers sit in one place.
+ * Leaves `boxKm`, `uvAgl`, `enu`, `mvPosition` in scope for later chunks.
+ */
+const GLOBE_PLACE_GLSL = `vec3 boxKm = (modelMatrix * vec4(transformed, 1.0)).xyz;
+vec3 uvAgl = vec3(boxKm.x / max(uFieldDomain.x, 1e-3) + 0.5, 0.5 - boxKm.z / max(uFieldDomain.y, 1e-3), boxKm.y * 1000.0);
+vec3 enu = geoPlace(uvAgl);
+vec4 mvPosition = viewMatrix * vec4(enu, 1.0);
+gl_Position = projectionMatrix * mvPosition;`;
+
 export interface BuildingsMeta {
   count: number;
   source: string;
@@ -40,6 +51,13 @@ export class Buildings {
   } | null = null;
   private shadows = true;
   private globe: { map: GeoMap; geo: GeoUniforms } | null = null;
+  /** One uniform object for the colour and depth materials, so setTint reaches both. */
+  private readonly fieldDomain = { value: this.tint.domain };
+  /**
+   * Globe only: the built-in shadow depth material would render the box-km mesh as if it
+   * were ENU (1 unit = 10 km), so casters get the same placement as the colour pass.
+   */
+  private depthMaterial: THREE.MeshDepthMaterial | null = null;
 
   constructor() {
     this.group.name = "buildings";
@@ -68,13 +86,9 @@ ${geoPlaceGlsl(globe.map)}`
         .replace(
           "#include <project_vertex>",
           globe
-            ? `vec3 boxKm = (modelMatrix * vec4(transformed, 1.0)).xyz;
-vec3 uvAgl = vec3(boxKm.x / max(uFieldDomain.x, 1e-3) + 0.5, 0.5 - boxKm.z / max(uFieldDomain.y, 1e-3), boxKm.y * 1000.0);
-vec3 enu = geoPlace(uvAgl);
+            ? `${GLOBE_PLACE_GLSL}
 vWorldY = boxKm.y;
-vFieldUv = uvAgl.xy;
-vec4 mvPosition = viewMatrix * vec4(enu, 1.0);
-gl_Position = projectionMatrix * mvPosition;`
+vFieldUv = uvAgl.xy;`
             : "#include <project_vertex>",
         )
         .replace(
@@ -108,7 +122,7 @@ gl_Position = projectionMatrix * mvPosition;`
           diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.86, 0.9, 1.0), diffuseColor.rgb, ao);`,
         );
       shader.uniforms.uFieldTexture = { value: this.tint.texture };
-      shader.uniforms.uFieldDomain = { value: this.tint.domain };
+      shader.uniforms.uFieldDomain = this.fieldDomain;
       shader.uniforms.uTintEnabled = { value: this.tint.enabled };
       shader.uniforms.uTintStrength = { value: this.tint.strength };
       this.tintUniforms = {
@@ -135,6 +149,7 @@ gl_Position = projectionMatrix * mvPosition;`
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         mesh.frustumCulled = false;
+        if (this.depthMaterial) mesh.customDepthMaterial = this.depthMaterial;
       });
       this.group.add(gltf.scene);
       this.available = true;
@@ -153,6 +168,25 @@ gl_Position = projectionMatrix * mvPosition;`
   enableGlobe(map: GeoMap, geo: GeoUniforms): void {
     this.globe = { map, geo };
     this.material.needsUpdate = true;
+    if (!this.depthMaterial) {
+      const depth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+      depth.onBeforeCompile = (shader) => {
+        const g = this.globe!;
+        shader.vertexShader = shader.vertexShader
+          .replace("#include <common>", `#include <common>\nuniform vec2 uFieldDomain;\n${geoPlaceGlsl(g.map)}`)
+          .replace("#include <project_vertex>", GLOBE_PLACE_GLSL);
+        Object.assign(shader.uniforms, g.geo);
+        shader.uniforms.uFieldDomain = this.fieldDomain;
+      };
+      depth.customProgramCacheKey = () => "buildings-globe-depth";
+      this.depthMaterial = depth;
+    }
+    this.depthMaterial.needsUpdate = true;
+    // enableGlobe may run after load(): attach to meshes already in the group.
+    this.group.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) mesh.customDepthMaterial = this.depthMaterial!;
+    });
   }
 
   setExaggeration(value: number): void {
@@ -208,5 +242,6 @@ gl_Position = projectionMatrix * mvPosition;`
       if (mesh.isMesh) mesh.geometry.dispose();
     });
     this.material.dispose();
+    this.depthMaterial?.dispose();
   }
 }
