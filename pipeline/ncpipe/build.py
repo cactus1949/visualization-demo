@@ -67,7 +67,7 @@ def build(input_path: str | Path, config_path: str | Path, out_dir: str | Path,
                  "range": labels.get(name, {}).get("range", [meta["data_min"], meta["data_max"]]), "units": attrs.get("units", ""),
                  "long_name": attrs.get("long_name", name), "label_zh": labels.get(name, {}).get("label_zh", name),
                  "colormap": labels.get(name, {}).get("colormap", "viridis")}
-        for key in ("scale", "offset", "level_scale", "level_offset"):
+        for key in ("scale", "offset", "level_scale", "level_offset", "nan_code"):
             if key in meta: entry[key] = meta[key]
         if staggered: entry["staggered_from"] = staggered
         variables[name] = entry; total_raw += len(raw); total_compressed += compressed

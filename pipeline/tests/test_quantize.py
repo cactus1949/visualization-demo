@@ -14,7 +14,8 @@ def test_roundtrip():
 
 def test_clip_nan():
     q, m = quantize(np.array([-2.0, 0.0, 2.0, np.nan]), 0, 1, 8)
-    assert q[0] == 0 and q[2] == 255 and q[3] == 0
+    # missing cell -> reserved top code, finite values use 0..254
+    assert q[0] == 0 and q[2] == 254 and q[3] == 255 and m["nan_code"] == 255
     assert m["nan_count"] == 1
     assert m["clipped_low_frac"] > 0
 
@@ -80,3 +81,45 @@ def test_encode_log10_and_signed_sqrt():
     trans_err = np.max(np.abs(np.sign(signed) * np.sqrt(np.abs(signed)) - np.sign(rec) * np.sqrt(np.abs(rec))))
     assert m["transform"] == "signed_sqrt"
     assert trans_err <= m["scale"] / 2 + 1e-8
+
+
+def test_nan_gets_reserved_code_and_decodes_back_to_nan():
+    x = np.array([0.0, 0.25, np.nan, 1.0])
+    q, m = quantize(x, 0, 1, 8)
+    assert m["nan_code"] == 255 and q[2] == 255 and q[3] == 254 and q[0] == 0
+    y = dequantize(q, m["scale"], m["offset"], nan_code=m["nan_code"])
+    assert np.isnan(y[2]) and abs(y[3] - 1.0) < 1e-12
+
+
+def test_nan_free_arrays_keep_full_code_range():
+    x = np.linspace(0, 1, 11)
+    q, m = quantize(x, 0, 1, 8)
+    assert "nan_code" not in m and q[-1] == 255
+
+
+def test_encode_per_level_nan_roundtrip():
+    x = np.linspace(-1, 1, 2 * 3 * 4).reshape(2, 3, 4)
+    x[1, 0, 0] = np.nan
+    for enc in ("u8_linear", "u16_linear", "u8_log10"):
+        v = np.abs(x) + 0.1 if enc == "u8_log10" else x
+        q, m = encode_variable(v, enc, "per_level")
+        y = decode_variable(q, m)
+        assert m["nan_count"] == 1 and m["nan_code"] == (255 if enc.startswith("u8") else 65535)
+        assert np.isnan(y[1, 0, 0]) and np.isfinite(np.delete(y.ravel(), 12)).all()
+        # level 0 has no NaN but shares the reserved-code grid; its max must still decode exactly
+        assert abs(np.nanmax(y[0]) - np.max(v[0])) <= max(m["level_scale"][0], 1e-12) * 0.5 + 1e-9 or enc == "u8_log10"
+
+
+def test_encode_u8_int_nan():
+    x = np.array([0.0, 3.0, np.nan, 254.0])
+    q, m = encode_variable(x, "u8_int")
+    assert m["nan_code"] == 255 and q.tolist() == [0, 3, 255, 254]
+    y = decode_variable(q, m)
+    assert np.isnan(y[2]) and y[3] == 254
+
+
+def test_reserve_nan_shared_across_frames_keeps_one_grid():
+    a = np.array([0.0, 0.5, 1.0]); b = np.array([0.0, np.nan, 1.0])
+    qa, ma = encode_variable(a, "u8_linear", shared_range=(0.0, 1.0), reserve_nan=True)
+    qb, mb = encode_variable(b, "u8_linear", shared_range=(0.0, 1.0), reserve_nan=True)
+    assert ma["scale"] == mb["scale"] and ma["nan_code"] == mb["nan_code"] == 255 and qa[2] == 254

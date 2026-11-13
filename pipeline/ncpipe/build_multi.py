@@ -21,7 +21,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np, xarray as xr, yaml
 
 from .build import _jsonable, _parse_names, _write_compressed
-from .quantize import encode_variable, union_ranges
+from .quantize import encode_variable, encoding_transform, transform_values, union_ranges
 from .ncread import TIME_NOTE, frame_times, grid_meta, kept_attrs, open_frames, read_values as _values
 
 
@@ -54,15 +54,20 @@ def build_multi(inputs: Sequence[str | Path], config_path: str | Path, out_dir: 
         spec = dict(defaults); spec.update(quant_cfg.get(name, {}))
         encoding = spec.get("encoding", "u8_linear"); scope = spec.get("range_scope", "global")
         shared = None if encoding in ("f16", "u8_int") else union_ranges(arrays, encoding, scope)
+        # one NaN code decision for all frames, so every frame keeps the same quantisation grid
+        reserve_nan = None if encoding == "f16" else any(
+            bool((~np.isfinite(transform_values(a, encoding_transform(encoding)))).any()) for a in arrays)
         frame_meta, meta0 = [], None
         for i, array in enumerate(arrays):
             encoded, meta = encode_variable(array, encoding, scope, tuple(spec.get("clip_percentiles", [0, 100])),
-                                            spec.get("fixed_range"), shared_range=shared)
+                                            spec.get("fixed_range"), shared_range=shared,
+                                            reserve_nan=reserve_nan)
             dtype = "<f2" if meta["dtype"] == "float16" else ("<u2" if meta["dtype"] == "uint16" else "u1")
             raw = encoded.astype(dtype, copy=False).tobytes(order="C")
             compressed = _write_compressed(output / times[i]["dir"] / f"{name}.bin.br", raw)
             frame_meta.append({"bytes_compressed": compressed, "data_min": meta["data_min"], "data_max": meta["data_max"],
-                               "clipped_low_frac": meta["clipped_low_frac"], "clipped_high_frac": meta["clipped_high_frac"]})
+                               "clipped_low_frac": meta["clipped_low_frac"], "clipped_high_frac": meta["clipped_high_frac"],
+                               "nan_count": meta["nan_count"]})
             total_raw += len(raw); total_compressed += compressed
             meta0 = meta0 or (meta, encoded.shape, len(raw))
         meta, shape, nraw = meta0
@@ -73,12 +78,12 @@ def build_multi(inputs: Sequence[str | Path], config_path: str | Path, out_dir: 
                  "bytes_raw": nraw, "bytes_compressed": int(sum(f["bytes_compressed"] for f in frame_meta)),
                  "data_min": dmin, "data_max": dmax,
                  "clipped_low_frac": max(f["clipped_low_frac"] for f in frame_meta),
-                 "clipped_high_frac": max(f["clipped_high_frac"] for f in frame_meta), "nan_count": meta["nan_count"],
+                 "clipped_high_frac": max(f["clipped_high_frac"] for f in frame_meta), "nan_count": int(sum(f["nan_count"] for f in frame_meta)),
                  "display_range": [float(display[0]), float(display[1])],
                  "range": labels.get(name, {}).get("range", [dmin, dmax]), "units": attrs.get("units", ""),
                  "long_name": attrs.get("long_name", name), "label_zh": labels.get(name, {}).get("label_zh", name),
                  "colormap": labels.get(name, {}).get("colormap", "viridis"), "frames": frame_meta}
-        for key in ("scale", "offset", "level_scale", "level_offset"):
+        for key in ("scale", "offset", "level_scale", "level_offset", "nan_code"):
             if key in meta: entry[key] = meta[key]
         if staggered: entry["staggered_from"] = staggered
         variables[name] = entry
