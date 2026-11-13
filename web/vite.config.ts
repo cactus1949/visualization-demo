@@ -64,10 +64,27 @@ function dataPlugin(): Plugin {
 const cesiumSource = "node_modules/cesium/Build/Cesium";
 const cesiumBaseUrl = "cesium";
 
+/** CESIUM_BASE_URL = <vite base>cesium, so `vite build --base /sub/` (or `base` in config) finds the copied assets. */
+export function cesiumBaseFor(base: string | undefined): string {
+  const b = base && base !== "./" ? base : "/";
+  return `${b.endsWith("/") ? b : `${b}/`}${cesiumBaseUrl}`;
+}
+
+function cesiumBasePlugin(): Plugin {
+  return {
+    name: "cesium-base-url",
+    // `config` sees the merged config, CLI --base included
+    config(config) {
+      return { define: { CESIUM_BASE_URL: JSON.stringify(cesiumBaseFor(config.base)) } };
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     vue(),
     dataPlugin(),
+    cesiumBasePlugin(),
     viteStaticCopy({
       targets: ["ThirdParty", "Workers", "Assets", "Widgets"].map((dir) => ({
         src: `${cesiumSource}/${dir}`,
@@ -76,7 +93,6 @@ export default defineConfig({
       })),
     }),
   ],
-  define: { CESIUM_BASE_URL: JSON.stringify(`/${cesiumBaseUrl}`) },
   publicDir: false,
   assetsInclude: ["**/*.wasm"],
   worker: { format: "es" },

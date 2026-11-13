@@ -39,8 +39,8 @@ DEM 处理：Copernicus GLO-30 → 150 m 开运算 + 闭运算 + 轻微高斯 �
 
 ## 渲染
 
-- 相机（`globe/rtcCamera.ts`）：在 JS 里用 float64 算 `Cesium viewMatrix × 中心 ENU × 单位缩放`，交给 three，GPU 上的坐标只有几个单位大。three 的 near/far 按图层包围球单独算。
-- 每帧在 Cesium 的 `postRender` 里：`resetState()`，清深度，画只写深度的地形代理网格（`globe/depthProxy.ts`，同一份 DEM，关地形时是弯曲椭球面片），再画图层，最后 `resetState()`。Cesium 画完后的深度不能直接用，所以靠代理网格做遮挡。宿主接口和帧顺序见 `docs/view-host.md`。
+- 相机（`globe/rtcCamera.ts`）：在 JS 里用 float64 算 `Cesium viewMatrix × 中心 ENU × 单位缩放`，交给 three，GPU 上的坐标只有几个单位大。默认 `log`：three `logarithmicDepthBuffer`，near/far 按图层包围盒的最近/最远点收紧；`?globeDepth=linear` 或 `near` 用同样的包围盒和线性深度；`legacy` 保留 PR ① 的包围球算法作对照。宿主接口和帧顺序见 `docs/view-host.md`。
+- 每帧在 Cesium 的 `postRender` 里：`resetState()`，清深度，画只写深度的地形代理网格（`globe/depthProxy.ts`，同一份 DEM，关地形时是弯曲椭球面片），再画图层，最后 `resetState()`。Cesium 画完后的深度不能直接用，所以靠代理网格做遮挡。
 - WebGL 上下文丢失（`webglcontextlost`）时停止 three 绘制，页面提示刷新。卸载 tab 时释放 `layers` 下所有几何体和材质、代理网格、three 渲染器和 Viewer。
 
 ### 升级 Cesium 要复查的私有字段
@@ -76,3 +76,7 @@ Cesium 没有公开接口，`globe/overlay.ts` 直接用了 `scene.context` 上�
 - nc 没有地形变量，模型在平地上算。开地形只是把风场贴在真实地面上显示。
 - 域外 0.2° 以外地形回到椭球面（约 7 m 台阶，离域 20 km 以上）。
 - 地形代理网格约 105 m 一格，和 Cesium 地形瓦片的细节层级不完全一样，贴地处可能有几个像素的出入。
+
+## 深度和数据解码实现约定
+
+深度比较脚本在 `/workspace/visualization-demo-analysis/globe-depth-deploy/`。默认 `log`。自定义 ShaderMaterial 要按 three 的 logdepthbuf 公式写深度（测试层即便 `depthWrite: false` 也会写 `gl_FragDepth`，否则对着对数缓冲做线性深度测试会错）；体渲染写 `gl_FragDepth` 时用同一套编码。`CESIUM_BASE_URL` 跟随 Vite `base`（`vite build --base /sub/` 也能找到拷贝出来的 Workers / Assets）。DEM 和 ground 的 u16 解码在 `geo/geoDecode.worker.ts` module worker 中执行，数组通过 transferable 传递；`dequantize` 是纯函数，供 Node 单测使用。数据 URL 默认跟随 Vite base，设置 `VITE_DATA_BASE` 时用显式地址。
