@@ -152,6 +152,11 @@ export class GlobeOverlay implements ViewHost {
     }
   }
 
+  /** ViewHost.isolateGl: layer GL work outside the draw pass (particle sim / place passes, debug readbacks). */
+  isolateGl(work: () => void): void {
+    this.resyncAfter(work);
+  }
+
   captureOccluderDepth(target: WebGLRenderTarget, scene: Scene, hide: Object3D[]): void {
     this.resyncAfter(() => {
       this.renderer.setRenderTarget(target);

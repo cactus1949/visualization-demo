@@ -57,11 +57,21 @@ Cesium 没有公开接口，`globe/overlay.ts` 直接用了 `scene.context` 上�
 - 地形开关和 k 只改共享 uniform、代理网格、Cesium 地形和体渲染包围盒，不重新取数据。
 - 遮挡深度：宿主把地形代理（和场景里其余遮挡物）画进体渲染的深度纹理，体渲染据此截短光线。编码默认 `log`（three 渲染器开 `logarithmicDepthBuffer`，体渲染按 three 的 logdepthbuf 公式反解深度）；`?globeDepth=linear` 切回线性（NDC z）。这是任务 A 定下的默认值。
 - 步数默认 128，`?volSteps=` 可改（调试）。
-- ⑥ 已接入（只在地球 tab 改放置，前两个 tab 不受影响）：探针按经纬 / AGL 取样并在弯曲壳体上插标注；层高标签挂在壳体西南角；建筑白膜按真实经纬贴在 DEM / 椭球面上（k 只乘离地高度）；地面 2D 场贴在壳体地面，开关不重新取体数据；图例与盒体 tab 共用。粒子（⑤）仍关闭。
+- ⑥ 已接入（只在地球 tab 改放置，前两个 tab 不受影响）：探针按经纬 / AGL 取样并在弯曲壳体上插标注；层高标签挂在壳体西南角；建筑白膜按真实经纬贴在 DEM / 椭球面上（k 只乘离地高度）；地面 2D 场贴在壳体地面，开关不重新取体数据；图例与盒体 tab 共用。粒子（⑤）见下节。
 - ④ 剖面已接入：经度、纬度、高度、折线、框选五种剖面和统一剖面面板、拖动手柄与前两个 tab 共用代码。剖面几何仍是盒体公里坐标（只做细分：高度剖面每个网格单元一格，竖墙和框选层按 0.06 km，约等于地面网格间距），顶点着色器里走 `盒体 km → (u, v, AGL) → h = 地形开关 × g + k × AGL → geoPlace`（`render/sections/globe.ts`），所以跟随 k 和地形开关、不重新取数据；片元仍在插值后的盒体坐标上采样，数值与盒体 tab 同一纹素。深度按 three 的 logdepthbuf 公式写 `gl_FragDepth`。剖面和体渲染在面板里互斥（和前两个 tab 一样），所以剖面与体按光线顺序合成只在调试模式（`allowSectionWithVolume`）下能走到；正常使用时合成的只有体渲染的切面。（仅调试）两者同时打开时，剖面（含框选的各层，最多 16 个面）在弯壳光线步进里按光线顺序合成：每步把采样点换回盒体坐标，用符号变化找穿越点，再做两次割线细化。超过 16 个面时，折线和框选整组退回普通网格绘制，并在控制台警告一次。探针拾取剖面和前两个 tab 的目标一样（高度剖面、经/纬剖面；折线不是探针目标），但剖面网格在着色器里放置、CPU 射线打不中，所以用解析方法：指针射线在 ENU 里按壳体包围球和地面命中点截断，逐点换回盒体坐标，找每个剖面方程第一次变号的位置，再二分细化（`render/sections/globePick.ts`）。标注和手柄用盒体坐标登记（`space: "box"`），每帧经精确 float64 放置映射到 ENU；拖动时相机输入关闭。
 - 标注地形遮挡（`geo/lineOfSight.ts`）：相机到锚点的 ENU 线段先裁到 DEM 域内，按距离采样，步长不超过 60 m，最多 256 点；任一点低于地面超过 3 m，或连续两点低于地面超过 1 m，即判为遮挡。DEM 范围以外的地形不参与遮挡。线性深度调试模式（`?globeDepth=linear`）下，相机很低又在数据域外时 near 会退到 1 m，可能出现 z-fighting。
 - 建筑阴影走 `host/rendererConfig.ts` 里共用的 PCF 路径，不另开一条。Cesium 宿主的灯光在 ENU（z 向上）下重新对准。
 - 调试接口（仅 `npm run dev` 或 `?globeDebug=1`）：`__globeApi.measureInverseResidual()`（在 GPU 上跑生产用的 `geoInverse`，读回后与精确坐标比，单位米）、`benchFrames(n)`（同步渲染 n 帧，用 1 像素 `readPixels` 等 GPU，毫秒）、`volumeInfo()`；`__atmosApi.setVolumeSteps(n)`。
+
+## 粒子（⑤）
+
+- 模拟不变：和盒体 tab 同一个 `WindParticles`（`render/particles.ts`），状态仍在网格空间（`gx = u`、`gy = v`、高度为离地 km），采样同一张「当前时刻」风场纹理。地球 tab 走单独的 `globe` 分支，盒体 tab 的着色器文本和绘制路径不变。
+- 放置：每步模拟后多一个全屏 pass，把历史环形缓冲里最新那一层按 `(u, v, 离地 m)` → `geoPlace`（上面的统一公式）换成中心 ENU，写进第二个环形缓冲；轨迹顶点着色器只读 ENU，不再每个顶点算三次多项式。地形开关或 k 变化时（`geo/particlePlace.ts` 的 `placementKey`），所有历史层重新放置一遍（64 个 pass），暂停时也一样，所以轨迹不会一半是旧 k、一半是新 k。CPU 参考实现和单测在 `geo/particlePlace.ts`、`particlePlace.test.ts`。
+- 深度：轨迹写 three 的对数深度（`LOGDEPTH_*`，和测试层同一公式），`depthWrite: false`、`renderOrder` 仍是 10。地形代理和建筑先写深度，所以粒子会被地形、建筑挡住；体渲染的遮挡深度不含粒子（和盒体 tab 一样）。
+- 共享 GL 上下文：粒子的创建、改参数（数量变化会重新分配渲染目标和几何）、每步的模拟 / 拷贝 / 放置 pass 和调试读回都放在 `host.isolateGl()` 里。Cesium 宿主在前后各 `resetState()` 一次，再把 Cesium 缓存的渲染状态设回默认（同 `captureOccluderDepth`）；盒体宿主没有这个方法，直接执行。
+- 屏幕线宽按上下文的 `drawingBufferWidth / Height` 算（Cesium 宿主不调 `renderer.setSize`，three 缓存的尺寸不准）。
+- 剖面挡粒子（和盒体 tab 同一套规则，`slices.ts` 的 depthWrite / colorWrite 策略不变）：高度、经 / 纬、折线剖面画在 renderOrder 2 / 3，不透明且没开「低值透明」时写深度（地球页写对数深度），粒子（10）在它们之后画，所以剖面后面的粒子被挡住、前面的照常显示。框选层的层片只有不透明度为 1 时写深度；半透明层片不挡粒子（盒体 tab 也是这样），它们的深度 twin 只写深度不写颜色，renderOrder 10.5，在粒子之后画，给轮廓线的「被遮挡虚线」用。地球页的 twin 用 `GlobeDepthMaterial`（`render/sections/globe.ts`），和层片同一个顶点着色器、同一组地形 / k uniform，所以开地形、改 k 时 twin 跟着层片一起变，不用 CPU 重建。剖面和体渲染在面板里互斥；只有调试的同开模式下剖面并入体渲染合成，这时剖面不写深度，也不挡粒子。
+- 调试接口（`?globeDebug=1`）：`__atmosApi.particlePlacement(n)` 读回前 n 个粒子最新节点的 GPU 放置结果，和 float64 精确放置比较（米）。
 
 ## 底图
 

@@ -5,7 +5,7 @@ import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { SliceMaterial } from "../slices";
 import type { Domain } from "../fields";
 import { ANNOTATION_TOKENS as T, type AnnotationLayer } from "../annotations";
-import { segmentsFor, type SectionGlobe } from "./globe";
+import { GlobeDepthMaterial, segmentsFor, type SectionGlobe } from "./globe";
 
 type P3 = { x: number; y: number; z: number };
 
@@ -185,13 +185,15 @@ export class BoxStack {
       m.userData.pickable = "box-stack";
       this.slabs.add(m);
       if (this.globe) {
-        // placed in the vertex shader: box-km raycasts / culling would be wrong. No depth twins on
-        // the globe: they exist for the box tabs' particles (⑤ is still off here).
+        // placed in the vertex shader: box-km raycasts / culling would be wrong
         m.raycast = () => {};
         m.frustumCulled = false;
-        continue;
       }
-      const depth = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+      // ⑤ globe: the twin is placed by the same shader as the slab (follows terrain / k), depth only
+      const depth = new THREE.Mesh(g, this.globe ? new GlobeDepthMaterial(this.domain, this.globe, {
+        uRootInverse: this.material.uniforms.uRootInverse!,
+        uRootMatrix: this.material.uniforms.uRootMatrix!,
+      }) : new THREE.MeshBasicMaterial({
         color: 0xffffff,
         colorWrite: false,
         depthWrite: true,
@@ -205,6 +207,7 @@ export class BoxStack {
       depth.position.copy(m.position);
       depth.renderOrder = 10.5;
       depth.raycast = () => {};
+      if (this.globe) depth.frustumCulled = false;
       depth.userData.levelM = h;
       this.depthTwins.add(depth);
     }

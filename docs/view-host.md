@@ -30,6 +30,7 @@
 | `capturePointer(id)` / `releasePointer(id)` | 拖动期间的指针捕获（未捕获时 release 是空操作） |
 | `getView()` / `setView(pos, target)` | 相机位置和注视点（`snapshot()`、`setCamera`、视角预设、切 tab 保留视角都走这里） |
 | `dispose()` | 停循环、断 ResizeObserver、释放控件和 renderer |
+| `isolateGl?(work)` | 可选。图层在绘制 pass 之外做的 GL 工作（粒子模拟 / 放置 pass、调试读回）放进来；Cesium 宿主前后 `resetState()` 并复位 Cesium 的状态缓存，盒体宿主不实现，调用方直接执行 |
 
 `FrameHooks`（组件提供）：`beforeCamera(now, dt, realDt)` 做 FPS 统计、指针处理、时间步进；`afterCamera` 做根节点夸张（地球上不设，夸张走 `uGeoK`）、标注更新、剖面材质 `setRoot`、粒子 `step(dt)`、体渲染深度捕获（`host.captureOccluderDepth`）；`afterRender` 做首帧就绪；`resize(w, h)` 更新盒子分辨率和体渲染目标。
 
@@ -58,4 +59,4 @@
 - 剖面 / 切片：`HorizontalSlice`、`AxisSection`、`PolylineSection`、`BoxStack`（`render/slices.ts`、`render/sections/planes.ts`、`polyline.ts`、`boxStack.ts`）的 `group` 加到 `atmos.root`；每帧 `material.setRoot(atmos.root)`；拖动 / 拾取用 `host.raycaster`；手柄和读数走 `AnnotationLayer(host.element.parentElement, atmos.root)`，每帧 `annotations.update(host.camera)`。
 - 体渲染：`VolumeLayer` 的 `mesh` 加到 `atmos.root`，`captureDepth / update / resize` 用 `host.renderer` 和 `host.camera`。
 
-在地球上，`atmos.root` 是单位矩阵，局部坐标就是中心 ENU（单位 `map.enu_unit_m`）。体渲染用弯壳模式（`new VolumeLayer(domain, curvedOptions)`）；剖面、粒子仍是盒坐标，在地球 tab 上暂时关闭，由 ④ / ⑤ 用 `globe/geoShader.ts` 的 `geoPlace` / `geoInverse` 接上。
+在地球上，`atmos.root` 是单位矩阵，局部坐标就是中心 ENU（单位 `map.enu_unit_m`）。体渲染用弯壳模式（`new VolumeLayer(domain, curvedOptions)`）；剖面仍是盒坐标，在地球 tab 上暂时关闭，由 ④ 用 `globe/geoShader.ts` 的 `geoPlace` / `geoInverse` 接上；粒子（⑤）的模拟仍在网格空间，绘制时放到弯曲壳体上，见 `docs/globe-geo.md`「粒子（⑤）」。

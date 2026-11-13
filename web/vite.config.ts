@@ -6,7 +6,7 @@ import { viteStaticCopy } from "vite-plugin-static-copy";
 
 // Repo sample cases (data/web/<case>/) are served here; anything else under /data and /api
 // (the dated exports in $WEB_ROOT/<format>/yyyymm/yyyymmdd/) is proxied to the FastAPI service.
-const dataRoot = path.resolve(__dirname, "../data/web");
+const dataRoot = path.resolve(import.meta.dirname, "../data/web");
 const dataApi = process.env.DATA_API ?? "http://127.0.0.1:8000";
 
 /** Same rule as services/cache_headers.py: frame payloads and t000/*.json index files only. */
@@ -89,7 +89,7 @@ function dataPlugin(): Plugin {
       for (const prefix of prefixes) server.middlewares.use(`${prefix}data`, serveData);
     },
     closeBundle() {
-      fs.cpSync(dataRoot, path.resolve(__dirname, "dist/data"), { recursive: true });
+      fs.cpSync(dataRoot, path.resolve(import.meta.dirname, "dist/data"), { recursive: true });
     },
   };
 }

@@ -93,6 +93,43 @@ ${LOGDEPTH_FRAGMENT}
   }
 }
 
+/**
+ * ⑤ Depth-only twin of a section surface on the globe (box tabs: MeshBasicMaterial with
+ * colorWrite false). Same placement as the surface (globeSectionVertex + shared geo uniforms), so it
+ * follows terrain / k with no CPU rebuild; writes the same log depth. Pass the surface material's
+ * uRootInverse / uRootMatrix uniform objects so setRoot on the surface reaches the twin too.
+ */
+export class GlobeDepthMaterial extends THREE.ShaderMaterial {
+  constructor(domain: Domain, globe: SectionGlobe, root: { uRootInverse: THREE.IUniform; uRootMatrix: THREE.IUniform }) {
+    super({
+      glslVersion: THREE.GLSL3,
+      vertexShader: globeSectionVertex(globe.map),
+      fragmentShader: /* glsl */ `
+precision highp float;
+${LOGDEPTH_FRAGMENT_PARS}
+uniform vec3 uDomain;
+in vec3 vLocal;
+out vec4 outColor;
+void main() {
+${LOGDEPTH_FRAGMENT}
+  outColor = vec4(1.0);
+}
+`,
+      uniforms: {
+        ...globe.geo,
+        ...domainUniforms(domain),
+        uRootInverse: root.uRootInverse,
+        uRootMatrix: root.uRootMatrix,
+      },
+      colorWrite: false,
+      depthWrite: true,
+      depthTest: true,
+      side: THREE.DoubleSide,
+      transparent: true,
+    });
+  }
+}
+
 /** Densified closed loop through `corners` (box km), `perEdge` points per edge. */
 export function densifyLoop(corners: THREE.Vector3[], perEdge: number): Float32Array {
   const out = new Float32Array(corners.length * perEdge * 3);
