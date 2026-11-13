@@ -8,7 +8,7 @@
 | --- | --- |
 | `web/src/host/types.ts` | `ViewHost` 接口、`FrameHooks` 每帧回调类型 |
 | `web/src/host/threeHost.ts` | `createThreeHost(canvas, { initialView?, initialNow? })`：前两个 tab 的 three.js 宿主（WebGLRenderer、PerspectiveCamera、OrbitControls、rAF 循环、ResizeObserver、Raycaster） |
-| `web/src/host/rendererConfig.ts` | `applyLayerRendererConfig(renderer)`：两个宿主共用的外观（sRGB 输出、Neutral 色调映射、曝光 1）。阴影由各宿主自己设：three 宿主照旧开 PCF，Cesium 宿主暂不开，⑥ 建筑接入时在这里补 |
+| `web/src/host/rendererConfig.ts` | `applyLayerRendererConfig(renderer)`：两个宿主共用的外观（sRGB 输出、Neutral 色调映射、曝光 1）。阴影走同一条 PCF 路径：`applyLayerRendererConfig` 里打开 `shadowMap`（⑥ 建筑接入后两个宿主共用，不再各开一条） |
 | `web/src/host/hidden.ts` | `withHidden(objects, draw)`：深度预渲染时临时隐藏一组对象 |
 | `web/src/globe/overlay.ts` | `GlobeOverlay`：Cesium 宿主（地球 tab） |
 | `web/src/components/AtmosViewer.vue` | 可选 prop `createHost?: (container) => ViewHost`（传入组件根 `div`，宿主自己决定 `element`），不传时用 `createThreeHost(组件自己的 canvas)`；`globeVolume` 不为空时是地球模式 |

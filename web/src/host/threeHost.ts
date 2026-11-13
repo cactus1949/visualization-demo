@@ -20,8 +20,6 @@ export function createThreeHost(
     powerPreference: "high-performance",
   });
   applyLayerRendererConfig(renderer);
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const camera = new THREE.PerspectiveCamera(40, 1, 0.05, 200);
   const controls = new OrbitControls(camera, canvas);

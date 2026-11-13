@@ -33,6 +33,11 @@ import { sampleUnfolded, type UnfoldedGrid } from "../render/sections/unfolded";
 import { Buildings } from "../render/buildings";
 import { ProbeMarker } from "../render/probeMarker";
 import { AnnotationLayer, HeightOccluder } from "../render/annotations";
+import { ShellHeightLabels, shellLabelHeights } from "../render/annotations/shellLabels";
+import { GlobeGround } from "../render/globeGround";
+import { cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../geo/boxEnu";
+import type { EnuFrame } from "../geo/mapping";
+import { sampleGrid, type GridField } from "../geo/placement";
 import {
   DEFAULT_PARTICLES,
   WindParticles,
@@ -84,7 +89,7 @@ const props = withDefaults(defineProps<{
   initialView?: ViewSnapshot | null;
   /** Receives the viewer's container; the host picks or creates its own input / render element. */
   createHost?: (container: HTMLElement) => ViewHost;
-  /** Globe tab: the volume runs in curved-shell mode; box-only layers are off (see docs/globe-geo.md). */
+  /** Globe tab: the volume runs in curved-shell mode; ④ sections and ⑤ particles stay off. */
   globeVolume?: CurvedVolumeOptions | null;
 }>(), {
   manifestUrl: "",
@@ -212,12 +217,9 @@ const layers = reactive({
   probeFollowMouse: false,
 });
 if (globeMode) {
-  // temporarily box-only on the globe: sections ④, particles ⑤, probe / buildings / ground ⑥
-  layers.buildings = false;
-  layers.ground = false;
+  // ④ sections and ⑤ particles stay off; ⑥ re-enables buildings, ground, probe (probe still starts off, like the box tabs)
   layers.particles = false;
   layers.volume = true;
-  layers.probe = false;
   view.exaggeration = 1;
 }
 const particleParams = reactive<ParticleParams>({ ...DEFAULT_PARTICLES });
@@ -485,6 +487,11 @@ let buildings: Buildings | null = null;
 let probeMarker: ProbeMarker | null = null;
 let annotations: AnnotationLayer | null = null;
 let heightOccluder: HeightOccluder | null = null;
+let globeGround: GlobeGround | null = null;
+let shellLabels: ShellHeightLabels | null = null;
+let globeFrame: EnuFrame | null = null;
+const occCamBox = new THREE.Vector3();
+const occAncBox = new THREE.Vector3();
 let disposed = false;
 const requestedAt: Record<string, number> = {};
 const volumeColorRange = ref<[number, number]>([0, 1]);
@@ -953,12 +960,46 @@ function groundFilterFor(read: (i: number) => number): [number, number] {
   return [fmin <= lo ? -Infinity : fmin, fmax >= hi ? Infinity : fmax];
 }
 
+
+function globeOpt(): CurvedVolumeOptions | null {
+  return props.globeVolume ?? null;
+}
+function globeK(): number {
+  return globeOpt()?.geo.uGeoK.value ?? 1;
+}
+function globeTerrainOn(): boolean {
+  return (globeOpt()?.geo.uGeoTerrain.value ?? 0) > 0.5;
+}
+function globeGroundField(): GridField | null {
+  const g = globeOpt();
+  if (!g || !globeTerrainOn()) return null;
+  return g.ground;
+}
+function globeEnuOf(u: number, v: number, aglM: number): { x: number; y: number; z: number } {
+  const g = globeOpt()!;
+  const p = placeEnuUnits(g.grid, g.map, globeFrame!, u, v, aglM, globeK(), globeGroundField());
+  return { x: p[0], y: p[1], z: p[2] };
+}
+function globeOccluded(camEnu: THREE.Vector3, anchorEnu: THREE.Vector3): boolean {
+  if (!heightOccluder || !globeOpt()) return false;
+  const g = globeOpt()!;
+  const ground = globeGroundField();
+  const cam = enuUnitsToUvAgl(g.map, [camEnu.x, camEnu.y, camEnu.z], globeK(), ground);
+  const anc = enuUnitsToUvAgl(g.map, [anchorEnu.x, anchorEnu.y, anchorEnu.z], globeK(), ground);
+  const sx = domain.sx, sz = domain.sz;
+  occCamBox.set((cam.u - 0.5) * sx, cam.agl / 1000, (0.5 - cam.v) * sz);
+  occAncBox.set((anc.u - 0.5) * sx, anc.agl / 1000, (0.5 - anc.v) * sz);
+  return heightOccluder.blocked(occCamBox, occAncBox);
+}
+
 function updateGround(): void {
   if (!atmos || !manifest.value) return;
-  atmos.ground.visible = layers.ground;
+  if (globeMode) atmos.ground.visible = false;
+  else atmos.ground.visible = layers.ground;
   const name = layers.groundVar;
   if (!layers.ground || name === "none") {
     atmos.setGroundField(null, [0, 1], "viridis", view.theme);
+    syncGlobeGround();
     applyBuildings();
     return;
   }
@@ -969,6 +1010,7 @@ function updateGround(): void {
     const read = (i: number) => windAt(u, v, i)[2];
     const style = groundStyle(name);
     atmos.setGroundField(read, style.range, style.colormap, view.theme, 0.55, groundFilterFor(read));
+    syncGlobeGround();
     applyBuildings();
     return;
   }
@@ -980,6 +1022,7 @@ function updateGround(): void {
   const range = style.range;
   const read = pair.B ? (i: number) => mixAt(pair, i) : field2D(meta, pair.A);
   atmos.setGroundField(read, range, style.colormap, view.theme, 0.55, groundFilterFor(read));
+  syncGlobeGround();
   applyBuildings();
 }
 
@@ -1458,20 +1501,36 @@ function cellPosition(ix: number, iy: number): [number, number] {
   ];
 }
 
+function globeStem(ix: number, iy: number): { anchor: { x: number; y: number; z: number }; stemTo: { x: number; y: number; z: number } } {
+  const g = globeOpt()!.grid;
+  const { u, v } = cellToUv(g.nx, g.ny, ix, iy);
+  return { anchor: globeEnuOf(u, v, 0), stemTo: globeEnuOf(u, v, g.top_m) };
+}
+
 function updateMarker(): void {
   if (!probeMarker) return;
   if (!layers.probe) return probeMarker.setVisible(false, false);
   const fixed = fixedCell.value;
   const same = fixed !== null && previewCell.ix === fixed.ix && previewCell.iy === fixed.iy;
   if (previewActive && !same) {
-    const [px, pz] = cellPosition(previewCell.ix, previewCell.iy);
-    probeMarker.setPreview(px, pz, true);
+    if (globeMode && globeOpt() && globeFrame) {
+      const s = globeStem(previewCell.ix, previewCell.iy);
+      probeMarker.setPreviewAt(s.anchor, s.stemTo, true);
+    } else {
+      const [px, pz] = cellPosition(previewCell.ix, previewCell.iy);
+      probeMarker.setPreview(px, pz, true);
+    }
   } else {
     probeMarker.setPreview(0, 0, false);
   }
   if (fixed) {
-    const [fx, fz] = cellPosition(fixed.ix, fixed.iy);
-    probeMarker.setFixed(fx, fz, true);
+    if (globeMode && globeOpt() && globeFrame) {
+      const s = globeStem(fixed.ix, fixed.iy);
+      probeMarker.setFixedAt(s.anchor, s.stemTo, true);
+    } else {
+      const [fx, fz] = cellPosition(fixed.ix, fixed.iy);
+      probeMarker.setFixed(fx, fz, true);
+    }
   } else {
     probeMarker.setFixed(0, 0, false);
   }
@@ -1481,7 +1540,8 @@ function pickTargets(): THREE.Object3D[] {
   const list: THREE.Object3D[] = [];
   if (vsection?.group.visible) list.push(vsection.group);
   if (hslice?.group.visible) list.push(hslice.mesh);
-  if (atmos.ground.visible) list.push(atmos.ground);
+  if (globeGround) list.push(globeGround.mesh);
+  else if (atmos.ground.visible) list.push(atmos.ground);
   return list;
 }
 
@@ -1490,12 +1550,19 @@ function probeFromPointer(pin: boolean): boolean {
   if (!hit) return false;
   const local = atmos.root.worldToLocal(hit.point.clone());
   const g = manifest.value!.grid;
-  previewCell.ix = Math.round(
-    THREE.MathUtils.clamp((local.x / domain.sx + 0.5) * (g.nx - 1), 0, g.nx - 1),
-  );
-  previewCell.iy = Math.round(
-    THREE.MathUtils.clamp((0.5 - local.z / domain.sz) * (g.ny - 1), 0, g.ny - 1),
-  );
+  if (globeMode && globeOpt()) {
+    const inv = enuUnitsToUvAgl(globeOpt()!.map, [local.x, local.y, local.z], globeK(), globeGroundField());
+    const cell = uvToCell(g.nx, g.ny, inv.u, inv.v);
+    previewCell.ix = cell.ix;
+    previewCell.iy = cell.iy;
+  } else {
+    previewCell.ix = Math.round(
+      THREE.MathUtils.clamp((local.x / domain.sx + 0.5) * (g.nx - 1), 0, g.nx - 1),
+    );
+    previewCell.iy = Math.round(
+      THREE.MathUtils.clamp((0.5 - local.z / domain.sz) * (g.ny - 1), 0, g.ny - 1),
+    );
+  }
   previewActive = true;
   updateMarker();
   if (pin) {
@@ -2151,6 +2218,25 @@ function exposeApi(): void {
       updateMarker();
       if (layers.probeFollowMouse) refreshProbe(false, previewCell);
     },
+    probeInfo: () => {
+      const cell = fixedCell.value ?? (previewActive ? { ...previewCell } : null);
+      const gv = globeOpt();
+      let placement: Record<string, unknown> | null = null;
+      if (cell && gv && globeFrame) {
+        const { u, v } = cellToUv(gv.grid.nx, gv.grid.ny, cell.ix, cell.iy);
+        const p0 = placeEnuUnits(gv.grid, gv.map, globeFrame, u, v, 0, globeK(), globeGroundField());
+        const inv = enuUnitsToUvAgl(gv.map, p0, globeK(), globeGroundField());
+        const p1 = placeEnuUnits(gv.grid, gv.map, globeFrame, inv.u, inv.v, inv.agl, globeK(), globeGroundField());
+        placement = {
+          ix: cell.ix,
+          iy: cell.iy,
+          u,
+          v,
+          residualM: Math.hypot(p0[0] - p1[0], p0[1] - p1[1], p0[2] - p1[2]) * gv.map.enu_unit_m,
+        };
+      }
+      return { probe: probe.value, cell, placement };
+    },
     /** run n simulation steps without drawing the scene (screenshots on slow software GL) */
     advance: (steps: number, dt = 1 / 60) => {
       for (let i = 0; i < steps; i += 1) particles?.step(dt);
@@ -2214,6 +2300,59 @@ function exposeApi(): void {
       };
     },
     hasData: (name: string) => Boolean(loaded(name)),
+    sampleCell: (name: string, ix: number, iy: number, iz = 0) => {
+      const g = manifest.value?.grid;
+      if (!g) return null;
+      const i = iz * g.nx * g.ny + iy * g.nx + ix;
+      if (name === SPEED || name === "speed" || name === "speed0") {
+        const u = cpuPair("u");
+        const v = cpuPair("v");
+        if (!u || !v) return null;
+        return windAt(u, v, i)[2];
+      }
+      const pair = cpuPair(name);
+      if (!pair) return null;
+      return mixAt(pair, i);
+    },
+    buildingBaseSamples: (count = 6) => {
+      if (!buildings || !globeOpt() || !globeFrame) return null;
+      const gv = globeOpt()!;
+      const ground = globeGroundField();
+      const k = globeK();
+      const samples: Record<string, unknown>[] = [];
+      const posList: { x: number; y: number; z: number }[] = [];
+      buildings.group.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const pos = mesh.geometry.getAttribute("position");
+        if (!pos) return;
+        const m = mesh.matrixWorld;
+        const v = new THREE.Vector3();
+        // a few corners of this batch
+        for (const i of [0, Math.floor(pos.count / 3), Math.floor((2 * pos.count) / 3)]) {
+          if (i >= pos.count) continue;
+          v.fromBufferAttribute(pos, i).applyMatrix4(m);
+          posList.push({ x: v.x, y: v.y, z: v.z });
+          if (posList.length >= 400) return;
+        }
+      });
+      // keep the lowest vertices (building bases, y is real height km)
+      posList.sort((a, b) => a.y - b.y);
+      const seen = new Set<string>();
+      for (const p of posList) {
+        if (p.y > 0.003) continue; // > 3 m, not a base
+        const u = p.x / domain.sx + 0.5;
+        const vuv = 0.5 - p.z / domain.sz;
+        const key = `${u.toFixed(3)},${vuv.toFixed(3)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const placed = placeEnuUnits(gv.grid, gv.map, globeFrame!, u, vuv, 0, k, ground);
+        const g0 = ground ? sampleGrid(ground, u, vuv) : 0;
+        samples.push({ u, v: vuv, boxY_m: p.y * 1000, groundM: g0, enuUp_m: placed[2] * gv.map.enu_unit_m });
+        if (samples.length >= count) break;
+      }
+      return samples;
+    },
     /** Percentiles of a loaded variable (subsampled), for checking what a threshold hides. */
     debugStats: (name: string) => {
       const data = name === SPEED ? speedValuesA() : loaded(name)?.data;
@@ -2448,8 +2587,25 @@ async function start(): Promise<void> {
   }
 
   atmos = new AtmosScene(domain);
-  if (globeMode) atmos.hideDecorations();
+  if (globeMode) {
+    atmos.hideDecorations();
+    atmos.alignLightsForEnu();
+  }
   annotations = new AnnotationLayer(host!.element.parentElement ?? host!.element, atmos.root);
+  if (globeMode && globeOpt()) {
+    const gv = globeOpt()!;
+    globeFrame = frameOf(gv.map);
+    annotations.setCoordinateFrame("enu");
+    annotations.setOcclusionAdapter(globeOccluded);
+    if (gv.dem) {
+      globeGround = new GlobeGround(gv.grid, gv.map, gv.dem);
+      globeGround.setTerrain(globeTerrainOn());
+      atmos.root.add(globeGround.mesh);
+    }
+    shellLabels = new ShellHeightLabels(annotations, gv.grid, gv.map, globeFrame);
+    shellLabels.setHeights(shellLabelHeights(gv.grid.top_m, domain.levels));
+    shellLabels.update(globeK(), globeGroundField());
+  }
   probeMarker = new ProbeMarker(annotations, domain.top);
   hslice = new HorizontalSlice(domain);
   vsection = new AxisSection(domain, "lon");
@@ -2493,6 +2649,7 @@ async function start(): Promise<void> {
     return;
   }
   buildings = new Buildings();
+  if (globeMode && globeOpt()) buildings.enableGlobe(globeOpt()!.map, globeOpt()!.geo);
   atmos.root.add(buildings.group);
   const tb = performance.now();
   const ok = await buildings.load();
@@ -2509,6 +2666,15 @@ async function start(): Promise<void> {
   applyBuildings();
 }
 
+function syncGlobeGround(): void {
+  if (!globeGround) return;
+  const showField = layers.ground && layers.groundVar !== "none";
+  const map = showField ? (atmos?.ground.material.map ?? null) : null;
+  globeGround.setField(Boolean(showField && map), map);
+  globeGround.setShadows(view.shadows && layers.buildings);
+  globeGround.setTerrain(globeTerrainOn());
+}
+
 function applyBuildings(): void {
   if (!buildings) return;
   buildings.group.visible = layers.buildings;
@@ -2519,8 +2685,9 @@ function applyBuildings(): void {
     layers.ground && layers.groundVar !== "none" && layers.buildingTintEnabled,
     layers.buildingTintStrength,
   );
-  buildings.setExaggeration(view.exaggeration);
+  buildings.setExaggeration(globeMode ? 1 : view.exaggeration);
   buildings.setShadows(view.shadows);
+  syncGlobeGround();
 }
 
 // ---------------------------------------------------------------- watchers (all cheap)
@@ -2805,6 +2972,9 @@ function overRange(name: string, lo: number, hi: number): { overLow: boolean; ov
 /** Globe tab: terrain or exaggeration changed (shared uniforms are already updated). */
 function refreshShell(): void {
   volume?.refreshShell();
+  globeGround?.setTerrain(globeTerrainOn());
+  shellLabels?.update(globeK(), globeGroundField());
+  updateMarker();
 }
 
 /** Globe tab debug: the curved volume's ENU box and step count. */
@@ -2830,6 +3000,8 @@ onBeforeUnmount(() => {
   boxStack?.dispose();
   volume?.dispose();
   buildings?.dispose();
+  globeGround?.dispose();
+  shellLabels?.dispose();
   timeFields?.dispose();
   host?.dispose();
   probeMarker?.dispose();
@@ -2909,12 +3081,12 @@ onBeforeUnmount(() => {
         </div>
         <button class="icon" title="收起" @click="panelOpen = false">×</button>
       </div>
-      <p v-if="globeMode" class="panel-warn">地球页暂时关闭剖面、粒子、探针和建筑（④/⑤/⑥ 接入后恢复）</p>
+      <p v-if="globeMode" class="panel-warn">地球页暂时关闭剖面（④）和粒子（⑤），接入后恢复</p>
 
       <details open>
         <summary>图层</summary>
         <label class="row"
-          ><input v-model="layers.buildings" type="checkbox" :disabled="globeMode" />建筑白膜
+          ><input v-model="layers.buildings" type="checkbox" />建筑白膜
           <small>{{ buildingsInfo }}</small></label
         >
         <label v-if="layers.buildings" class="slider"
@@ -2936,7 +3108,7 @@ onBeforeUnmount(() => {
           />
         </label>
         <label class="row"
-          ><input v-model="layers.ground" type="checkbox" :disabled="globeMode" />地面
+          ><input v-model="layers.ground" type="checkbox" />地面
           <select v-model="layers.groundVar">
             <option v-for="v in variables2D" :key="v.name" :value="v.name">{{ v.label }}</option>
           </select></label
@@ -2961,7 +3133,7 @@ onBeforeUnmount(() => {
         <label class="row"
           ><input v-model="layers.particles" type="checkbox" :disabled="globeMode" />风粒子（GPGPU 流线）</label
         >
-        <label class="row"><input v-model="layers.probe" type="checkbox" :disabled="globeMode" />探针</label>
+        <label class="row"><input v-model="layers.probe" type="checkbox" />探针</label>
         <label v-if="layers.probe" class="row"
           ><input v-model="layers.probeFollowMouse" type="checkbox" />跟随鼠标</label
         >
@@ -3234,7 +3406,7 @@ onBeforeUnmount(() => {
           >垂直夸张 {{ view.exaggeration.toFixed(1) }}×
           <input v-model.number="view.exaggeration" type="range" min="1" max="10" step="0.1"
         /></label>
-        <label v-if="!globeMode" class="row"><input v-model="view.shadows" type="checkbox" />建筑阴影</label>
+        <label class="row"><input v-model="view.shadows" type="checkbox" />建筑阴影</label>
         <label class="row"
           >主题
           <select v-model="view.theme">
@@ -3301,7 +3473,8 @@ onBeforeUnmount(() => {
 .viewer.globe .legends,
 .viewer.globe .panel,
 .viewer.globe .open-panel,
-.viewer.globe .timeline {
+.viewer.globe .timeline,
+.viewer.globe .profile-box {
   pointer-events: auto;
 }
 .viewer.light {

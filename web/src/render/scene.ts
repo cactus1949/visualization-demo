@@ -198,6 +198,27 @@ export class AtmosScene {
   setShadows(on: boolean): void {
     this.sun.castShadow = on;
   }
+
+  /**
+   * Re-aim the key light for centre-ENU (x east, y north, z up). The default
+   * Y-up box setup would light from the north and miss the shadow frustum.
+   */
+  alignLightsForEnu(): void {
+    this.sun.position.set(-3.6, -2.8, 7.5);
+    this.sun.target.position.set(0, 0, 0);
+    const cam = this.sun.shadow.camera;
+    // ENU unit = 10 km. The shell is about ±0.9 units; ±1.3 keeps the box tab's texel
+    // (26 km / 4096 ≈ 6 m). The sun is ~8.8 units away, so a tight near/far keeps the
+    // depth bias near the box tab's ~15 m instead of ~70 m.
+    cam.left = -1.3;
+    cam.right = 1.3;
+    cam.top = 1.3;
+    cam.bottom = -1.3;
+    cam.near = 7;
+    cam.far = 10.5;
+    cam.updateProjectionMatrix();
+    this.sun.shadow.normalBias = 0.001; // 10 m, same as the box tab's 0.01 km
+  }
 }
 
 /** Value reader for a decoded 2D variable (physical floats). */

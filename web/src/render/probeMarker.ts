@@ -11,13 +11,11 @@ export class ProbeMarker {
   ) {}
 
   setPreview(x: number, z: number, visible = true): void {
-    this.layer.addMarker(PREVIEW, {
-      anchor: { x, y: 0, z },
-      stemTo: { x, y: this.top, z },
-      ring: true,
-      role: "preview",
-      visible,
-    });
+    this.setPreviewAt({ x, y: 0, z }, { x, y: this.top, z }, visible);
+  }
+
+  setPreviewAt(anchor: { x: number; y: number; z: number }, stemTo: { x: number; y: number; z: number }, visible = true): void {
+    this.layer.addMarker(PREVIEW, { anchor, stemTo, ring: true, role: "preview", visible });
   }
 
   setPreviewVisible(visible: boolean): void {
@@ -25,13 +23,11 @@ export class ProbeMarker {
   }
 
   setFixed(x: number, z: number, visible = true): void {
-    this.layer.addMarker(FIXED, {
-      anchor: { x, y: 0, z },
-      stemTo: { x, y: this.top, z },
-      ring: true,
-      role: "fixed",
-      visible,
-    });
+    this.setFixedAt({ x, y: 0, z }, { x, y: this.top, z }, visible);
+  }
+
+  setFixedAt(anchor: { x: number; y: number; z: number }, stemTo: { x: number; y: number; z: number }, visible = true): void {
+    this.layer.addMarker(FIXED, { anchor, stemTo, ring: true, role: "fixed", visible });
   }
 
   setVisible(preview: boolean, fixed: boolean): void {

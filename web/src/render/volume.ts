@@ -17,6 +17,8 @@ export type CurvedVolumeOptions = {
   ground: GridField;
   /** shared with the other globe layers (terrain / k live here) */
   geo: GeoUniforms;
+  /** DEM used by the ground / building overlays (⑥); the volume itself does not read it. */
+  dem?: import("../geo/geoData").Dem;
 };
 
 export type DepthEncoding = "linear" | "log";
