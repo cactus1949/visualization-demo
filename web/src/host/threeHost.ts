@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { FrameHooks, ViewHost } from "./types";
+import { applyLayerRendererConfig } from "./rendererConfig";
 
 export type ThreeHostOptions = {
   initialView?: { position: [number, number, number]; target: [number, number, number] } | null;
@@ -9,17 +10,19 @@ export type ThreeHostOptions = {
 
 /** Creates the existing Three.js render host used by the atmosphere view. */
 export function createThreeHost(
-  canvas: HTMLCanvasElement,
+  container: HTMLElement,
   options: ThreeHostOptions = {},
 ): ViewHost {
+  const canvas = container instanceof HTMLCanvasElement
+    ? container
+    : container.querySelector<HTMLCanvasElement>("canvas") ?? document.createElement("canvas");
+  if (!canvas.parentElement && canvas !== container) container.appendChild(canvas);
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
     powerPreference: "high-performance",
   });
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NeutralToneMapping;
-  renderer.toneMappingExposure = 1.0;
+  applyLayerRendererConfig(renderer);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
@@ -75,6 +78,7 @@ export function createThreeHost(
     renderer,
     camera,
     element: canvas,
+    depthEncoding: "linear",
     size,
     start(nextScene, nextHooks) {
       scene = nextScene;
@@ -83,6 +87,17 @@ export function createThreeHost(
       resizeObserver = new ResizeObserver(resize);
       resizeObserver.observe(canvas);
       raf = requestAnimationFrame(frame);
+    },
+    captureOccluderDepth(target, sceneToRender, hide) {
+      const volume = sceneToRender.getObjectByName("volume");
+      const hidden: Array<[THREE.Object3D, boolean]> = [];
+      if (volume) hidden.push([volume, volume.visible]), (volume.visible = false);
+      for (const object of hide) hidden.push([object, object.visible]), (object.visible = false);
+      renderer.setRenderTarget(target);
+      renderer.clear(true, true, true);
+      renderer.render(sceneToRender, camera);
+      renderer.setRenderTarget(null);
+      for (const [object, visible] of hidden) object.visible = visible;
     },
     raycaster(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();

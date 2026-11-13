@@ -64,7 +64,7 @@ const showPanel = computed(() => !embedded);
       </button>
       <button type="button" :class="{ on: globe }" @click="selectGlobe">地球</button>
     </nav>
-    <GlobeViewer v-if="globe" class="shell-view" />
+    <GlobeViewer v-if="globe" class="shell-view" :format="current" />
     <AtmosViewer
       v-else
       :key="format"

@@ -20,10 +20,14 @@ export interface ViewHost {
   readonly camera: THREE.PerspectiveCamera;
   /** Canvas receiving view input events. */
   readonly element: HTMLCanvasElement;
+  /** Depth encoding used by the host's occluder target. */
+  readonly depthEncoding: "linear" | "log";
   /** Returns the canvas size in CSS pixels. */
   size(): { width: number; height: number };
   /** Starts the host loop for a scene and its layer hooks. */
   start(scene: THREE.Scene, hooks: FrameHooks): void;
+  /** Fills a target with occluder depth. The volume mesh itself is hidden by the host. */
+  captureOccluderDepth(target: THREE.WebGLRenderTarget, scene: THREE.Scene, hide: THREE.Object3D[]): void;
   /** Creates a ray through a client-space pointer location. */
   raycaster(clientX: number, clientY: number): THREE.Raycaster;
   /** Enables or disables orbit camera controls. */

@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import * as THREE from "three";
 import type { ViewHost } from "../host/types";
+import type { GeoMap } from "../geo/mapping";
+import type { GridField } from "../geo/placement";
 import { createThreeHost } from "../host/threeHost";
 import type { Manifest, VariableMeta } from "../data/manifest";
 import type { FormatDef } from "../formats/types";
@@ -76,20 +78,33 @@ export type ViewSnapshot = {
   exaggeration: number;
 };
 
+export type GlobeVolumeOptions = {
+  map: GeoMap;
+  grid: import("../geo/mapping").GeoGrid;
+  ground: GridField;
+  terrain: boolean;
+  k: number;
+};
+
 const props = withDefaults(defineProps<{
   manifestUrl?: string;
   showPanel?: boolean;
   /** export format = data directory under $WEB_ROOT (see formats/*.ts) */
   format?: FormatDef;
   initialView?: ViewSnapshot | null;
-  createHost?: (canvas: HTMLCanvasElement) => ViewHost;
+  createHost?: (container: HTMLElement) => ViewHost;
+  globeMode?: boolean;
+  globeVolume?: GlobeVolumeOptions;
 }>(), {
   manifestUrl: "",
   showPanel: true,
   format: () => ({ id: "current", label: "当前编码", order: 0, fallbackCases: ["lowair_atmos_6h", "lowair_atmos"] }),
   initialView: null,
   createHost: undefined,
+  globeMode: false,
+  globeVolume: undefined,
 });
+const viewerRoot = ref<HTMLDivElement | null>(null);
 const emit = defineEmits<{
   ready: [{ backend: string }];
   probe: [Record<string, unknown>];
@@ -205,6 +220,14 @@ const layers = reactive({
   probe: false,
   probeFollowMouse: false,
 });
+if (props.globeMode) {
+  layers.buildings = false;
+  layers.ground = false;
+  layers.particles = false;
+  layers.volume = true;
+  layers.probe = false;
+  view.exaggeration = 1;
+}
 const particleParams = reactive<ParticleParams>({ ...DEFAULT_PARTICLES });
 const slice = reactive({
   enabled: false,
@@ -1908,7 +1931,7 @@ function beforeCamera(now: number, dt: number, realDt: number): void {
 }
 
 function afterCamera(_now: number, dt: number, _realDt: number): void {
-  atmos.root.scale.y = view.exaggeration;
+  atmos.root.scale.y = props.globeMode ? 1 : view.exaggeration;
   atmos.root.updateMatrixWorld();
   host!.camera.updateMatrixWorld();
   if (boxStack?.group.visible) boxStack.sortSlabs(host!.camera, atmos.root);
@@ -1923,7 +1946,9 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   }
   if (volume?.mesh.visible) {
     updateDepthOccluders();
-    volume.captureDepth(host!.renderer, atmos.scene, host!.camera, depthOccluders);
+    volume.resize(host!.renderer);
+    host!.captureOccluderDepth(volume.depthTarget, atmos.scene, depthOccluders);
+    volume.markDepthValid();
     volume.update(host!.camera, atmos.root, host!.renderer);
   }
 }
@@ -2084,6 +2109,7 @@ function exposeApi(): void {
       if (p.cutLowAlpha !== undefined) layers.cutLowAlpha = Boolean(p.cutLowAlpha);
       if (p.cutLowThreshold !== undefined) layers.cutLowThreshold = Number(p.cutLowThreshold);
     },
+    setVolumeSteps: (steps: number) => volume?.setSteps(Number(steps)),
     setCamera: (pos: [number, number, number], target: [number, number, number]) => {
       host!.setView(pos, target);
     },
@@ -2394,10 +2420,11 @@ async function start(): Promise<void> {
     if (requestedAt[n] === undefined) requestedAt[n] = performance.now();
   }
 
-  const element = canvas.value!;
+  const element = canvas.value;
+  const container = element?.parentElement ?? viewerRoot.value!;
   host = props.createHost
-    ? props.createHost(element)
-    : createThreeHost(element, {
+    ? props.createHost(container)
+    : createThreeHost(element!, {
       ...(props.initialView ? {
         initialView: { position: props.initialView.camera, target: props.initialView.target },
       } : {}),
@@ -2413,7 +2440,7 @@ async function start(): Promise<void> {
   }
 
   atmos = new AtmosScene(domain);
-  annotations = new AnnotationLayer(element.parentElement ?? element, atmos.root);
+  annotations = new AnnotationLayer(host!.element.parentElement ?? host!.element, atmos.root);
   probeMarker = new ProbeMarker(annotations, domain.top);
   hslice = new HorizontalSlice(domain);
   vsection = new AxisSection(domain, "lon");
@@ -2421,7 +2448,14 @@ async function start(): Promise<void> {
   boxStack = new BoxStack(domain, manifest.value.grid.levels_m);
   const initialSize = host!.size();
   boxStack.setResolution(initialSize.width, initialSize.height);
-  volume = new VolumeLayer(domain);
+  volume = new VolumeLayer(domain, props.globeMode && props.globeVolume ? {
+    mode: "curved",
+    map: props.globeVolume.map,
+    grid: props.globeVolume.grid,
+    ground: props.globeVolume.ground,
+    terrain: props.globeVolume.terrain,
+    k: props.globeVolume.k,
+  } : undefined);
   hslice.group.visible = false;
   vsection.group.visible = false;
   volume.mesh.visible = false;
@@ -2435,17 +2469,21 @@ async function start(): Promise<void> {
   if (props.initialView) {
     if (props.createHost) host!.setView(props.initialView.camera, props.initialView.target);
     view.exaggeration = props.initialView.exaggeration;
-  } else {
+  } else if (!props.globeMode) {
     setView("overview");
   }
   const el = host!.element;
-  el.addEventListener("pointerdown", onPointerDown);
-  el.addEventListener("pointermove", onPointerMove);
-  el.addEventListener("pointerup", onPointerUp);
-  el.addEventListener("contextmenu", onContextMenu);
+  const pointerListeners: Array<[string, EventListener]> = [
+    ["pointerdown", onPointerDown as EventListener],
+    ["pointermove", onPointerMove as EventListener],
+    ["pointerup", onPointerUp as EventListener],
+    ["contextmenu", onContextMenu as EventListener],
+    ["dblclick", onDoubleClick as EventListener],
+  ];
+  (host as any).__pointerListeners = pointerListeners;
+  for (const [name, listener] of pointerListeners) el.addEventListener(name, listener);
   window.addEventListener("keydown", onDrawKey);
   window.addEventListener("keydown", onTimeKey);
-  el.addEventListener("dblclick", onDoubleClick);
   exposeApi();
   updateGround();
   host!.start(atmos.scene, { beforeCamera, afterCamera, afterRender, resize });
@@ -2590,6 +2628,13 @@ watch(() => [layers.ground, layers.groundVar, layers.groundFilterMin, layers.gro
 watch(
   () => [layers.volumeVar, layers.volumeOpacity, layers.volumeThreshold],
   updateVolume,
+);
+watch(
+  () => props.globeVolume && [props.globeVolume.terrain, props.globeVolume.k],
+  () => {
+    if (props.globeVolume) volume?.setGeoState(props.globeVolume.terrain, props.globeVolume.k);
+  },
+  { deep: true },
 );
 watch(
   () => layers.volumeVar,
@@ -2771,6 +2816,9 @@ defineExpose({ snapshot });
 onMounted(() => void start());
 onBeforeUnmount(() => {
   disposed = true;
+  const el = host?.element;
+  const listeners = (host as any)?.__pointerListeners as Array<[string, EventListener]> | undefined;
+  if (el && listeners) for (const [name, listener] of listeners) el.removeEventListener(name, listener);
   window.removeEventListener("keydown", onDrawKey);
   window.removeEventListener("keydown", onTimeKey);
   store?.dispose();
@@ -2790,7 +2838,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="viewer" :class="view.theme">
-    <canvas ref="canvas" class="canvas" />
+    <canvas v-if="!globeMode" ref="canvas" class="canvas" />
 
     <div class="hud">
       <b>天津低空三维风场</b>
@@ -2860,11 +2908,12 @@ onBeforeUnmount(() => {
         </div>
         <button class="icon" title="收起" @click="panelOpen = false">×</button>
       </div>
+      <p v-if="globeMode" class="panel-warn">地球页暂时关闭剖面、粒子、探针和建筑（④/⑤/⑥ 接入后恢复）</p>
 
       <details open>
         <summary>图层</summary>
         <label class="row"
-          ><input v-model="layers.buildings" type="checkbox" />建筑白膜
+          ><input v-model="layers.buildings" type="checkbox" :disabled="globeMode" />建筑白膜
           <small>{{ buildingsInfo }}</small></label
         >
         <label v-if="layers.buildings" class="slider"
@@ -2886,7 +2935,7 @@ onBeforeUnmount(() => {
           />
         </label>
         <label class="row"
-          ><input v-model="layers.ground" type="checkbox" />地面
+          ><input v-model="layers.ground" type="checkbox" :disabled="globeMode" />地面
           <select v-model="layers.groundVar">
             <option v-for="v in variables2D" :key="v.name" :value="v.name">{{ v.label }}</option>
           </select></label
@@ -2909,9 +2958,9 @@ onBeforeUnmount(() => {
           />
         </div>
         <label class="row"
-          ><input v-model="layers.particles" type="checkbox" />风粒子（GPGPU 流线）</label
+          ><input v-model="layers.particles" type="checkbox" :disabled="globeMode" />风粒子（GPGPU 流线）</label
         >
-        <label class="row"><input v-model="layers.probe" type="checkbox" />探针</label>
+        <label class="row"><input v-model="layers.probe" type="checkbox" :disabled="globeMode" />探针</label>
         <label v-if="layers.probe" class="row"
           ><input v-model="layers.probeFollowMouse" type="checkbox" />跟随鼠标</label
         >
@@ -2979,7 +3028,7 @@ onBeforeUnmount(() => {
         </template>
       </details>
 
-      <details open>
+      <details v-if="!globeMode" open>
         <summary>
           粒子样式 <em>{{ particleParams.count.toLocaleString() }}</em>
         </summary>
@@ -3080,7 +3129,7 @@ onBeforeUnmount(() => {
         </div>
       </details>
 
-      <details open>
+      <details v-if="!globeMode" open>
         <summary>
           剖面 <em>{{ section.enabled ? SECTION_KIND_LABELS[section.kind] : "关" }}</em>
         </summary>

@@ -1,9 +1,3 @@
-/**
- * GLSL placement shared by every three.js layer on the globe: a vertex given as
- * (u, v, AGL metres) goes to centre-ENU (units of map.enu_unit_m) through
- *   h = terrain * g(u, v) + k * AGL,  enu = forwardPoly(u, v, h / 1e4)
- * with g read from the per-column ground texture (manual bilinear, exact float32 texels).
- */
 import { DataTexture, FloatType, NearestFilter, RedFormat, Vector3, type IUniform } from "three";
 import type { GeoMap } from "../geo/mapping";
 import type { GridField } from "../geo/placement";
@@ -33,7 +27,6 @@ const POW = ["1.0", "a", "a2", "a3"];
 const POWB = ["1.0", "b", "b2", "b3"];
 const POWC = ["1.0", "c"];
 
-/** GLSL3 declarations + `vec3 geoPlace(vec3 uvAgl)`; prepend to a vertex shader. */
 export function geoPlaceGlsl(map: GeoMap): string {
   const n = map.terms.length;
   const sum = map.terms.map(([i, j, k], idx) => `uGeoFwd[${idx}] * (${POW[i]} * ${POWB[j]} * ${POWC[k]})`).join(" +\n    ");
@@ -57,7 +50,20 @@ float geoGround(vec2 uv) {
 }
 vec3 geoPlace(vec3 uvAgl) {
   float h = uGeoTerrain * geoGround(uvAgl.xy) + uGeoK * uvAgl.z;
-  return geoForward(uvAgl.x, uvAgl.y, h / ${(1e4).toFixed(1)});
+  return geoForward(uvAgl.x, uvAgl.y, h / 10000.0);
+}
+`;
+}
+
+export function geoInverseGlsl(map: GeoMap): string {
+  const n = map.terms.length;
+  const sum = map.terms.map(([i, j, k], idx) => `uGeoInv[${idx}] * (${POW[i]} * ${POWB[j]} * ${POWC[k]})`).join(" +\n    ");
+  return `
+uniform vec3 uGeoInv[${n}];
+vec3 geoInverse(vec3 enu) {
+  float a = enu.x / ${map.enu_unit_m.toFixed(8)}, b = enu.y / ${map.enu_unit_m.toFixed(8)}, c = enu.z / ${map.enu_unit_m.toFixed(8)};
+  float a2 = a * a, a3 = a2 * a, b2 = b * b, b3 = b2 * b;
+  return ${sum};
 }
 `;
 }
