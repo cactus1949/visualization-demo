@@ -102,9 +102,10 @@ export class GlobeOverlay implements ViewHost {
     const realDt = (now - this.last) / 1000;
     const dt = Math.min(0.1, realDt);
     this.last = now;
-    this.renderer.info.reset();
     this.trackSize();
+    // beforeCamera reads last frame's draw calls for the HUD; count this frame from here
     this.hooks?.beforeCamera(now, dt, realDt);
+    this.renderer.info.reset();
     this.sync.sync(this.cesium.camera, this.camera, this.sphere);
     this.hooks?.afterCamera(now, dt, realDt);
     this.resyncAfter(() => {
