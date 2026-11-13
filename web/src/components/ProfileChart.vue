@@ -53,7 +53,13 @@ function prettyUnit(units: string): string {
   return map[units] ?? units;
 }
 
+/** value with unit; a missing value shows 「缺测」 without the unit */
+function withUnit(v: number): string {
+  return Number.isFinite(v) && unitText.value ? `${fmt(v)} ${unitText.value}` : fmt(v);
+}
+
 function fmt(v: number): string {
+  if (!Number.isFinite(v)) return "缺测";
   const a = Math.abs(v);
   if (a >= 100) return v.toFixed(0);
   if (a >= 10) return v.toFixed(1);
@@ -69,16 +75,17 @@ function thicknesses(levels: number[]): number[] {
   });
 }
 
-function circularMean(values: number[], weights: number[]): number {
+function circularMean(values: number[], weights: number[]): number | null {
   let xs = 0;
   let ys = 0;
   for (let i = 0; i < values.length; i += 1) {
+    if (!Number.isFinite(values[i]!)) continue;
     const w = weights[i] ?? 1;
     const r = ((values[i] ?? 0) * Math.PI) / 180;
     xs += w * Math.sin(r);
     ys += w * Math.cos(r);
   }
-  return ((Math.atan2(xs, ys) * 180) / Math.PI + 360) % 360;
+  return xs === 0 && ys === 0 ? null : ((Math.atan2(xs, ys) * 180) / Math.PI + 360) % 360;
 }
 
 const unitText = computed(() => prettyUnit(props.units));
@@ -118,9 +125,15 @@ function yOf(h: number): number {
 
 const linePath = computed(() => {
   if (props.values.length < 2 || props.levels.length !== props.values.length) return "";
-  return props.values
-    .map((v, i) => `${i ? "L" : "M"}${xOf(v).toFixed(1)},${yOf(props.levels[i]!).toFixed(1)}`)
-    .join("");
+  let path = "";
+  let connected = false;
+  for (let i = 0; i < props.values.length; i += 1) {
+    const value = props.values[i]!;
+    if (!Number.isFinite(value)) { connected = false; continue; }
+    path += `${connected ? "L" : "M"}${xOf(value).toFixed(1)},${yOf(props.levels[i]!).toFixed(1)}`;
+    connected = true;
+  }
+  return path;
 });
 
 const zeroX = computed(() => {
@@ -131,12 +144,14 @@ const zeroX = computed(() => {
 const extrema = computed(() => {
   const { values, levels } = props;
   if (!values.length || values.length !== levels.length) return { max: null, min: null };
-  let iMax = 0;
-  let iMin = 0;
-  for (let i = 1; i < values.length; i += 1) {
-    if (values[i]! > values[iMax]!) iMax = i;
-    if (values[i]! < values[iMin]!) iMin = i;
+  let iMax = -1;
+  let iMin = -1;
+  for (let i = 0; i < values.length; i += 1) {
+    if (!Number.isFinite(values[i]!)) continue;
+    if (iMax < 0 || values[i]! > values[iMax]!) iMax = i;
+    if (iMin < 0 || values[i]! < values[iMin]!) iMin = i;
   }
+  if (iMax < 0 || iMin < 0) return { max: null, min: null };
   return {
     max: { i: iMax, value: values[iMax]!, level: levels[iMax]! },
     min: { i: iMin, value: values[iMin]!, level: levels[iMin]! },
@@ -156,10 +171,11 @@ const stats = computed(() => {
       let acc = 0;
       let den = 0;
       for (let i = 0; i < values.length; i += 1) {
+        if (!Number.isFinite(values[i]!)) continue;
         acc += values[i]! * w[i]!;
         den += w[i]!;
       }
-      mean = acc / den;
+      mean = den ? acc / den : null;
     }
   }
   const signed = props.signed && extrema.value.max && extrema.value.min && extrema.value.max.i !== extrema.value.min.i;
@@ -193,10 +209,9 @@ const hover = computed(() => {
   if (i === null || i >= props.values.length) return null;
   const value = props.values[i]!;
   const level = props.levels[i]!;
-  if (!Number.isFinite(value)) return null;
-  const cx = xOf(value);
+  const cx = Number.isFinite(value) ? xOf(value) : PAD.l + 4;
   const cy = yOf(level);
-  const text = `${fmt(value)}${unitText.value ? " " + unitText.value : ""}`;
+  const text = withUnit(value);
   // Tooltip box (SVG units): flip to the left of the dot near the right edge.
   const w = Math.max(74, 18 + Math.max(text.length, 8) * 5.6);
   const h = 32;
@@ -300,23 +315,23 @@ const xTitle = computed(() => (unitText.value ? `${props.label} (${unitText.valu
     <div class="stats">
       <div class="stat">
         <span class="k">近地面 <small v-if="stats.near">{{ stats.near.level.toFixed(1) }} m</small></span>
-        <span class="v">{{ stats.near ? `${fmt(stats.near.value)} ${unitText}` : "—" }}</span>
+        <span class="v">{{ stats.near ? withUnit(stats.near.value) : "—" }}</span>
       </div>
       <div class="stat">
         <span class="k">顶层 <small v-if="stats.top">{{ stats.top.level.toFixed(1) }} m</small></span>
-        <span class="v">{{ stats.top ? `${fmt(stats.top.value)} ${unitText}` : "—" }}</span>
+        <span class="v">{{ stats.top ? withUnit(stats.top.value) : "—" }}</span>
       </div>
       <div class="stat">
         <span class="k">{{ stats.signed ? "峰值最大" : "峰值" }} <small v-if="stats.max">@ {{ stats.max.level.toFixed(1) }} m</small></span>
-        <span class="v">{{ stats.max ? `${fmt(stats.max.value)} ${unitText}` : "—" }}</span>
+        <span class="v">{{ stats.max ? withUnit(stats.max.value) : "—" }}</span>
       </div>
       <div v-if="stats.signed" class="stat">
         <span class="k">峰值最小 <small v-if="stats.min">@ {{ stats.min.level.toFixed(1) }} m</small></span>
-        <span class="v">{{ stats.min ? `${fmt(stats.min.value)} ${unitText}` : "—" }}</span>
+        <span class="v">{{ stats.min ? withUnit(stats.min.value) : "—" }}</span>
       </div>
       <div class="stat">
         <span class="k">整柱平均</span>
-        <span class="v">{{ stats.mean !== null ? `${fmt(stats.mean)} ${unitText}` : "—" }}</span>
+        <span class="v">{{ stats.mean !== null ? withUnit(stats.mean) : "—" }}</span>
       </div>
     </div>
   </div>

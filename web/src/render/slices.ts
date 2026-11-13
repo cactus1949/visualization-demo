@@ -78,6 +78,7 @@ out vec4 outColor;
 void main() {
   if (!insideDomain(vLocal)) discard;
   float value = texture(uField, localToTex(vLocal)).r;
+  if (isnan(value)) discard;
   if (uFilterEnable > 0.5 && (value < uFilterMin - 1e-6 || value > uFilterMax + 1e-6)) discard;
   float t = clamp((value - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
   vec3 color = texture(uColormap, vec2(t, 0.5)).rgb;

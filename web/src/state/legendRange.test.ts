@@ -37,6 +37,12 @@ describe("legend data ranges", () => {
     assert.equal(emptyHint("tke", { min: 0, max: 1 }), null);
   });
 
+  it("ignores missing values and treats an all-missing frame as empty", () => {
+    assert.deepEqual(rangeOfArray(new Float32Array([Number.NaN, 3, Infinity, -1])), { min: -1, max: 3 });
+    assert.equal(emptyHint("tke", rangeOfArray(new Float32Array([Number.NaN, Number.NaN]))), "当前无数据");
+    assert.deepEqual(blendRange({ min: Infinity, max: -Infinity }, { min: 2, max: 4 }, 0.5), { min: 2, max: 4 });
+  });
+
   it("warns only when a known maximum is below the threshold", () => {
     assert.equal(thresholdHidesAll(2, { min: 0, max: 1.9 }), true);
     assert.equal(thresholdHidesAll(2, { min: 0, max: 2 }), false);

@@ -378,8 +378,10 @@ function speedValuesA(): Float32Array | null {
   for (let i = 0; i < values.length; i += 1) {
     const s = Math.hypot(u.data[i]!, v.data[i]!);
     values[i] = s;
-    if (s < lo) lo = s;
-    if (s > hi) hi = s;
+    if (Number.isFinite(s)) {
+      if (s < lo) lo = s;
+      if (s > hi) hi = s;
+    }
   }
   speedCache.frame = cur.a;
   speedCache.values = values;
@@ -388,7 +390,7 @@ function speedValuesA(): Float32Array | null {
 }
 function speedRangeA(): [number, number] {
   speedValuesA();
-  return [...speedCache.range] as [number, number];
+  return Number.isFinite(speedCache.range[0]) ? [...speedCache.range] as [number, number] : [0, 1];
 }
 
 function volumeFullRange(name: string): [number, number] {
@@ -516,7 +518,9 @@ function cpuPair(name: string): { A: Float32Array; B: Float32Array | null; s: nu
   return { A, B, s: B ? cur.s : 0 };
 }
 const mixAt = (p: { A: Float32Array; B: Float32Array | null; s: number }, i: number) =>
-  p.B ? p.A[i]! + (p.B[i]! - p.A[i]!) * p.s : p.A[i]!;
+  p.B
+    ? (Number.isFinite(p.A[i]!) && Number.isFinite(p.B[i]!) ? p.A[i]! + (p.B[i]! - p.A[i]!) * p.s : Number.NaN)
+    : p.A[i]!;
 
 function manifestRangeAt(name: string, frame: number): DataRange | null {
   const meta = manifest.value?.variables[name];
@@ -540,6 +544,7 @@ function speedRangeAt(frame: number, level?: number): DataRange | null {
     let max = -Infinity;
     for (let i = start; i < end; i += 1) {
       const value = Math.hypot(u[i]!, v[i]!);
+      if (!Number.isFinite(value)) continue;
       if (value < min) min = value;
       if (value > max) max = value;
     }
@@ -556,9 +561,9 @@ function sectionLevel(): number | undefined {
 
 function frameRange(name: string, frame: number, level?: number): DataRange | null {
   if (name === SPEED) return speedRangeAt(frame, level);
-  if (level === undefined) return manifestRangeAt(name, frame);
   const data = store?.get(name, frame)?.data;
   if (!data) return manifestRangeAt(name, frame);
+  if (level === undefined) return legendRanges.get(`${name}@${frame}`, () => rangeOfArray(data));
   const n = domain.nx * domain.ny;
   return legendRanges.get(`${name}@${frame}@k${level}`, () => rangeOfArray(data, level * n, (level + 1) * n));
 }
@@ -603,8 +608,10 @@ function windAt(
   i: number,
 ): [number, number, number] {
   const ua = u.A[i]!, va = v.A[i]!;
+  if (!Number.isFinite(ua) || !Number.isFinite(va)) return [Number.NaN, Number.NaN, Number.NaN];
   if (!u.B || !v.B) return [ua, va, Math.hypot(ua, va)];
   const ub = u.B[i]!, vb = v.B[i]!;
+  if (!Number.isFinite(ub) || !Number.isFinite(vb)) return [Number.NaN, Number.NaN, Number.NaN];
   const s = u.s;
   const m = Math.hypot(ua, va) + (Math.hypot(ub, vb) - Math.hypot(ua, va)) * s;
   let uu = ua + (ub - ua) * s;
@@ -901,9 +908,11 @@ function groundFilterFor(read: (i: number) => number): [number, number] {
   let hi = -Infinity;
   for (let i = 0; i < n; i += 1) {
     const v = read(i);
+    if (!Number.isFinite(v)) continue;
     if (v < lo) lo = v;
     if (v > hi) hi = v;
   }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [-Infinity, Infinity];
   if (!(hi > lo)) hi = lo + 1e-6;
   // Across time frames the bounds only grow (per ground variable), and a filter
   // handle sitting on a bound follows it — otherwise a later, windier frame would be
@@ -1389,7 +1398,7 @@ function refreshProbe(
     const [uu, vv, mag] = windAt(u, v, i);
     speed.push(mag);
     // meteorological direction: where the wind comes from, clockwise from north
-    direction.push((THREE.MathUtils.radToDeg(Math.atan2(-uu, -vv)) + 360) % 360);
+    direction.push(Number.isFinite(mag) ? (THREE.MathUtils.radToDeg(Math.atan2(-uu, -vv)) + 360) % 360 : Number.NaN);
     if (name === "direction") values.push(direction[direction.length - 1]!);
     else if (data) values.push(mixAt(data, i));
     else values.push(speed[speed.length - 1]!);
@@ -2207,7 +2216,8 @@ function exposeApi(): void {
       if (!data) return null;
       const step = Math.max(1, Math.floor(data.length / 100_000));
       const s: number[] = [];
-      for (let i = 0; i < data.length; i += step) s.push(data[i]!);
+      for (let i = 0; i < data.length; i += step) if (Number.isFinite(data[i]!)) s.push(data[i]!);
+      if (!s.length) return null;
       s.sort((a, b) => a - b);
       const at = (q: number) => s[Math.min(s.length - 1, Math.floor(q * (s.length - 1)))];
       return { p01: at(0.01), p10: at(0.1), p50: at(0.5), p90: at(0.9), p99: at(0.99), max: s[s.length - 1] };
@@ -2216,8 +2226,12 @@ function exposeApi(): void {
       const data = loaded(name)?.data;
       const g = manifest.value?.grid;
       if (!data || !g) return null;
-      let best = 0;
-      for (let i = 1; i < data.length; i += 1) if (data[i]! > data[best]!) best = i;
+      let best = -1;
+      for (let i = 0; i < data.length; i += 1) {
+        if (!Number.isFinite(data[i]!)) continue;
+        if (best < 0 || data[i]! > data[best]!) best = i;
+      }
+      if (best < 0) return null;
       const n = g.nx * g.ny;
       return { k: Math.floor(best / n), iy: Math.floor((best % n) / g.nx), ix: best % g.nx, value: data[best] };
     },

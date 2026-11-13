@@ -113,12 +113,15 @@ vec4 surfaceColor(int i, vec3 p) {
   vec4 c;
   if (uSurfBinding[i] < 0.5) {
     v = texture(uSliceField, localToTex(p)).r;
+    if (isnan(v)) return vec4(0.0);
     c = texture(uSliceColormap, vec2(clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0), 0.5));
   } else if (uSurfBinding[i] < 1.5) {
     v = texture(uSectionField, localToTex(p)).r;
+    if (isnan(v)) return vec4(0.0);
     c = texture(uSectionColormap, vec2(clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0), 0.5));
   } else {
     v = texture(uField, localToTex(p)).r;
+    if (isnan(v)) return vec4(0.0);
     c = texture(uColormap, vec2(clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0), 0.5));
   }
   if (uSurfFilterEnable[i] > 0.5 && (v < uSurfFilterMin[i] - 1e-6 || v > uSurfFilterMax[i] + 1e-6))
@@ -196,6 +199,7 @@ void main() {
     if (p.x < uCutLo.x || p.x > uCutHi.x || p.y < uCutLo.y || p.y > uCutHi.y || p.z < uCutLo.z || p.z > uCutHi.z)
       continue;
     float v = texture(uField, localToTex(p)).r;
+    if (isnan(v)) continue;
     if (uFilterEnable > 0.5 && (v < uFilterMin - 1e-6 || v > uFilterMax + 1e-6)) continue;
     float n = clamp((v - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
     if (n < uThreshold) continue;

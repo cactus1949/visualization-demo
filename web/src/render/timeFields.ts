@@ -33,6 +33,14 @@ interface Slot {
   data: Uint16Array | null;
 }
 
+function hasMissing(data: Uint16Array): boolean {
+  for (let i = 0; i < data.length; i += 1) {
+    const h = data[i]! & 0x7fff;
+    if ((h & 0x7c00) === 0x7c00 && (h & 0x03ff) !== 0) return true;
+  }
+  return false;
+}
+
 const VERT = /* glsl */ `
 in vec3 position;
 void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }
@@ -51,8 +59,18 @@ void main() {
   ivec3 c = ivec3(int(gl_FragCoord.x), int(gl_FragCoord.y), uLayer);
   vec4 a = texelFetch(uA, c, 0);
   vec4 b = texelFetch(uB, c, 0);
+  float missing = 0.0 / 0.0;
   if (uMode == 2) {
+    if (isnan(a.r) || isnan(b.r)) { outColor = vec4(missing, 0.0, 0.0, 1.0); return; }
     outColor = vec4(mix(a.r, b.r, uS), 0.0, 0.0, 1.0);
+    return;
+  }
+  if (uMode == 1 && (isnan(a.x) || isnan(a.y) || isnan(b.x) || isnan(b.y))) {
+    outColor = vec4(missing);
+    return;
+  }
+  if (uMode == 0 && (isnan(a.x) || isnan(a.y) || isnan(a.z) || isnan(b.x) || isnan(b.y) || isnan(b.z))) {
+    outColor = vec4(missing);
     return;
   }
   float ma = length(a.xy);
@@ -74,6 +92,7 @@ export class TimeResource {
   readonly target: THREE.WebGL3DRenderTarget;
   /** true once the target holds a blended field */
   valid = false;
+  hasMissingData = false;
   /** (a, b, s) shown in the target */
   shown = { a: -1, b: -1, s: -1 };
   /** wall time of the first full slot upload (ms) */
@@ -139,6 +158,12 @@ export class TimeResource {
     if (!victim) return false;
     victim.frame = frame;
     victim.data = data;
+    if (hasMissing(data)) {
+      this.hasMissingData = true;
+      this.target.texture.minFilter = THREE.NearestFilter;
+      this.target.texture.magFilter = THREE.NearestFilter;
+      this.target.texture.needsUpdate = true;
+    }
     victim.next = 0;
     if (this.shown.a === frame || this.shown.b === frame) this.shown.a = -1; // force re-blend later
     return true;
@@ -313,6 +338,11 @@ export class TimeFields {
       r.shown = { a, b, s };
     }
     if (speed) {
+      if (this.wind.hasMissingData) {
+        this.speed.texture.minFilter = THREE.NearestFilter;
+        this.speed.texture.magFilter = THREE.NearestFilter;
+        this.speed.texture.needsUpdate = true;
+      }
       const sh = this.speedShown;
       if (!(sh.a === a && sh.b === b && sh.s === s && this.speedValid)) {
         const A = this.wind.slotOf(a);

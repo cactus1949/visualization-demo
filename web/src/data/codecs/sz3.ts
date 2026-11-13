@@ -3,7 +3,7 @@
  * (fields the SZ3 exporter does not store and the browser recomputes, same formulas as
  * pipeline/sz3pipe/build_sz3.py). Delete this file and codecs/sz3/ to drop the format.
  */
-import { decodeSz3, ensureSz3, type Sz3Index } from "./sz3/decoder";
+import { decodeSz3, type Sz3Index } from "./sz3/decoder";
 import { count, fetchBytes, type Codec } from "./types";
 
 interface DeriveSpec {
@@ -35,7 +35,6 @@ const codec: Codec = {
   },
   async decode(p, meta, env) {
     if (meta.encoding !== "derived") {
-      await ensureSz3();
       return decodeSz3(new Uint8Array(p.bytes), p.extra as Sz3Index);
     }
     const d = (meta as unknown as { derive: DeriveSpec }).derive;

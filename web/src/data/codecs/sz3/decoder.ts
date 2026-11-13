@@ -1,4 +1,8 @@
 /** SZ3 3.4.0 WASM decoder (T1L packs). Only used by codecs/sz3.ts. */
+import { assembleSlabs, decompressDeflate, type SlabAssemblyIndex } from "./slabs";
+
+export type { SlabIndex } from "./slabs";
+
 export interface Sz3Index {
   name?: string;
   shape: number[];
@@ -7,8 +11,9 @@ export interface Sz3Index {
   transform?: "log10" | string | null;
   /** categorical field stored with bound 0.49: round after decoding */
   round?: boolean;
-  offsets: number[];
-  lengths: number[];
+  offsets?: number[];
+  lengths?: number[];
+  slabs?: SlabAssemblyIndex["slabs"];
 }
 
 type Sz3Module = {
@@ -38,24 +43,17 @@ class Decoder {
       this.outCap = outFloats;
     }
   }
-  decodeVar(bytes: Uint8Array, idx: Sz3Index): Float32Array {
-    const total = idx.shape.reduce((a, b) => a * b, 1);
+  async decodeVar(bytes: Uint8Array, idx: Sz3Index): Promise<Float32Array> {
     const slab = idx.slab_shape.reduce((a, b) => a * b, 1);
+    const total = idx.shape.reduce((a, b) => a * b, 1);
     this.ensure(bytes.length, slab);
-    this.m.HEAPU8.set(bytes, this.inPtr);
-    const out = new Float32Array(total);
-    for (let s = 0; s < idx.offsets.length; s += 1) {
-      const n = this.m._sz3_decompress_f32(this.inPtr + idx.offsets[s]!, idx.lengths[s]!, this.outPtr, slab);
-      if (n !== slab) throw new Error(`SZ3 decode ${idx.name ?? "var"} slab ${s}: got ${n}`);
-      out.set(this.m.HEAPF32.subarray(this.outPtr >> 2, (this.outPtr >> 2) + slab), s * slab);
-    }
-    if (idx.transform === "log10") {
-      for (let i = 0; i < total; i += 1) out[i] = Math.pow(10, out[i]!);
-    }
-    if (idx.round) {
-      for (let i = 0; i < total; i += 1) out[i] = Math.round(out[i]!);
-    }
-    return out;
+    const decodeOne = (stream: Uint8Array): Float32Array => {
+      this.m.HEAPU8.set(stream, this.inPtr);
+      const n = this.m._sz3_decompress_f32(this.inPtr, stream.length, this.outPtr, slab);
+      if (n !== slab) throw new Error(`SZ3 decode ${idx.name ?? "var"}: got ${n}`);
+      return this.m.HEAPF32.subarray(this.outPtr >> 2, (this.outPtr >> 2) + slab).slice();
+    };
+    return assembleSlabs(bytes, idx, decodeOne, decompressDeflate);
   }
 }
 
@@ -76,7 +74,9 @@ export function ensureSz3(): Promise<Decoder> {
   return ready;
 }
 
-export function decodeSz3(bytes: Uint8Array, idx: Sz3Index): Float32Array {
-  if (!decoder) throw new Error("SZ3 WASM 尚未初始化");
-  return decoder.decodeVar(bytes, idx);
+export async function decodeSz3(bytes: Uint8Array, idx: Sz3Index): Promise<Float32Array> {
+  const needsWasm = !idx.slabs || idx.slabs.some((slab) => slab?.kind === "sz3");
+  if (!needsWasm) return assembleSlabs(bytes, idx, () => { throw new Error("unexpected SZ3 slab"); }, decompressDeflate);
+  if (!decoder) await ensureSz3();
+  return decoder!.decodeVar(bytes, idx);
 }
