@@ -104,7 +104,15 @@ async function decodeInWorker(dem: ArrayBuffer, ground: ArrayBuffer, demMeta: Qu
     return await new Promise<DecodeReply>((resolve, reject) => {
       worker.onmessage = (event: MessageEvent<DecodeReply | { error: string }>) =>
         "error" in event.data ? reject(new Error(event.data.error)) : resolve(event.data);
-      worker.onerror = (event) => reject(event.error ?? new Error(`geo decode worker failed: ${event.message}`));
+      worker.onerror = (event) =>
+        reject(
+          event.error ??
+            new Error(
+              event.message
+                ? `geo decode worker failed: ${event.message}`
+                : "geo decode worker failed to start or crashed (script missing, blocked or not a module worker)",
+            ),
+        );
       const req: DecodeRequest = { dem, ground, demMeta, groundMeta };
       worker.postMessage(req, [dem, ground]);
     });

@@ -13,8 +13,13 @@ test("sub path base puts data under it", () => {
 
 test("VITE_DATA_BASE wins over the vite base", () => {
   assert.equal(resolveDataBase("https://cdn.example.com/wx/", "/viz/"), "https://cdn.example.com/wx");
-  assert.equal(resolveDataBase("", "/viz/"), "");
-  assert.equal(resolveDataBase("", "./", "http://h/viz/"), "");
+  assert.equal(resolveDataBase("/other", "/viz/"), "/other");
+});
+
+test("empty VITE_DATA_BASE counts as unset", () => {
+  assert.equal(resolveDataBase("", "/viz/"), "/viz");
+  assert.equal(resolveDataBase("", "/"), "");
+  assert.equal(resolveDataBase("", "./", "http://h/viz/"), "/viz");
   assert.equal(resolveDataBase("/other", "/viz/"), "/other");
 });
 
