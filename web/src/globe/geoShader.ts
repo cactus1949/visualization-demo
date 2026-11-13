@@ -89,3 +89,44 @@ vec3 geoInverse(vec3 enu) {
 }
 `;
 }
+
+/**
+ * Root-local box km (first two tabs' layout: x east, z south, y height km) -> (u, v, AGL metres).
+ * Needs `uniform vec3 uDomain` (sx, sz, top km; see GLSL_DOMAIN in render/fields.ts).
+ */
+export const BOX_TO_UVAGL_GLSL = /* glsl */ `
+vec3 boxToUvAgl(vec3 p) {
+  return vec3(p.x / uDomain.x + 0.5, 0.5 - p.z / uDomain.y, p.y * 1000.0);
+}
+`;
+
+/**
+ * three's logarithmic depth for custom ShaderMaterials (globe renderer runs with logarithmicDepthBuffer).
+ * Vertex: declare with LOGDEPTH_VERTEX_PARS, call LOGDEPTH_VERTEX after gl_Position.
+ * Fragment: declare with LOGDEPTH_FRAGMENT_PARS, run LOGDEPTH_FRAGMENT at the top of main().
+ * gl_FragDepth is written even when depthWrite is false so the depth test matches the log buffer.
+ */
+export const LOGDEPTH_VERTEX_PARS = /* glsl */ `
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+out float vFragDepth;
+out float vIsPerspective;
+#endif
+`;
+export const LOGDEPTH_VERTEX = /* glsl */ `
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+  vFragDepth = 1.0 + gl_Position.w;
+  vIsPerspective = projectionMatrix[2][3] == -1.0 ? 1.0 : 0.0;
+#endif
+`;
+export const LOGDEPTH_FRAGMENT_PARS = /* glsl */ `
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+uniform float logDepthBufFC;
+in float vFragDepth;
+in float vIsPerspective;
+#endif
+`;
+export const LOGDEPTH_FRAGMENT = /* glsl */ `
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+  gl_FragDepth = vIsPerspective == 0.0 ? gl_FragCoord.z : log2(vFragDepth) * logDepthBufFC * 0.5;
+#endif
+`;

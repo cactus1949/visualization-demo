@@ -87,6 +87,42 @@ export function exactEnu(grid: GeoGrid, frame: EnuFrame, u: number, v: number, h
   return ecefToEnu(frame, geodeticToEcef(lon, lat, h));
 }
 
+/** ENU (metres) -> ECEF: rows are orthonormal, so the inverse rotation is their transpose. */
+export function enuToEcef(frame: EnuFrame, enu: Vec3): Vec3 {
+  const [e, n, u] = frame.rows;
+  return [
+    frame.origin[0] + e[0] * enu[0] + n[0] * enu[1] + u[0] * enu[2],
+    frame.origin[1] + e[1] * enu[0] + n[1] * enu[1] + u[1] * enu[2],
+    frame.origin[2] + e[2] * enu[0] + n[2] * enu[1] + u[2] * enu[2],
+  ];
+}
+
+/** ECEF -> geodetic (lon°, lat°, h m), fixed-point iteration (converges to < 1e-9 m in a few steps). */
+export function ecefToGeodetic(p: Vec3): [number, number, number] {
+  const [x, y, z] = p;
+  const r = Math.hypot(x, y);
+  const lon = Math.atan2(y, x);
+  let lat = Math.atan2(z, r * (1 - E2));
+  let h = 0;
+  for (let i = 0; i < 8; i++) {
+    const s = Math.sin(lat);
+    const n = A / Math.sqrt(1 - E2 * s * s);
+    h = Math.abs(lat) < Math.PI / 4 ? r / Math.cos(lat) - n : z / s - n * (1 - E2);
+    lat = Math.atan2(z, r * (1 - E2 * n / (n + h)));
+  }
+  return [lon / DEG, lat / DEG, h];
+}
+
+/** Exact inverse of exactEnu: ENU (metres) -> grid (u, v) and ellipsoid h. Valid anywhere (cameras included). */
+export function exactInverse(grid: GeoGrid, frame: EnuFrame, enu: Vec3): { u: number; v: number; h: number } {
+  const [lon, lat, h] = ecefToGeodetic(enuToEcef(frame, enu));
+  return {
+    u: (lon - grid.lon_min) / (grid.lon_max - grid.lon_min),
+    v: (lat - grid.lat_min) / (grid.lat_max - grid.lat_min),
+    h,
+  };
+}
+
 /** Pass Math.fround to emulate float32 shader arithmetic. */
 type Round = (x: number) => number;
 const exact: Round = (x) => x;

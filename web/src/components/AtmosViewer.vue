@@ -37,7 +37,9 @@ import { AnnotationLayer, HeightOccluder } from "../render/annotations";
 import { ShellHeightLabels, shellLabelHeights } from "../render/annotations/shellLabels";
 import { GlobeGround } from "../render/globeGround";
 import { cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../geo/boxEnu";
-import { polyInverse, type EnuFrame } from "../geo/mapping";
+import { exactInverse, polyInverse, type EnuFrame } from "../geo/mapping";
+import type { SectionGlobe } from "../render/sections/globe";
+import { terrainBlocksSight } from "../geo/lineOfSight";
 import { sampleGrid, type GridField } from "../geo/placement";
 import {
   DEFAULT_PARTICLES,
@@ -220,7 +222,7 @@ const layers = reactive({
   probeFollowMouse: false,
 });
 if (globeMode) {
-  // ④ sections and ⑤ particles stay off; ⑥ re-enables buildings, ground, probe (probe still starts off, like the box tabs)
+  // ⑤ particles stay off; ④ sections and ⑥ buildings, ground, probe start off like the box tabs
   layers.particles = false;
   layers.volume = true;
   view.exaggeration = 1;
@@ -983,31 +985,50 @@ function globeEnuOf(u: number, v: number, aglM: number): { x: number; y: number;
   const p = placeEnuUnits(g.grid, g.map, globeFrame!, u, v, aglM, globeK(), globeGroundField());
   return { x: p[0], y: p[1], z: p[2] };
 }
+/** ④ globe sections: shared placement inputs (null on the box tabs). */
+function sectionGlobe(): SectionGlobe | null {
+  const g = globeOpt();
+  return g ? { map: g.map, geo: g.geo } : null;
+}
+/** Box km (first-two-tab layout) -> centre-ENU units on the current shell (exact float64). */
+function boxToEnu(p: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  return globeEnuOf(p.x / domain.sx + 0.5, 0.5 - p.z / domain.sz, p.y * 1000);
+}
+/** Centre-ENU units -> box km on the current shell (exact geodetic inverse; valid for cameras too). */
+function enuToBox(enu: THREE.Vector3, out = new THREE.Vector3()): THREE.Vector3 {
+  const g = globeOpt()!;
+  const s = g.map.enu_unit_m;
+  const inv = exactInverse(g.grid, globeFrame!, [enu.x * s, enu.y * s, enu.z * s]);
+  const ground = globeGroundField();
+  const g0 = ground ? sampleGrid(ground, THREE.MathUtils.clamp(inv.u, 0, 1), THREE.MathUtils.clamp(inv.v, 0, 1)) : 0;
+  const agl = (inv.h - g0) / Math.max(globeK(), 1e-9);
+  return out.set((inv.u - 0.5) * domain.sx, agl / 1000, (0.5 - inv.v) * domain.sz);
+}
+/** World-space "up" of the shell at a box point (follows k): direction of increasing AGL. */
+function shellUpWorld(p: { x: number; y: number; z: number }): THREE.Vector3 {
+  const a = atmos.root.localToWorld(new THREE.Vector3().copy(boxToEnu(p) as THREE.Vector3));
+  const b = atmos.root.localToWorld(new THREE.Vector3().copy(boxToEnu({ x: p.x, y: p.y + 0.1, z: p.z }) as THREE.Vector3));
+  return b.sub(a).normalize();
+}
+const camBoxTmp = new THREE.Vector3();
+
 /**
  * Terrain between camera and anchor (terrain on). The building occluder below works in (u, v, AGL),
  * where the ground is flat by construction, so relief has to be tested on the real ENU segment:
- * two consecutive samples more than 1 m under the DEM ground hide the anchor.
+ * geo/lineOfSight.ts samples it by distance (step <= 60 m, <= 256 points, DEM domain only) and
+ * hides the anchor when one sample is > 3 m, or two consecutive samples are > 1 m, under the ground.
  */
 function globeTerrainOccluded(camEnu: THREE.Vector3, anchorEnu: THREE.Vector3): boolean {
   const g = globeOpt()!;
   const ground = globeGroundField();
   if (!ground) return false;
   const s = g.map.enu_unit_m;
-  const n = 64;
-  let hits = 0;
-  for (let i = 1; i < n; i++) {
-    const t = i / n;
-    if (t > 0.98) break;
-    const x = camEnu.x + (anchorEnu.x - camEnu.x) * t;
-    const y = camEnu.y + (anchorEnu.y - camEnu.y) * t;
-    const z = camEnu.z + (anchorEnu.z - camEnu.z) * t;
-    const inv = polyInverse(g.map, [x * s, y * s, z * s]);
-    if (inv.u < 0 || inv.u > 1 || inv.v < 0 || inv.v > 1) { hits = 0; continue; }
-    if (inv.h < sampleGrid(ground, inv.u, inv.v) - 1) {
-      if (++hits >= 2) return true;
-    } else hits = 0;
-  }
-  return false;
+  return terrainBlocksSight(
+    [camEnu.x * s, camEnu.y * s, camEnu.z * s],
+    [anchorEnu.x * s, anchorEnu.y * s, anchorEnu.z * s],
+    (p) => polyInverse(g.map, p),
+    (u, v) => sampleGrid(ground, u, v),
+  );
 }
 
 function globeOccluded(camEnu: THREE.Vector3, anchorEnu: THREE.Vector3): boolean {
@@ -1133,12 +1154,34 @@ function syncVolumeSlices(): void {
       surfaces.push({ ...s, kind: "vertical", normalX: -dz / len, normalZ: dx / len, offset: (-dz / len) * a.x + (dx / len) * a.z, ax: a.x, az: a.z, bx: b.x, bz: b.z });
     }
   }
+  // ④ globe: box-select slabs also go into the raymarch when they fit (ray-ordered blending with the
+  // volume); the first two tabs keep drawing them as meshes, as before.
+  let boxComposited = false;
+  const boxOn = section.enabled && section.kind === "box" && Boolean(section.box.defined) && !boxDrawing;
+  if (globeMode && compositing && boxOn && boxStack?.group.visible) {
+    const bb = binding(section.variable);
+    const levels = boxStack.slabs.children.map((m) => m.userData.levelM as number);
+    if (bb && levels.length && surfaces.length + levels.length <= 16) {
+      const x0 = Math.min(section.box.x0, section.box.x1), x1 = Math.max(section.box.x0, section.box.x1);
+      const z0 = Math.min(section.box.z0, section.box.z1), z1 = Math.max(section.box.z0, section.box.z1);
+      for (const hM of levels) {
+        surfaces.push({
+          kind: "horizontal", binding: "section", field: bb,
+          min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
+          filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
+          lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
+          height: hM / 1000, clipX0: x0, clipX1: x1, clipZ0: z0, clipZ1: z1,
+        });
+      }
+      boxComposited = true;
+    }
+  }
   volume.setSurfaces(surfaces);
   volume.setCuts(cuts);
   hslice?.material.setVolumeComposited(compositing && Boolean(hslice?.group.visible) && Boolean(hb));
   vsection?.material.setVolumeComposited(compositing && Boolean(vsection?.group.visible) && Boolean(vb));
   polyline?.material.setVolumeComposited(compositing && Boolean(polyline?.group.visible) && Boolean(vb));
-  boxStack?.material.setVolumeComposited(false);
+  boxStack?.material.setVolumeComposited(boxComposited);
 }
 
 function updateComposite(): void { syncVolumeSlices(); }
@@ -1636,6 +1679,7 @@ function sectionHit(): THREE.Intersection | undefined {
 }
 
 function groundPoint(): THREE.Vector3 | null {
+  if (globeMode && globeOpt()) return globeGroundPoint();
   if (!atmos?.ground) return null;
   const hit = pointerRay!.intersectObject(atmos.ground, true)[0];
   if (!hit) return null;
@@ -1644,6 +1688,37 @@ function groundPoint(): THREE.Vector3 | null {
   p.z = THREE.MathUtils.clamp(p.z, -domain.sz / 2, domain.sz / 2);
   p.y = 0;
   return p;
+}
+
+/**
+ * Globe: pointer on the ground (DEM mesh when present, else the ENU up = 0 plane) -> box km at y = 0.
+ * Polyline vertices, box corners and box drawing then work in the same box km as the first two tabs.
+ */
+function globeGroundPoint(): THREE.Vector3 | null {
+  let local: THREE.Vector3 | null = null;
+  if (globeGround) {
+    const hit = pointerRay!.intersectObject(globeGround.mesh, false)[0];
+    if (hit) local = atmos.root.worldToLocal(hit.point.clone());
+  }
+  if (!local) {
+    const o = atmos.root.worldToLocal(pointerRay!.ray.origin.clone());
+    const d = atmos.root.worldToLocal(pointerRay!.ray.origin.clone().add(pointerRay!.ray.direction)).sub(o);
+    if (Math.abs(d.z) < 1e-12) return null;
+    const t = -o.z / d.z;
+    if (t <= 0) return null;
+    local = o.addScaledVector(d, t);
+  }
+  const p = enuToBox(local);
+  p.x = THREE.MathUtils.clamp(p.x, -domain.sx / 2, domain.sx / 2);
+  p.z = THREE.MathUtils.clamp(p.z, -domain.sz / 2, domain.sz / 2);
+  p.y = 0;
+  return p;
+}
+
+/** Globe drags: the pointer-plane intersection as box km (null when the ray misses the plane). */
+function dragPointBox(): THREE.Vector3 | null {
+  if (!pointerRay!.ray.intersectPlane(drag.plane, tmp)) return null;
+  return enuToBox(atmos.root.worldToLocal(tmp.clone()));
 }
 
 // ---------------------------------------------------------------- interaction arbiter
@@ -1759,10 +1834,20 @@ function onPointerDown(event: PointerEvent): void {
   if (sectionHandle && vsection && section.enabled && (section.kind === "lon" || section.kind === "lat")) {
     drag.active = true;
     drag.kind = section.kind;
+    if (globeMode && globeOpt()) {
+      // horizontal plane of the shell at the wall's top middle; deltas are taken in box km
+      const top = { x: vsection.center.x, y: domain.top, z: vsection.center.y };
+      tmp.copy(boxToEnu(top) as THREE.Vector3);
+      atmos.root.localToWorld(tmp);
+      drag.plane.setFromNormalAndCoplanarPoint(shellUpWorld(top), tmp);
+      const s0 = dragPointBox();
+      drag.start.set(s0 ? s0.x : top.x, top.y, s0 ? s0.z : top.z);
+    } else {
     tmp.set(vsection.center.x, domain.top, vsection.center.y);
     atmos.root.localToWorld(tmp);
     drag.plane.set(new THREE.Vector3(0, 1, 0), -tmp.y);
     if (!pointerRay!.ray.intersectPlane(drag.plane, drag.start)) drag.start.copy(tmp);
+    }
     drag.startOffset = vsection.offsetKm();
     vsection.setDragging(true, section.offsetKm);
     if (picked) annotations?.setState(picked.id, "dragging");
@@ -1774,10 +1859,14 @@ function onPointerDown(event: PointerEvent): void {
   if (heightHandle && hslice && section.enabled && section.kind === "height") {
     drag.active = true;
     drag.kind = "height";
-    const anchor = new THREE.Vector3(domain.sx / 2, slice.heightM / 1000, 0);
+    const anchorBox = { x: domain.sx / 2, y: slice.heightM / 1000, z: 0 };
+    const globeDrag = globeMode && globeOpt();
+    const anchor = globeDrag ? new THREE.Vector3().copy(boxToEnu(anchorBox) as THREE.Vector3) : new THREE.Vector3(anchorBox.x, anchorBox.y, anchorBox.z);
     atmos.root.localToWorld(anchor);
     const normal = host!.camera.position.clone().sub(anchor);
-    normal.y = 0;
+    // vertical plane facing the camera: drop the component along the (shell) up direction
+    const up = globeDrag ? shellUpWorld(anchorBox) : new THREE.Vector3(0, 1, 0);
+    normal.addScaledVector(up, -normal.dot(up));
     if (normal.lengthSq() < 1e-8) host!.camera.getWorldDirection(normal);
     else normal.normalize();
     drag.plane.setFromNormalAndCoplanarPoint(normal, anchor);
@@ -1819,16 +1908,31 @@ function processPointer(): void {
   pointerDirty = false;
   setPointer(pointerEvent);
   if (drag.active && drag.kind === "height" && hslice) {
-    if (!pointerRay!.ray.intersectPlane(drag.plane, tmp)) return;
-    const local = atmos.root.worldToLocal(tmp.clone());
-    slice.heightM = THREE.MathUtils.clamp(Math.round(local.y * 1000 * 10) / 10, 12.5, 987.5);
+    let yKm: number;
+    if (globeMode && globeOpt()) {
+      const b = dragPointBox();
+      if (!b) return;
+      yKm = b.y;
+    } else {
+      if (!pointerRay!.ray.intersectPlane(drag.plane, tmp)) return;
+      yKm = atmos.root.worldToLocal(tmp.clone()).y;
+    }
+    slice.heightM = THREE.MathUtils.clamp(Math.round(yKm * 1000 * 10) / 10, 12.5, 987.5);
     hslice.setDragging(true, slice.heightM);
     return;
   }
   if (drag.active && vsection && (drag.kind === "lon" || drag.kind === "lat")) {
-    if (!pointerRay!.ray.intersectPlane(drag.plane, tmp)) return;
-    const local = atmos.root.worldToLocal(tmp.clone());
-    const start = atmos.root.worldToLocal(drag.start.clone());
+    let local: THREE.Vector3, start: THREE.Vector3;
+    if (globeMode && globeOpt()) {
+      const b = dragPointBox();
+      if (!b) return;
+      local = b;
+      start = drag.start;
+    } else {
+      if (!pointerRay!.ray.intersectPlane(drag.plane, tmp)) return;
+      local = atmos.root.worldToLocal(tmp.clone());
+      start = atmos.root.worldToLocal(drag.start.clone());
+    }
     const delta = drag.kind === "lon" ? local.x - start.x : local.z - start.z;
     section.offsetKm = Math.round((drag.startOffset + delta) * 1000) / 1000;
     vsection.setDragging(true, section.offsetKm);
@@ -2035,10 +2139,15 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   atmos.root.scale.y = globeMode ? 1 : view.exaggeration;
   atmos.root.updateMatrixWorld();
   host!.camera.updateMatrixWorld();
-  if (boxStack?.group.visible) boxStack.sortSlabs(host!.camera, atmos.root);
+  if (boxStack?.group.visible) {
+    const camBox = globeMode && globeOpt()
+      ? enuToBox(atmos.root.worldToLocal(camBoxTmp.copy(host!.camera.position)), camBoxTmp)
+      : undefined;
+    boxStack.sortSlabs(host!.camera, atmos.root, camBox);
+  }
   annotations?.update(host!.camera);
-  hslice?.material.setRoot(atmos.root);
-  vsection?.material.setRoot(atmos.root);
+  hslice?.setRoot(atmos.root);
+  vsection?.setRoot(atmos.root);
   polyline?.material.setRoot(atmos.root);
   boxStack?.material.setRoot(atmos.root);
   if (particles) {
@@ -2658,10 +2767,16 @@ async function start(): Promise<void> {
     shellLabels.update(globeK(), globeGroundField());
   }
   probeMarker = new ProbeMarker(annotations, domain.top);
-  hslice = new HorizontalSlice(domain);
-  vsection = new AxisSection(domain, "lon");
-  polyline = new PolylineSection(domain);
-  boxStack = new BoxStack(domain, manifest.value.grid.levels_m);
+  // ④ globe: same box-km sections, bent onto the shell in their vertex shaders (null on the box tabs)
+  const sg = globeMode ? sectionGlobe() : null;
+  hslice = new HorizontalSlice(domain, sg);
+  vsection = new AxisSection(domain, "lon", sg);
+  polyline = new PolylineSection(domain, sg);
+  boxStack = new BoxStack(domain, manifest.value.grid.levels_m, sg);
+  if (sg) {
+    annotations.setBoxPlacement({ toFrame: boxToEnu, toBox: (p, out) => enuToBox(p, out) });
+    boxStack.setPlacement(boxToEnu);
+  }
   const initialSize = host!.size();
   boxStack.setResolution(initialSize.width, initialSize.height);
   volume = new VolumeLayer(domain, props.globeVolume);
@@ -3024,6 +3139,8 @@ function overRange(name: string, lo: number, hi: number): { overLow: boolean; ov
 /** Globe tab: terrain or exaggeration changed (shared uniforms are already updated). */
 function refreshShell(): void {
   volume?.refreshShell();
+  // ④ section surfaces / outlines read the shared uniforms; the fat box-stack outline is CPU-placed
+  boxStack?.refreshPlacement();
   globeGround?.setTerrain(globeTerrainOn());
   shellLabels?.update(globeK(), globeGroundField());
   updateMarker();
@@ -3133,7 +3250,7 @@ onBeforeUnmount(() => {
         </div>
         <button class="icon" title="收起" @click="panelOpen = false">×</button>
       </div>
-      <p v-if="globeMode" class="panel-warn">地球页暂时关闭剖面（④）和粒子（⑤），接入后恢复</p>
+      <p v-if="globeMode" class="panel-warn">地球页暂时关闭粒子（⑤），接入后恢复</p>
 
       <details open>
         <summary>图层</summary>
@@ -3354,7 +3471,7 @@ onBeforeUnmount(() => {
         </div>
       </details>
 
-      <details v-if="!globeMode" open>
+      <details open>
         <summary>
           剖面 <em>{{ section.enabled ? SECTION_KIND_LABELS[section.kind] : "关" }}</em>
         </summary>

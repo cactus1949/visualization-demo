@@ -2,6 +2,8 @@ import * as THREE from "three";
 import type { AnnotationLayer } from "./annotations";
 import { colormapTexture } from "./colormaps";
 import { GLSL_DOMAIN, domainUniforms, type Domain } from "./fields";
+import { LOGDEPTH_FRAGMENT, LOGDEPTH_FRAGMENT_PARS } from "../globe/geoShader";
+import { GlobeLineMaterial, densifyLoop, globeSectionVertex, gridQuad, segmentsFor, type SectionGlobe } from "./sections/globe";
 
 /**
  * GPU-sampled slices.
@@ -52,10 +54,11 @@ void main() {
 }
 `;
 
-const fragmentShader = /* glsl */ `
+function sliceFragment(globe: boolean): string {
+  return /* glsl */ `
 precision highp float;
 precision highp sampler3D;
-${GLSL_DOMAIN}
+${globe ? LOGDEPTH_FRAGMENT_PARS : ""}${GLSL_DOMAIN}
 uniform sampler3D uField;
 uniform sampler2D uColormap;
 uniform float uScale;
@@ -75,7 +78,7 @@ ${GLSL_LOW_ALPHA}
 in vec3 vLocal;
 out vec4 outColor;
 
-void main() {
+void main() {${globe ? LOGDEPTH_FRAGMENT : ""}
   if (!insideDomain(vLocal)) discard;
   float value = texture(uField, localToTex(vLocal)).r;
   if (isnan(value)) discard;
@@ -95,18 +98,24 @@ void main() {
   outColor = vec4(color, alpha);
 }
 `;
+}
+const fragmentShader = sliceFragment(false);
 
 export class SliceMaterial extends THREE.ShaderMaterial {
   private composited = false;
   lowAlpha = false;
-  constructor(domain: Domain) {
+  /** Globe tab: placed on the curved shell (render/sections/globe.ts); null on the box tabs. */
+  readonly globe: SectionGlobe | null;
+  constructor(domain: Domain, globe: SectionGlobe | null = null) {
     super({
       glslVersion: THREE.GLSL3,
-      vertexShader,
-      fragmentShader,
+      vertexShader: globe ? globeSectionVertex(globe.map) : vertexShader,
+      fragmentShader: globe ? sliceFragment(true) : fragmentShader,
       uniforms: {
+        ...(globe ? globe.geo : {}),
         ...domainUniforms(domain),
         uRootInverse: { value: new THREE.Matrix4() },
+        ...(globe ? { uRootMatrix: { value: new THREE.Matrix4() } } : {}),
         uField: { value: null },
         uColormap: { value: colormapTexture("viridis") },
         uScale: { value: 1 },
@@ -127,11 +136,13 @@ export class SliceMaterial extends THREE.ShaderMaterial {
       side: THREE.DoubleSide,
       depthWrite: false,
     });
+    this.globe = globe;
   }
 
   /** root is scaled in y by the exaggeration: shaders need world → root-local. */
   setRoot(root: THREE.Object3D): void {
     (this.uniforms.uRootInverse.value as THREE.Matrix4).copy(root.matrixWorld).invert();
+    if (this.globe) (this.uniforms.uRootMatrix.value as THREE.Matrix4).copy(root.matrixWorld);
   }
 
   bind(field: ScalarBinding): void {
@@ -188,24 +199,44 @@ export class HorizontalSlice {
   private readonly readoutId = "height-readout";
   private handlesOn = false;
 
-  constructor(private readonly domain: Domain) {
-    this.material = new SliceMaterial(domain);
-    const geometry = new THREE.PlaneGeometry(domain.sx, domain.sz);
+  constructor(private readonly domain: Domain, private readonly globe: SectionGlobe | null = null) {
+    this.material = new SliceMaterial(domain, globe);
+    const geometry = globe
+      ? new THREE.PlaneGeometry(domain.sx, domain.sz, segmentsFor(domain.sx), segmentsFor(domain.sz))
+      : new THREE.PlaneGeometry(domain.sx, domain.sz);
     geometry.rotateX(-Math.PI / 2);
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.renderOrder = 2;
     this.mesh.userData.pickable = "slice";
     const hx = domain.sx / 2;
     const hz = domain.sz / 2;
-    const ring = new THREE.BufferGeometry().setFromPoints([
+    const corners = [
       new THREE.Vector3(-hx, 0, -hz),
       new THREE.Vector3(hx, 0, -hz),
       new THREE.Vector3(hx, 0, hz),
       new THREE.Vector3(-hx, 0, hz),
-    ]);
-    this.outline = new THREE.LineLoop(ring, outlineMaterial(0x9fe9ff));
+    ];
+    if (globe) {
+      // box-km geometry: CPU raycasts and bounding spheres would be in the wrong space
+      this.mesh.raycast = () => {};
+      this.mesh.frustumCulled = false;
+      const ring = new THREE.BufferGeometry();
+      ring.setAttribute("position", new THREE.BufferAttribute(densifyLoop(corners, segmentsFor(Math.max(domain.sx, domain.sz))), 3));
+      this.outline = new THREE.LineLoop(ring, new GlobeLineMaterial(domain, globe, 0x9fe9ff));
+      this.outline.frustumCulled = false;
+      this.outline.raycast = () => {};
+    } else {
+      const ring = new THREE.BufferGeometry().setFromPoints(corners);
+      this.outline = new THREE.LineLoop(ring, outlineMaterial(0x9fe9ff));
+    }
     this.group.add(this.mesh, this.outline);
     this.group.name = "horizontal-slice";
+  }
+
+  /** Per frame, after root's matrix update (globe outline needs it too). */
+  setRoot(root: THREE.Object3D): void {
+    this.material.setRoot(root);
+    if (this.globe) (this.outline.material as GlobeLineMaterial).setRoot(root);
   }
 
   setHeightKm(h: number): void {
@@ -234,6 +265,7 @@ export class HorizontalSlice {
     if (on && heightM !== undefined) {
       this.layer.addLabel(this.readoutId, {
         anchor: this.handleAnchor(),
+        space: "box",
         text: `${heightM.toFixed(1)} m`,
         leader: false,
         visible: true,
@@ -262,6 +294,7 @@ export class HorizontalSlice {
     }
     this.layer.addHandle(this.handleId, {
       anchor: this.handleAnchor(),
+      space: "box",
       role: "fixed",
       variant: "grip",
       axis: "y",
@@ -301,24 +334,45 @@ export class VerticalSection {
   private dragging = false;
   private handlesOn = false;
 
-  constructor(private readonly domain: Domain) {
-    this.material = new SliceMaterial(domain);
+  /** Globe: wall subdivided along its chord (and a few rows up) so it follows the curved shell. */
+  private readonly globeCols: number;
+  private static readonly GLOBE_ROWS = 4;
+
+  constructor(private readonly domain: Domain, private readonly globe: SectionGlobe | null = null) {
+    this.material = new SliceMaterial(domain, globe);
     const geometry = new THREE.BufferGeometry();
+    this.globeCols = globe ? segmentsFor(Math.hypot(domain.sx, domain.sz)) : 1;
     this.positions = new Float32Array(12);
-    geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
-    geometry.setIndex([0, 1, 2, 0, 2, 3]);
+    if (!globe) {
+      geometry.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
+      geometry.setIndex([0, 1, 2, 0, 2, 3]);
+    }
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 3;
     this.mesh.userData.pickable = "section";
-    this.outlinePositions = new Float32Array(12);
     const ring = new THREE.BufferGeometry();
-    ring.setAttribute("position", new THREE.BufferAttribute(this.outlinePositions, 3));
-    this.outline = new THREE.LineLoop(ring, outlineMaterial(0xc8f6ff));
+    if (globe) {
+      this.mesh.raycast = () => {};
+      this.outlinePositions = new Float32Array(4 * this.globeCols * 3);
+      ring.setAttribute("position", new THREE.BufferAttribute(this.outlinePositions, 3));
+      this.outline = new THREE.LineLoop(ring, new GlobeLineMaterial(domain, globe, 0xc8f6ff));
+      this.outline.raycast = () => {};
+    } else {
+      this.outlinePositions = new Float32Array(12);
+      ring.setAttribute("position", new THREE.BufferAttribute(this.outlinePositions, 3));
+      this.outline = new THREE.LineLoop(ring, outlineMaterial(0xc8f6ff));
+    }
     this.outline.frustumCulled = false;
     this.group.add(this.mesh, this.outline);
     this.group.name = "vertical-section";
     this.update();
+  }
+
+  /** Per frame, after root's matrix update (globe outline needs it too). */
+  setRoot(root: THREE.Object3D): void {
+    this.material.setRoot(root);
+    if (this.globe) (this.outline.material as GlobeLineMaterial).setRoot(root);
   }
 
   /** Unit vector along the wall in (x, z). */
@@ -388,10 +442,17 @@ export class VerticalSection {
     const [a, b] = chord;
     const quad = [a.x, 0, a.y, b.x, 0, b.y, b.x, top, b.y, a.x, top, a.y];
     this.positions.set(quad);
-    this.outlinePositions.set(quad);
-    const geometry = this.mesh.geometry;
-    geometry.attributes.position.needsUpdate = true;
-    geometry.computeBoundingSphere();
+    if (this.globe) {
+      const a0 = new THREE.Vector3(a.x, 0, a.y), b0 = new THREE.Vector3(b.x, 0, b.y);
+      const b1 = new THREE.Vector3(b.x, top, b.y), a1 = new THREE.Vector3(a.x, top, a.y);
+      gridQuad(a0, b0, b1, a1, this.globeCols, VerticalSection.GLOBE_ROWS, this.mesh.geometry);
+      this.outlinePositions.set(densifyLoop([a0, b0, b1, a1], this.globeCols));
+    } else {
+      this.outlinePositions.set(quad);
+      const geometry = this.mesh.geometry;
+      geometry.attributes.position.needsUpdate = true;
+      geometry.computeBoundingSphere();
+    }
     this.outline.geometry.attributes.position.needsUpdate = true;
     this.syncHandle((a.x + b.x) / 2, top, (a.y + b.y) / 2);
   }
@@ -429,6 +490,7 @@ export class VerticalSection {
         : { x: this.center.x, y: this.domain.top, z: this.center.y };
       this.layer.addLabel(this.readoutId, {
         anchor: mid,
+        space: "box",
         text: `${offsetKm.toFixed(2)} km`,
         leader: false,
         visible: true,
@@ -458,6 +520,7 @@ export class VerticalSection {
     const lon = Math.abs(this.azimuthDeg % 180) < 45 || Math.abs(this.azimuthDeg % 180) > 135;
     this.layer.addHandle(this.handleId, {
       anchor: { x, y, z },
+      space: "box",
       role: "fixed",
       variant: "grip",
       axis: lon ? "x" : "z",

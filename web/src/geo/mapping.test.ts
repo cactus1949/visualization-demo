@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Cartesian3, Matrix4, Transforms } from "cesium";
-import { domainSpanM, enuFrameAt, exactEnu, gridToLonLat, polyForward, polyInverse, type Vec3 } from "./mapping.ts";
+import { domainSpanM, enuFrameAt, exactEnu, exactInverse, gridToLonLat, polyForward, polyInverse, type Vec3 } from "./mapping.ts";
 
 // grid + map section of geo.json for the Tianjin corners (pipeline test keeps it in sync with geopipe)
 const fixture = JSON.parse(readFileSync(new URL("./testdata/tianjin-map.json", import.meta.url), "utf8"));
@@ -69,5 +69,18 @@ describe("grid <-> centre-ENU mapping vs Cesium Cartesian3.fromDegrees (20 000 p
     assert.ok(Math.abs(north - span.north) < 0.01, `${north} vs ${span.north}`);
     // nc lat step is 60 m / 110574 m per degree, so the true extent is ~60.24 m x 299, not 17 940 m
     assert.ok(north > 18000 && north < 18030, String(north));
+  });
+});
+
+describe("exactInverse (globe sections: camera / pointer -> box km)", () => {
+  it("round-trips exactEnu to < 1e-9 in u, v and < 0.1 mm in h, also far outside the domain", () => {
+    let maxUv = 0, maxH = 0;
+    for (const [u, v, h] of [...POINTS.slice(0, 2000), [-3, 4, 250000] as Vec3, [0.5, 0.5, 3.5e6] as Vec3]) {
+      const r = exactInverse(grid, frame, exactEnu(grid, frame, u, v, h));
+      maxUv = Math.max(maxUv, Math.abs(r.u - u), Math.abs(r.v - v));
+      maxH = Math.max(maxH, Math.abs(r.h - h));
+    }
+    assert.ok(maxUv < 1e-9, String(maxUv));
+    assert.ok(maxH < 1e-4, String(maxH));
   });
 });
