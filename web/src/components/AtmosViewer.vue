@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import type { ViewHost } from "../host/types";
+import { createThreeHost } from "../host/threeHost";
 import type { Manifest, VariableMeta } from "../data/manifest";
 import type { FormatDef } from "../formats/types";
 import { DataStore } from "../data/store";
@@ -81,11 +82,13 @@ const props = withDefaults(defineProps<{
   /** export format = data directory under $WEB_ROOT (see formats/*.ts) */
   format?: FormatDef;
   initialView?: ViewSnapshot | null;
+  createHost?: (canvas: HTMLCanvasElement) => ViewHost;
 }>(), {
   manifestUrl: "",
   showPanel: true,
   format: () => ({ id: "current", label: "当前编码", order: 0, fallbackCases: ["lowair_atmos_6h", "lowair_atmos"] }),
   initialView: null,
+  createHost: undefined,
 });
 const emit = defineEmits<{
   ready: [{ backend: string }];
@@ -448,9 +451,7 @@ const volumeBounds = computed<[number, number]>(() => {
 
 // ---------------------------------------------------------------- three.js objects
 let store: DataStore;
-let renderer: THREE.WebGLRenderer;
-let camera: THREE.PerspectiveCamera;
-let controls: OrbitControls;
+let host: ViewHost | null = null;
 let atmos: AtmosScene;
 let domain: Domain;
 let timeFields: TimeFields | null = null;
@@ -469,8 +470,6 @@ let buildings: Buildings | null = null;
 let probeMarker: ProbeMarker | null = null;
 let annotations: AnnotationLayer | null = null;
 let heightOccluder: HeightOccluder | null = null;
-let resizeObserver: ResizeObserver | null = null;
-let raf = 0;
 let disposed = false;
 const requestedAt: Record<string, number> = {};
 const volumeColorRange = ref<[number, number]>([0, 1]);
@@ -743,15 +742,15 @@ function clearDrawn(): void {
 }
 function leaveKind(prev: SectionKind | null | undefined): void {
   // Mode changes can also arrive through the API during a captured drag.
-  if (pointerDown.id >= 0 && canvas.value?.hasPointerCapture(pointerDown.id)) canvas.value.releasePointerCapture(pointerDown.id);
+  if (pointerDown.id >= 0) host?.releasePointer(pointerDown.id);
   pointerDown.active = false;
   drag.active = false;
   drag.kind = "";
   boxDrawing = false;
   boxCorner = vertexIndex = -1;
   drawStart = null;
-  if (controls) controls.enabled = true;
-  if (canvas.value) canvas.value.style.cursor = "";
+  host?.setCameraControl(true);
+  if (host) host.element.style.cursor = "";
   hslice?.setDragging(false);
   if (prev === "polyline") clearPolyline();
   if (prev === "box") clearBox();
@@ -1056,7 +1055,7 @@ function updateComposite(): void { syncVolumeSlices(); }
 
 
 function ensureParticles(): void {
-  if (particles || !renderer || !manifest.value || !timeFields?.wind.valid) return;
+  if (particles || !host || !manifest.value || !timeFields?.wind.valid) return;
   const wMeta = manifest.value.variables.w;
   if (!wMeta) return;
   // The particles sample the blended "current time" wind target; it never needs rebinding.
@@ -1069,7 +1068,7 @@ function ensureParticles(): void {
     ? Math.max(Math.abs(wDisplay[0]), Math.abs(wDisplay[1]))
     : Math.max(0.05, wAbs * 0.6);
   particles = new WindParticles(
-    renderer,
+    host!.renderer,
     domain,
     {
       texture,
@@ -1367,8 +1366,7 @@ function onTimeKey(e: KeyboardEvent): void {
 const previewCell = { ix: 0, iy: 0 };
 let previewActive = false;
 const fixedCell = ref<{ ix: number; iy: number } | null>(null);
-const pointer = new THREE.Vector2();
-const raycaster = new THREE.Raycaster();
+let pointerRay: THREE.Raycaster | null = null;
 let pointerDirty = false;
 let pointerEvent: PointerEvent | null = null;
 
@@ -1428,12 +1426,7 @@ function refreshProbe(
 }
 
 function setPointer(event: PointerEvent): void {
-  const rect = canvas.value!.getBoundingClientRect();
-  pointer.set(
-    ((event.clientX - rect.left) / rect.width) * 2 - 1,
-    -((event.clientY - rect.top) / rect.height) * 2 + 1,
-  );
-  raycaster.setFromCamera(pointer, camera);
+  pointerRay = host!.raycaster(event.clientX, event.clientY);
 }
 
 function cellPosition(ix: number, iy: number): [number, number] {
@@ -1472,7 +1465,7 @@ function pickTargets(): THREE.Object3D[] {
 }
 
 function probeFromPointer(pin: boolean): boolean {
-  const hit = raycaster.intersectObjects(pickTargets(), true)[0];
+  const hit = pointerRay!.intersectObjects(pickTargets(), true)[0];
   if (!hit) return false;
   const local = atmos.root.worldToLocal(hit.point.clone());
   const g = manifest.value!.grid;
@@ -1515,12 +1508,12 @@ function sectionHit(): THREE.Intersection | undefined {
   if (vsection?.group.visible) targets.push(vsection.group);
   if (polyline?.group.visible) targets.push(polyline.mesh);
   if (boxStack?.group.visible) targets.push(boxStack.group);
-  return raycaster.intersectObjects(targets, true)[0];
+  return pointerRay!.intersectObjects(targets, true)[0];
 }
 
 function groundPoint(): THREE.Vector3 | null {
   if (!atmos?.ground) return null;
-  const hit = raycaster.intersectObject(atmos.ground, true)[0];
+  const hit = pointerRay!.intersectObject(atmos.ground, true)[0];
   if (!hit) return null;
   const p = atmos.root.worldToLocal(hit.point.clone());
   p.x = THREE.MathUtils.clamp(p.x, -domain.sx / 2, domain.sx / 2);
@@ -1565,8 +1558,8 @@ function finishDrawing(): void {
   if (boxDrawing) {
     boxDrawing = false;
     drawStart = null;
-    if (controls) controls.enabled = true;
-    if (pointerDown.id >= 0 && canvas.value?.hasPointerCapture(pointerDown.id)) canvas.value.releasePointerCapture(pointerDown.id);
+    host?.setCameraControl(true);
+    if (pointerDown.id >= 0) host?.releasePointer(pointerDown.id);
     const area = Math.abs(section.box.x1 - section.box.x0) * Math.abs(section.box.z1 - section.box.z0);
     section.box.defined = area > 0.01;
   }
@@ -1588,8 +1581,8 @@ function cancelDrawing(): void {
   if (boxDrawing) {
     boxDrawing = false;
     section.box.defined = false;
-    if (controls) controls.enabled = true;
-    if (pointerDown.id >= 0 && canvas.value?.hasPointerCapture(pointerDown.id)) canvas.value.releasePointerCapture(pointerDown.id);
+    host?.setCameraControl(true);
+    if (pointerDown.id >= 0) host?.releasePointer(pointerDown.id);
     pointerDown.active = false;
   }
   const backup = drawBackup;
@@ -1627,13 +1620,13 @@ function onPointerDown(event: PointerEvent): void {
   if (section.enabled && section.kind === "polyline" && pickedKind === "polyline-vertex") {
     vertexIndex = (picked?.userData as { index?: number }).index ?? -1;
     if (picked) annotations?.setState(picked.id, "dragging");
-    controls.enabled = false; canvas.value!.setPointerCapture(event.pointerId); event.preventDefault(); return;
+    host!.setCameraControl(false); host!.capturePointer(event.pointerId); event.preventDefault(); return;
   }
   if (section.kind === "box" && section.enabled && pickedKind === "box-corner") {
     boxCorner = (picked?.userData as { index?: number }).index ?? -1;
     if (picked) annotations?.setState(picked.id, "dragging");
-    controls.enabled = false;
-    canvas.value!.setPointerCapture(event.pointerId);
+    host!.setCameraControl(false);
+    host!.capturePointer(event.pointerId);
     event.preventDefault();
     return;
   }
@@ -1645,12 +1638,12 @@ function onPointerDown(event: PointerEvent): void {
     tmp.set(vsection.center.x, domain.top, vsection.center.y);
     atmos.root.localToWorld(tmp);
     drag.plane.set(new THREE.Vector3(0, 1, 0), -tmp.y);
-    if (!raycaster.ray.intersectPlane(drag.plane, drag.start)) drag.start.copy(tmp);
+    if (!pointerRay!.ray.intersectPlane(drag.plane, drag.start)) drag.start.copy(tmp);
     drag.startOffset = vsection.offsetKm();
     vsection.setDragging(true, section.offsetKm);
     if (picked) annotations?.setState(picked.id, "dragging");
-    controls.enabled = false;
-    canvas.value!.setPointerCapture(event.pointerId);
+    host!.setCameraControl(false);
+    host!.capturePointer(event.pointerId);
     event.preventDefault();
     return;
   }
@@ -1659,17 +1652,17 @@ function onPointerDown(event: PointerEvent): void {
     drag.kind = "height";
     const anchor = new THREE.Vector3(domain.sx / 2, slice.heightM / 1000, 0);
     atmos.root.localToWorld(anchor);
-    const normal = camera.position.clone().sub(anchor);
+    const normal = host!.camera.position.clone().sub(anchor);
     normal.y = 0;
-    if (normal.lengthSq() < 1e-8) camera.getWorldDirection(normal);
+    if (normal.lengthSq() < 1e-8) host!.camera.getWorldDirection(normal);
     else normal.normalize();
     drag.plane.setFromNormalAndCoplanarPoint(normal, anchor);
     drag.start.copy(anchor);
     drag.startHeight = slice.heightM;
     hslice.setDragging(true, slice.heightM);
     if (picked) annotations?.setState(picked.id, "dragging");
-    controls.enabled = false;
-    canvas.value!.setPointerCapture(event.pointerId);
+    host!.setCameraControl(false);
+    host!.capturePointer(event.pointerId);
     event.preventDefault();
     return;
   }
@@ -1682,8 +1675,8 @@ function onPointerDown(event: PointerEvent): void {
       drawStart = p;
       boxDrawing = true;
       section.box.defined = false;
-      controls.enabled = false;
-      canvas.value!.setPointerCapture(event.pointerId);
+      host!.setCameraControl(false);
+      host!.capturePointer(event.pointerId);
       event.preventDefault();
     }
   }
@@ -1702,14 +1695,14 @@ function processPointer(): void {
   pointerDirty = false;
   setPointer(pointerEvent);
   if (drag.active && drag.kind === "height" && hslice) {
-    if (!raycaster.ray.intersectPlane(drag.plane, tmp)) return;
+    if (!pointerRay!.ray.intersectPlane(drag.plane, tmp)) return;
     const local = atmos.root.worldToLocal(tmp.clone());
     slice.heightM = THREE.MathUtils.clamp(Math.round(local.y * 1000 * 10) / 10, 12.5, 987.5);
     hslice.setDragging(true, slice.heightM);
     return;
   }
   if (drag.active && vsection && (drag.kind === "lon" || drag.kind === "lat")) {
-    if (!raycaster.ray.intersectPlane(drag.plane, tmp)) return;
+    if (!pointerRay!.ray.intersectPlane(drag.plane, tmp)) return;
     const local = atmos.root.worldToLocal(tmp.clone());
     const start = atmos.root.worldToLocal(drag.start.clone());
     const delta = drag.kind === "lon" ? local.x - start.x : local.z - start.z;
@@ -1749,8 +1742,8 @@ function processPointer(): void {
   const overSection = (picked?.userData as { pickable?: string } | undefined)?.pickable === "section";
   const sectionGripsOn = section.enabled && (section.kind === "lon" || section.kind === "lat");
   vsection?.setHighlight(sectionGripsOn && overSection);
-  if (drag.active || vertexIndex >= 0 || boxCorner >= 0 || boxDrawing) canvas.value!.style.cursor = "grabbing";
-  else canvas.value!.style.cursor = handle ? "grab" : "";
+  if (drag.active || vertexIndex >= 0 || boxCorner >= 0 || boxDrawing) host!.element.style.cursor = "grabbing";
+  else host!.element.style.cursor = handle ? "grab" : "";
   if (clickOwner() === "probe") probeFromPointer(false);
 }
 
@@ -1772,12 +1765,12 @@ function onPointerUp(event: PointerEvent): void {
   if (drag.active) {
     drag.active = false;
     drag.kind = "";
-    controls.enabled = true;
+    host!.setCameraControl(true);
     vsection?.setDragging(false);
     hslice?.setDragging(false);
     vsection?.syncAnnotations();
     hslice?.syncAnnotations();
-    canvas.value!.releasePointerCapture(event.pointerId);
+    host!.releasePointer(event.pointerId);
   }
   if (boxDrawing) {
     const area = Math.abs(section.box.x1 - section.box.x0) * Math.abs(section.box.z1 - section.box.z0);
@@ -1785,8 +1778,8 @@ function onPointerUp(event: PointerEvent): void {
     if (!section.box.defined) clearBox();
     boxDrawing = false;
     drawStart = null;
-    controls.enabled = true;
-    canvas.value!.releasePointerCapture(event.pointerId);
+    host!.setCameraControl(true);
+    host!.releasePointer(event.pointerId);
     pointerDown.active = false;
     // Mouse-up finishes the box: back to view mode (corners stay draggable).
     if (section.box.defined) section.drawMode = false;
@@ -1799,8 +1792,8 @@ function onPointerUp(event: PointerEvent): void {
     vertexIndex = -1;
     boxCorner = -1;
     drawStart = null;
-    controls.enabled = true;
-    canvas.value!.releasePointerCapture(event.pointerId);
+    host!.setCameraControl(true);
+    host!.releasePointer(event.pointerId);
     pointerDown.active = false;
     return;
   }
@@ -1825,9 +1818,7 @@ function onContextMenu(event: MouseEvent): void {
 }
 
 function setDrawOrbit(on: boolean): void {
-  if (!controls) return;
-  (controls.mouseButtons as any).LEFT = on ? -1 : THREE.MOUSE.ROTATE;
-  (controls.mouseButtons as any).RIGHT = on ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+  host?.setDrawMode(on);
 }
 
 function selectKind(kind: SectionKind): void {
@@ -1866,23 +1857,22 @@ const VIEWS: Record<string, { pos: [number, number, number]; target: [number, nu
 };
 
 function snapshot(): ViewSnapshot {
+  const current = host!.getView();
   return {
     t: tl.t,
     playing: tl.playing,
     rate: tl.rate,
     smooth: tl.smooth,
     loop: tl.loop,
-    camera: camera.position.toArray() as [number, number, number],
-    target: controls.target.toArray() as [number, number, number],
+    camera: current.position,
+    target: current.target,
     exaggeration: view.exaggeration,
   };
 }
 
 function setView(name: string): void {
   const preset = VIEWS[name] ?? VIEWS.overview;
-  camera.position.set(...preset.pos);
-  controls.target.set(...preset.target);
-  controls.update();
+  host!.setView(preset.pos, preset.target);
   if (name === "slice") {
     selectKind("height");
   } else if (name === "section") {
@@ -1897,35 +1887,32 @@ function setView(name: string): void {
   }
 }
 
-// ---------------------------------------------------------------- render loop
-let last = performance.now();
+// ---------------------------------------------------------------- render hooks
+const hostClockStart = performance.now();
 let fpsFrames = 0;
 let fpsTime = 0;
 let ready = false;
 
-function frame(now: number): void {
-  if (disposed) return;
-  raf = requestAnimationFrame(frame);
-  const realDt = (now - last) / 1000;
-  const dt = Math.min(0.1, realDt);
-  last = now;
+function beforeCamera(now: number, dt: number, realDt: number): void {
   fpsFrames += 1;
   fpsTime += realDt;
   if (fpsTime > 0.5) {
     fps.value = Math.round(fpsFrames / fpsTime);
     fpsFrames = 0;
     fpsTime = 0;
-    drawCalls.value = renderer.info.render.calls;
+    drawCalls.value = host!.renderer.info.render.calls;
     if (window.__atmosStatus) window.__atmosStatus.fps = fps.value;
   }
   processPointer();
   stepTime(now, dt);
-  controls.update();
+}
+
+function afterCamera(_now: number, dt: number, _realDt: number): void {
   atmos.root.scale.y = view.exaggeration;
   atmos.root.updateMatrixWorld();
-  camera.updateMatrixWorld();
-  if (boxStack?.group.visible) boxStack.sortSlabs(camera, atmos.root);
-  annotations?.update(camera);
+  host!.camera.updateMatrixWorld();
+  if (boxStack?.group.visible) boxStack.sortSlabs(host!.camera, atmos.root);
+  annotations?.update(host!.camera);
   hslice?.material.setRoot(atmos.root);
   vsection?.material.setRoot(atmos.root);
   polyline?.material.setRoot(atmos.root);
@@ -1936,10 +1923,12 @@ function frame(now: number): void {
   }
   if (volume?.mesh.visible) {
     updateDepthOccluders();
-    volume.captureDepth(renderer, atmos.scene, camera, depthOccluders);
-    volume.update(camera, atmos.root, renderer);
+    volume.captureDepth(host!.renderer, atmos.scene, host!.camera, depthOccluders);
+    volume.update(host!.camera, atmos.root, host!.renderer);
   }
-  renderer.render(atmos.scene, camera);
+}
+
+function afterRender(_now: number): void {
   if (!ready && particles) {
     wantsDirty = true;
     ready = true;
@@ -1962,16 +1951,9 @@ function frame(now: number): void {
   }
 }
 
-function resize(): void {
-  if (!canvas.value || !renderer) return;
-  const w = canvas.value.clientWidth;
-  const h = canvas.value.clientHeight;
-  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-  renderer.setSize(w, h, false);
-  boxStack?.setResolution(w, h);
-  volume?.resize(renderer);
-  camera.aspect = w / Math.max(1, h);
-  camera.updateProjectionMatrix();
+function resize(width: number, height: number): void {
+  boxStack?.setResolution(width, height);
+  volume?.resize(host!.renderer);
 }
 
 function exposeApi(): void {
@@ -2103,9 +2085,7 @@ function exposeApi(): void {
       if (p.cutLowThreshold !== undefined) layers.cutLowThreshold = Number(p.cutLowThreshold);
     },
     setCamera: (pos: [number, number, number], target: [number, number, number]) => {
-      camera.position.set(...pos);
-      controls.target.set(...target);
-      controls.update();
+      host!.setView(pos, target);
     },
     setExaggeration: (n: number) => {
       view.exaggeration = THREE.MathUtils.clamp(Number(n) || 1, 1, 10);
@@ -2414,33 +2394,33 @@ async function start(): Promise<void> {
     if (requestedAt[n] === undefined) requestedAt[n] = performance.now();
   }
 
-  renderer = new THREE.WebGLRenderer({
-    canvas: canvas.value!,
-    antialias: true,
-    powerPreference: "high-performance",
-  });
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NeutralToneMapping;
-  renderer.toneMappingExposure = 1.0;
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
-  timeFields = new TimeFields(renderer, domain);
+  const element = canvas.value!;
+  host = props.createHost
+    ? props.createHost(element)
+    : createThreeHost(element, {
+      ...(props.initialView ? {
+        initialView: { position: props.initialView.camera, target: props.initialView.target },
+      } : {}),
+      initialNow: hostClockStart,
+    });
+  timeFields = new TimeFields(host!.renderer, domain);
   syncWants(performance.now());
-  const gl = renderer.getContext();
+  const gl = host!.renderer.getContext();
   const info = gl.getExtension("WEBGL_debug_renderer_info");
   gpu.value = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : "WebGL2";
-  if (!renderer.extensions.has("EXT_color_buffer_float")) {
+  if (!host!.renderer.extensions.has("EXT_color_buffer_float")) {
     status.value = "此 GPU 不支持浮点渲染目标（EXT_color_buffer_float），粒子不可用";
   }
 
   atmos = new AtmosScene(domain);
-  annotations = new AnnotationLayer(canvas.value!.parentElement ?? canvas.value!, atmos.root);
+  annotations = new AnnotationLayer(element.parentElement ?? element, atmos.root);
   probeMarker = new ProbeMarker(annotations, domain.top);
   hslice = new HorizontalSlice(domain);
   vsection = new AxisSection(domain, "lon");
   polyline = new PolylineSection(domain);
   boxStack = new BoxStack(domain, manifest.value.grid.levels_m);
-  boxStack.setResolution(canvas.value!.clientWidth, canvas.value!.clientHeight);
+  const initialSize = host!.size();
+  boxStack.setResolution(initialSize.width, initialSize.height);
   volume = new VolumeLayer(domain);
   hslice.group.visible = false;
   vsection.group.visible = false;
@@ -2452,26 +2432,13 @@ async function start(): Promise<void> {
   polyline.setAnnotationLayer(annotations);
   boxStack.setAnnotationLayer(annotations);
   atmos.root.add(hslice.group, vsection.group, polyline.group, boxStack.group, volume.mesh);
-  camera = new THREE.PerspectiveCamera(40, 1, 0.05, 200);
-  controls = new OrbitControls(camera, canvas.value!);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  controls.minDistance = 1.2;
-  controls.maxDistance = 60;
-  controls.maxPolarAngle = Math.PI * 0.495;
-  controls.screenSpacePanning = false;
   if (props.initialView) {
-    camera.position.set(...props.initialView.camera);
-    controls.target.set(...props.initialView.target);
-    controls.update();
+    if (props.createHost) host!.setView(props.initialView.camera, props.initialView.target);
     view.exaggeration = props.initialView.exaggeration;
   } else {
     setView("overview");
   }
-  resize();
-  resizeObserver = new ResizeObserver(resize);
-  resizeObserver.observe(canvas.value!);
-  const el = canvas.value!;
+  const el = host!.element;
   el.addEventListener("pointerdown", onPointerDown);
   el.addEventListener("pointermove", onPointerMove);
   el.addEventListener("pointerup", onPointerUp);
@@ -2481,7 +2448,7 @@ async function start(): Promise<void> {
   el.addEventListener("dblclick", onDoubleClick);
   exposeApi();
   updateGround();
-  raf = requestAnimationFrame(frame);
+  host!.start(atmos.scene, { beforeCamera, afterCamera, afterRender, resize });
 
   const skipBuildings = new URLSearchParams(location.search).has("noBuildings");
   if (skipBuildings) {
@@ -2806,8 +2773,6 @@ onBeforeUnmount(() => {
   disposed = true;
   window.removeEventListener("keydown", onDrawKey);
   window.removeEventListener("keydown", onTimeKey);
-  cancelAnimationFrame(raf);
-  resizeObserver?.disconnect();
   store?.dispose();
   particles?.dispose();
   hslice?.dispose();
@@ -2817,8 +2782,7 @@ onBeforeUnmount(() => {
   volume?.dispose();
   buildings?.dispose();
   timeFields?.dispose();
-  controls?.dispose();
-  renderer?.dispose();
+  host?.dispose();
   probeMarker?.dispose();
   annotations?.dispose();
 });
