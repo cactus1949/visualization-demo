@@ -5,8 +5,8 @@
  * (globe/overlay.ts). PR ③: the volume runs on the curved shell. PR ⑥: probe, height labels,
  * buildings, ground and legends are on this tab; sections (④) and particles (⑤) stay off.
  */
-import { onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowRef } from "vue";
-import { Cartesian3, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
+import { computed, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
+import { Cartesian3, Color, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
 import type { FormatDef } from "../formats/types";
@@ -46,8 +46,21 @@ const source = pickBasemapSource({ dev: import.meta.env.DEV, devFlag: import.met
 const depthMode: GlobeDepthMode = depthModeFromQuery(location.search);
 // measurement hooks only in dev or with ?globeDebug=1
 const debug = import.meta.env.DEV || query.get("globeDebug") === "1";
-const ui = reactive({ style: "img" as BasemapStyle, terrain: false, testLayer: false, proxy: true, k: 1 });
+const ui = reactive({ style: "img" as BasemapStyle, terrain: false, testLayer: false, proxy: true, k: 3 });
 const EXAGGERATIONS = [1, 3, 5, 10];
+const themeClass = computed(() => atmos.value?.theme ?? "dark");
+const LIGHT_SKY = Color.fromCssColorString("#dfe7ee");
+
+function applySky(theme: string): void {
+  if (!viewer) return;
+  const light = theme === "light";
+  viewer.scene.backgroundColor = light ? LIGHT_SKY : Color.BLACK;
+  if (viewer.scene.skyBox) viewer.scene.skyBox.show = !light;
+  if (viewer.scene.moon) viewer.scene.moon.show = !light;
+}
+
+watch(themeClass, (theme) => applySky(theme));
+
 
 let viewer: Viewer | null = null;
 let terrains: TerrainSwitch | null = null;
@@ -218,6 +231,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   setExaggeration(ui.k);
   setTerrain(ui.terrain);
   setView("overview");
+  applySky(themeClass.value);
   status.value = "就绪";
   exposeApi(meta, ground);
   window.__globeReady = true;
@@ -278,7 +292,7 @@ onUnmounted(teardown);
 </script>
 
 <template>
-  <div class="globe">
+  <div class="globe" :class="themeClass">
     <div ref="host" class="globe-host" />
     <AtmosViewer
       v-if="overlay && volumeOptions"
@@ -374,5 +388,22 @@ onUnmounted(teardown);
   transform: translateX(-50%);
   max-width: 560px;
   color: #f5c46b;
+}
+
+.globe.light .globe-panel {
+  background: rgba(250, 252, 255, 0.93);
+  border-color: rgba(60, 90, 110, 0.2);
+  color: #1c2d3a;
+}
+.globe.light .row button {
+  color: #5d7384;
+  border-color: rgba(60, 90, 110, 0.3);
+}
+.globe.light .row button.on {
+  color: #1c2d3a;
+  border-color: #0f8aa3;
+}
+.globe.light .muted {
+  color: #5d7384;
 }
 </style>

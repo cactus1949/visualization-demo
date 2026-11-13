@@ -663,6 +663,11 @@ export class AnnotationLayer {
   }
 
   private decimateClusters(labels: Item[]): void {
+    // On the globe, a 1000 m stack at overview is only tens of pixels tall, so the
+    // 28 px screen-y gap would keep just the first and last labels. Follow the
+    // style doc instead: resolveOverlap pushes along the leader, then hides
+    // leftovers. Box-tab coordinates keep the original gap rule.
+    if (this.coordinates === "enu") return;
     const groups = new Map<string, Item[]>();
     for (const item of labels) {
       const key = item.desc.cluster;

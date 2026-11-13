@@ -25,18 +25,14 @@ function setUrl(edit: (url: URL) => void): void {
 }
 
 function selectFormat(next: string): void {
-  if (globe.value) {
-    globe.value = false;
-    setUrl((url) => url.searchParams.delete("tab"));
-    if (next === format.value) return;
-  }
   if (next === format.value) return;
-  hold.value = viewer.value?.snapshot() ?? null;
+  if (!globe.value) hold.value = viewer.value?.snapshot() ?? null;
   format.value = next;
   setUrl((url) => {
     url.searchParams.delete("codec");
     if (next === formats[0]?.id) url.searchParams.delete("format");
     else url.searchParams.set("format", next);
+    if (globe.value) url.searchParams.set("tab", "globe");
   });
 }
 
@@ -57,14 +53,14 @@ const showPanel = computed(() => !embedded);
         v-for="f in formats"
         :key="f.id"
         type="button"
-        :class="{ on: !globe && format === f.id }"
+        :class="{ on: format === f.id }"
         @click="selectFormat(f.id)"
       >
         {{ f.label }}
       </button>
       <button type="button" :class="{ on: globe }" @click="selectGlobe">地球</button>
     </nav>
-    <GlobeViewer v-if="globe" class="shell-view" :format="current" />
+    <GlobeViewer v-if="globe" :key="current.id" class="shell-view" :format="current" />
     <AtmosViewer
       v-else
       :key="format"

@@ -226,8 +226,8 @@ const layers = reactive({
   probeFollowMouse: false,
 });
 if (globeMode) {
-  // ⑤ particles are bent onto the shell; ④ sections and ⑥ buildings, ground, probe start off like the box tabs
-  layers.volume = true;
+  // ⑤ particles stay on (bent onto the shell). Volume starts off like the box tabs.
+  // Globe exaggeration is GlobeViewer's k (default 3×), not root.scale.y, so keep this at 1.
   view.exaggeration = 1;
 }
 const particleParams = reactive<ParticleParams>({ ...DEFAULT_PARTICLES });
@@ -3388,7 +3388,7 @@ function globeVolumeInfo(): { box: { lo: number[]; hi: number[] } | null; steps:
   return { box: volume?.shellBox() ?? null, steps: volume?.steps ?? 0, visible: volume?.mesh.visible ?? false };
 }
 
-defineExpose({ snapshot, refreshShell, globeVolumeInfo });
+defineExpose({ snapshot, refreshShell, globeVolumeInfo, theme: computed(() => view.theme) });
 
 onMounted(() => void start());
 onBeforeUnmount(() => {
@@ -3450,7 +3450,7 @@ onBeforeUnmount(() => {
       />
     </div>
 
-    <TimelineBar v-if="showTimeline" :tl="tl" @change="onTimelineChange" />
+    <TimelineBar v-if="showTimeline" :tl="tl" :theme="view.theme" @change="onTimelineChange" />
 
     <ProfileChart
       v-if="layers.probe && probe"
@@ -3471,7 +3471,8 @@ onBeforeUnmount(() => {
     <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
 
     <div class="hint" :class="{ 'above-timeline': showTimeline }">
-      拖动：旋转 · 右键：平移 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 ·
+      <template v-if="globeMode">左键拖动：旋转 · 右键拖动：缩放 · 中键拖动：俯仰 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 · </template>
+      <template v-else>拖动：旋转 · 右键：平移 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 · </template>
       折线：左键放点，双击/回车/右键完成；框选：拖拽松开即完成；Esc 取消 ·
       打开探针 → 悬停预览位置（不改读数）→ 单击（非拖动）固定并更新廓线；可选跟随鼠标
     </div>
