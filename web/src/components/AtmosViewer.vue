@@ -2164,6 +2164,8 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   }
 }
 
+/** Debug only: keep a section and the volume on together to exercise the in-raymarch compositing. */
+let debugCoexist = false;
 /** Debug (globe): pending section read-back, served from afterRender so GL work stays in frame hooks. */
 let sectionProbeRequest: { points: [number, number][]; resolve: (r: unknown) => void } | null = null;
 
@@ -2666,6 +2668,8 @@ function exposeApi(): void {
       /** ④ globe: GPU read-back of section value / box km / placed ENU at normalised viewport points. */
       sectionProbe: (points: [number, number][]) =>
         new Promise((resolve) => { sectionProbeRequest = { points, resolve }; }),
+      /** Debug: the panel keeps sections and the volume exclusive; measurements may lift that. */
+      allowSectionWithVolume: (on: boolean) => { debugCoexist = Boolean(on); },
       /** ④ globe: section state for measurements (composited flags, box placement). */
       sectionInfo: () => ({
         kind: section.kind, enabled: section.enabled, heightM: slice.heightM, offsetKm: section.offsetKm,
@@ -2979,7 +2983,7 @@ watch(
 watch(
   () => section.enabled,
   (on, was) => {
-    if (on) layers.volume = false;
+    if (on && !debugCoexist) layers.volume = false;
     else if (was) {
       leaveKind(section.kind);
       section.drawMode = false;
@@ -2994,7 +2998,7 @@ watch(
 watch(
   () => layers.volume,
   (on) => {
-    if (on) section.enabled = false;
+    if (on && !debugCoexist) section.enabled = false;
     updateVolume();
   },
   { flush: "sync" },
