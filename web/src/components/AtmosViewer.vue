@@ -2756,12 +2756,30 @@ function exposeApi(): void {
           polyline: Boolean(polyline?.group.visible), box: Boolean(boxStack?.group.visible),
         },
         slabs: boxStack?.slabs.children.length ?? 0,
+        domain: { sx: domain.sx, sz: domain.sz, top: domain.top, nx: domain.nx, ny: domain.ny },
       }),
       sectionBoxToEnu: (p: { x: number; y: number; z: number }) => boxToEnu(p),
       /** Same pick path as a pointer move (host ray → pickTargets), at client pixel (x, y). */
       probePickAt: (x: number, y: number) => {
         pointerRay = host!.raycaster(x, y);
         return probeFromPointer(false) ? lastProbeHit : null;
+      },
+      /** Box km -> normalised device coords with the current tab's placement (globe: exact shell placement). */
+      sectionBoxToNdc: (p: { x: number; y: number; z: number }) => {
+        const local = new THREE.Vector3().copy((globeMode && globeOpt() && globeFrame ? boxToEnu(p) : p) as THREE.Vector3);
+        const ndc = atmos.root.localToWorld(local).project(host!.camera);
+        return [ndc.x, ndc.y, ndc.z];
+      },
+      /** Probe pick along the camera ray through NDC (x, y); returns the picked cell and hit (root-local). */
+      probePickNdc: (x: number, y: number) => {
+        const ray = new THREE.Raycaster();
+        ray.setFromCamera(new THREE.Vector2(x, y), host!.camera);
+        pointerRay = ray;
+        const ok = probeFromPointer(false);
+        if (!ok || !lastProbeHit) return null;
+        const h = new THREE.Vector3(...lastProbeHit);
+        const hitBox = globeMode && globeOpt() && globeFrame ? enuToBox(h) : h;
+        return { cell: { ...previewCell }, hit: lastProbeHit, hitBox: [hitBox.x, hitBox.y, hitBox.z] };
       },
       annotationStates: () => {
         const cam = host!.camera.getWorldPosition(new THREE.Vector3());
