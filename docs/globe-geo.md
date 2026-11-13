@@ -55,7 +55,7 @@ Cesium 没有公开接口，`globe/overlay.ts` 直接用了 `scene.context` 上�
 - 地球 tab 是 `GlobeViewer.vue` 里套一个 `AtmosViewer`（Cesium 宿主 + `globeVolume`），面板、时间轴、过滤、色带、图例与前两个 tab 是同一套代码。地球面板（底图、地形、夸张、视角）在它左边。
 - 弯壳步进（`render/volume.ts` 的弯壳着色器）：光线在中心 ENU 里是直线，包围盒由 `geo/mapping.ts` 的 `shellBounds` 用精确 float64 坐标在 41×41 个 (u, v) 上取地面和顶面再外扩 20 m，域四角因地球曲率比中心低约 13 m，已算在盒里。每一步 `geoInverse`（ENU → u, v, h），`AGL = (h − 地形开关 × g(u, v)) / k`，按与盒体相同的节点 / 层中心约定采样；过滤窗口、透明阈值、低值渐显、色带都与盒体一致；每步不透明度按「去掉夸张后的公里数」算，所以 k 和步数改变时浓淡一致。裁切用 (u, AGL 比例, v)，z 方向与盒体一样从北往南。
 - 地形开关和 k 只改共享 uniform、代理网格、Cesium 地形和体渲染包围盒，不重新取数据。
-- 遮挡深度：宿主把地形代理（和场景里其余遮挡物）画进体渲染的深度纹理，体渲染据此截短光线。编码由 `?globeDepth=` 选：默认 `linear`；`log` 时 three 渲染器开 `logarithmicDepthBuffer`，体渲染按 three 的 logdepthbuf 公式反解深度。默认值等深度精度方案（任务 A）定了再改，改 `depthEncodingFromUrl` 一处。
+- 遮挡深度：宿主把地形代理（和场景里其余遮挡物）画进体渲染的深度纹理，体渲染据此截短光线。编码默认 `log`（three 渲染器开 `logarithmicDepthBuffer`，体渲染按 three 的 logdepthbuf 公式反解深度）；`?globeDepth=linear` 切回线性（NDC z）。这是任务 A 定下的默认值。
 - 步数默认 128，`?volSteps=` 可改（调试）。
 - 暂时关闭（只在地球 tab）：剖面（④ 恢复）、粒子（⑤ 恢复）、探针、建筑、地面图层（⑥ 恢复）。前两个 tab 不受影响。
 - 调试接口（仅 `npm run dev` 或 `?globeDebug=1`）：`__globeApi.measureInverseResidual()`（在 GPU 上跑生产用的 `geoInverse`，读回后与精确坐标比，单位米）、`benchFrames(n)`（同步渲染 n 帧并 `gl.finish()`，毫秒）、`volumeInfo()`；`__atmosApi.setVolumeSteps(n)`。

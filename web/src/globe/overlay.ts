@@ -22,14 +22,14 @@ import type { FrameHooks, ViewHost } from "../host/types";
 export type DepthEncoding = ViewHost["depthEncoding"];
 
 export interface CesiumHostOptions {
-  /** "linear" (default) or "log" (three logarithmicDepthBuffer). Task A decides the final default. */
+  /** "log" (default, three logarithmicDepthBuffer) or "linear" (NDC z). `?globeDepth=linear` selects linear. */
   depthEncoding?: DepthEncoding;
   onContextLost?: () => void;
 }
 
-/** `?globeDepth=log` switches the overlay to a logarithmic depth buffer; anything else is linear. */
+/** Default is log (three logarithmicDepthBuffer). `?globeDepth=linear` switches to a linear depth buffer. */
 export function depthEncodingFromUrl(search = location.search): DepthEncoding {
-  return new URLSearchParams(search).get("globeDepth") === "log" ? "log" : "linear";
+  return new URLSearchParams(search).get("globeDepth") === "linear" ? "linear" : "log";
 }
 
 export class GlobeOverlay implements ViewHost {
@@ -61,7 +61,7 @@ export class GlobeOverlay implements ViewHost {
   constructor(private readonly cesium: CesiumScene, map: GeoMap, readonly proxy: DepthProxy, opts: CesiumHostOptions = {}) {
     this.ctx = (cesium as unknown as { context: CesiumContextInternals }).context;
     this.element = cesium.canvas;
-    this.depthEncoding = opts.depthEncoding ?? "linear";
+    this.depthEncoding = opts.depthEncoding ?? "log";
     this.onContextLost = opts.onContextLost ?? (() => {});
     this.renderer = new WebGLRenderer({ canvas: cesium.canvas, context: this.ctx._gl, logarithmicDepthBuffer: this.depthEncoding === "log" });
     this.renderer.autoClear = false;
