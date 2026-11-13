@@ -33,3 +33,12 @@ export function placementKey(k: number, terrain: number): string {
 
 /** Lowest height (km above ground) a live particle may have; mirrors the sim shader's 0.003 km floor. */
 export const PARTICLE_MIN_AGL_KM = 0.003;
+
+/**
+ * Whether the GPU place pass has produced a trail history yet. `placedKey` is "" until the first
+ * place pass after (re)allocation; a pending reset means the history still holds the old (or no)
+ * particles. Debug readers must not report residuals for an unplaced history.
+ */
+export function particlePlacementState(placedKey: string, resetPending: boolean): "placed" | "unplaced" {
+  return placedKey !== "" && !resetPending ? "placed" : "unplaced";
+}

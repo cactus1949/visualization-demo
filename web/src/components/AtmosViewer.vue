@@ -37,6 +37,7 @@ import { AnnotationLayer, HeightOccluder } from "../render/annotations";
 import { ShellHeightLabels, shellLabelHeights } from "../render/annotations/shellLabels";
 import { GlobeGround } from "../render/globeGround";
 import { cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../geo/boxEnu";
+import { particlePlacementState } from "../geo/particlePlace";
 import { exactInverse, polyInverse, type EnuFrame } from "../geo/mapping";
 import type { SectionGlobe } from "../render/sections/globe";
 import { readSectionSamples } from "../render/sections/globeDebug";
@@ -757,7 +758,8 @@ function clearBox(): void {
   section.box.x1 = 0;
   section.box.z1 = 0;
   boxStack?.clearAnnotations();
-  boxStack?.update({ ...section.box, levels: levelsOf(), defined: false, drawing: false });
+  // update() rebuilds slab geometry and disposes the depth twins' materials: GL work, isolated on the globe
+  runLayerGl(() => boxStack?.update({ ...section.box, levels: levelsOf(), defined: false, drawing: false }));
 }
 /** 清除 button: drop the drawn geometry and stay in view mode. */
 function clearDrawn(): void {
@@ -856,15 +858,16 @@ function updateSection(): void {
       unfolded.value = null;
     }
   }
+  const stack = boxStack;
   if (on && kind === "box") {
-    boxStack.update({
+    runLayerGl(() => stack.update({
       ...section.box,
       levels: levelsOf(),
       defined: Boolean(section.box.defined),
       drawing: boxDrawing,
-    });
+    }));
   } else {
-    boxStack.update({ ...section.box, levels: levelsOf(), defined: false, drawing: false });
+    runLayerGl(() => stack.update({ ...section.box, levels: levelsOf(), defined: false, drawing: false }));
     boxStack.clearAnnotations();
     boxStack.group.visible = false;
   }
@@ -2869,6 +2872,11 @@ function exposeApi(): void {
       particlePlacement: (n = 4096) => {
         const gv = globeOpt();
         if (!particles || !gv || !globeFrame) return null;
+        // nothing placed yet (fresh targets after a count change while hidden, or a pending reset):
+        // the history holds no particles, so there is nothing to compare
+        if (particlePlacementState(particles.placedKey, particles.resetPending) === "unplaced") {
+          return { unplaced: true as const, placeCount: particles.placeCount };
+        }
         let nodes: { grid: number[][]; enu: number[][] } = { grid: [], enu: [] };
         runLayerGl(() => { nodes = particles!.sampleNodes(n); });
         const ground = globeGroundField();
@@ -3004,7 +3012,8 @@ async function start(): Promise<void> {
   boxStack = new BoxStack(domain, manifest.value.grid.levels_m, sg);
   if (sg) {
     annotations.setBoxPlacement({ toFrame: boxToEnu, toBox: (p, out) => enuToBox(p, out) });
-    boxStack.setPlacement(boxToEnu);
+    const stack = boxStack;
+    runLayerGl(() => stack.setPlacement(boxToEnu));
   }
   const initialSize = host!.size();
   boxStack.setResolution(initialSize.width, initialSize.height);
@@ -3370,7 +3379,7 @@ function overRange(name: string, lo: number, hi: number): { overLow: boolean; ov
 function refreshShell(): void {
   volume?.refreshShell();
   // ④ section surfaces / outlines read the shared uniforms; the fat box-stack outline is CPU-placed
-  boxStack?.refreshPlacement();
+  runLayerGl(() => boxStack?.refreshPlacement());
   globeGround?.setTerrain(globeTerrainOn());
   shellLabels?.update(globeK(), globeGroundField());
   updateMarker();
@@ -3392,11 +3401,12 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onDrawKey);
   window.removeEventListener("keydown", onTimeKey);
   store?.dispose();
-  particles?.dispose();
+  // GL deletes (render targets, buffers, programs) on Cesium's context: isolated like the other particle GL work
+  runLayerGl(() => particles?.dispose());
   hslice?.dispose();
   vsection?.dispose();
   polyline?.dispose();
-  boxStack?.dispose();
+  runLayerGl(() => boxStack?.dispose());
   volume?.dispose();
   buildings?.dispose();
   globeGround?.dispose();

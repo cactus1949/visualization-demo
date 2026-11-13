@@ -71,7 +71,7 @@ Cesium 没有公开接口，`globe/overlay.ts` 直接用了 `scene.context` 上�
 - 共享 GL 上下文：粒子的创建、改参数（数量变化会重新分配渲染目标和几何）、每步的模拟 / 拷贝 / 放置 pass 和调试读回都放在 `host.isolateGl()` 里。Cesium 宿主在前后各 `resetState()` 一次，再把 Cesium 缓存的渲染状态设回默认（同 `captureOccluderDepth`）；盒体宿主没有这个方法，直接执行。
 - 屏幕线宽按上下文的 `drawingBufferWidth / Height` 算（Cesium 宿主不调 `renderer.setSize`，three 缓存的尺寸不准）。
 - 剖面挡粒子（和盒体 tab 同一套规则，`slices.ts` 的 depthWrite / colorWrite 策略不变）：高度、经 / 纬、折线剖面画在 renderOrder 2 / 3，不透明且没开「低值透明」时写深度（地球页写对数深度），粒子（10）在它们之后画，所以剖面后面的粒子被挡住、前面的照常显示。框选层的层片只有不透明度为 1 时写深度；半透明层片不挡粒子（盒体 tab 也是这样），它们的深度 twin 只写深度不写颜色，renderOrder 10.5，在粒子之后画，给轮廓线的「被遮挡虚线」用。地球页的 twin 用 `GlobeDepthMaterial`（`render/sections/globe.ts`），和层片同一个顶点着色器、同一组地形 / k uniform，所以开地形、改 k 时 twin 跟着层片一起变，不用 CPU 重建。剖面和体渲染在面板里互斥；只有调试的同开模式下剖面并入体渲染合成，这时剖面不写深度，也不挡粒子。
-- 调试接口（`?globeDebug=1`）：`__atmosApi.particlePlacement(n)` 读回前 n 个粒子最新节点的 GPU 放置结果，和 float64 精确放置比较（米）。
+- 调试接口（`?globeDebug=1`）：`__atmosApi.particlePlacement(n)` 读回前 n 个粒子最新节点的 GPU 放置结果，和 float64 精确放置比较（米）；还没放置过（刚重新分配、或重置还没执行）时返回 `{ unplaced: true, placeCount }`。
 
 ## 底图
 

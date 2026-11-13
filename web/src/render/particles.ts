@@ -455,7 +455,7 @@ export class WindParticles {
   private placeMaterial: THREE.ShaderMaterial | null = null;
   private placeQuad: FullScreenQuad | null = null;
   /** placementKey(k, terrain) the ENU history was built with; "" = place every layer next step */
-  private placedKey = "";
+  private placedKey_ = "";
   private readonly simQuad: FullScreenQuad;
   private readonly copyQuad: FullScreenQuad;
   private readonly simMaterial: THREE.ShaderMaterial;
@@ -573,7 +573,7 @@ export class WindParticles {
     });
     if (this.globe) {
       this.historyEnu = historyTarget(size, layers);
-      this.placedKey = "";
+      this.placedKey_ = "";
     }
     this.object.geometry.dispose();
     this.object.geometry = trailGeometry(layers, count, size);
@@ -682,7 +682,7 @@ export class WindParticles {
     if (!this.globe || !this.history || !this.historyEnu || !this.placeQuad || !this.placeMaterial) return;
     const geo = this.globe.geo;
     const key = placementKey(geo.uGeoK.value, geo.uGeoTerrain.value);
-    const all = layer === "all" || key !== this.placedKey;
+    const all = layer === "all" || key !== this.placedKey_;
     if (!all && layer === null) return;
     const renderer = this.renderer;
     const u = this.placeMaterial.uniforms;
@@ -693,12 +693,22 @@ export class WindParticles {
       renderer.setRenderTarget(this.historyEnu, l);
       this.placeQuad.render(renderer);
     }
-    this.placedKey = key;
+    this.placedKey_ = key;
     this.placeCount += layers.length;
   }
 
   /** globe debug: number of layer place passes run so far */
   placeCount = 0;
+
+  /** globe debug: placementKey of the placed ENU history ("" = nothing placed since allocation) */
+  get placedKey(): string {
+    return this.placedKey_;
+  }
+
+  /** a reset (count / height change) is waiting for the next step */
+  get resetPending(): boolean {
+    return this.needsReset;
+  }
 
   /**
    * Globe debug: the newest history layer as grid (u, v, km AGL, age) and as placed centre-ENU
