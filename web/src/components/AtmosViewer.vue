@@ -94,7 +94,7 @@ const props = withDefaults(defineProps<{
   initialView?: ViewSnapshot | null;
   /** Receives the viewer's container; the host picks or creates its own input / render element. */
   createHost?: (container: HTMLElement) => ViewHost;
-  /** Globe tab: the volume runs in curved-shell mode; ④ sections and ⑤ particles stay off. */
+  /** Globe tab: the volume runs in curved-shell mode; ④ sections stay off, ⑤ particles are placed on the shell. */
   globeVolume?: CurvedVolumeOptions | null;
 }>(), {
   manifestUrl: "",
@@ -224,8 +224,7 @@ const layers = reactive({
   probeFollowMouse: false,
 });
 if (globeMode) {
-  // ⑤ particles stay off; ④ sections and ⑥ buildings, ground, probe start off like the box tabs
-  layers.particles = false;
+  // ⑤ particles are bent onto the shell; ④ sections and ⑥ buildings, ground, probe start off like the box tabs
   layers.volume = true;
   view.exaggeration = 1;
 }
@@ -1213,8 +1212,18 @@ function markReadyStatus(): void {
   if (status.value === "加载数据清单…") status.value = "风场就绪";
 }
 
+/**
+ * GL work by layers outside the host's draw pass. On the globe the context is Cesium's: isolateGl
+ * resets GL around the work and puts Cesium's state cache back (globe/overlay.ts). The box host has
+ * no isolateGl, so the work runs exactly as before.
+ */
+function runLayerGl(work: () => void): void {
+  if (host?.isolateGl) host.isolateGl(work);
+  else work();
+}
+
 function ensureParticles(): void {
-  if (globeMode || particles || !host || !manifest.value || !timeFields?.wind.valid) return;
+  if (particles || !host || !manifest.value || !timeFields?.wind.valid) return;
   const wMeta = manifest.value.variables.w;
   if (!wMeta) return;
   // The particles sample the blended "current time" wind target; it never needs rebinding.
@@ -1226,20 +1235,25 @@ function ensureParticles(): void {
   const wRange = wDisplay
     ? Math.max(Math.abs(wDisplay[0]), Math.abs(wDisplay[1]))
     : Math.max(0.05, wAbs * 0.6);
-  particles = new WindParticles(
-    host!.renderer,
-    domain,
-    {
-      texture,
-      scale: new THREE.Vector3(1, 1, 1),
-      offset: new THREE.Vector3(0, 0, 0),
-      maxSpeed: MAX_SPEED,
-      speedRange: colourSpeed,
-      wRange,
-    },
-    { ...particleParams },
-  );
-  atmos.root.add(particles.object);
+  const gv = globeMode ? globeOpt() : null;
+  runLayerGl(() => {
+    particles = new WindParticles(
+      host!.renderer,
+      domain,
+      {
+        texture,
+        scale: new THREE.Vector3(1, 1, 1),
+        offset: new THREE.Vector3(0, 0, 0),
+        maxSpeed: MAX_SPEED,
+        speedRange: colourSpeed,
+        wRange,
+      },
+      { ...particleParams },
+      gv ? { map: gv.map, geo: gv.geo } : null,
+    );
+  });
+  if (!particles) return;
+  atmos.root.add((particles as WindParticles).object);
   speedRange.value = colourSpeed;
   markReadyStatus();
 }
@@ -2226,7 +2240,7 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   boxStack?.material.setRoot(atmos.root);
   if (particles) {
     particles.object.visible = layers.particles;
-    if (layers.particles) particles.step(dt);
+    if (layers.particles) runLayerGl(() => particles!.step(dt));
   }
   if (volume?.mesh.visible) {
     updateDepthOccluders();
@@ -2524,10 +2538,18 @@ function exposeApi(): void {
     },
     /** run n simulation steps without drawing the scene (screenshots on slow software GL) */
     advance: (steps: number, dt = 1 / 60) => {
-      for (let i = 0; i < steps; i += 1) particles?.step(dt);
+      runLayerGl(() => { for (let i = 0; i < steps; i += 1) particles?.step(dt); });
     },
-    sampleParticle: () => particles?.sample() ?? [],
-    sampleHistory: () => particles?.sampleHistory() ?? [],
+    sampleParticle: () => {
+      let r: number[] = [];
+      runLayerGl(() => { r = particles?.sample() ?? []; });
+      return r;
+    },
+    sampleHistory: () => {
+      let r: number[][] = [];
+      runLayerGl(() => { r = particles?.sampleHistory() ?? []; });
+      return r;
+    },
     debugVisibility: () => {
       const reasons: string[] = [];
       const volOn = Boolean(layers.volume);
@@ -2839,6 +2861,35 @@ function exposeApi(): void {
         }
         return samples;
       },
+      /**
+       * ⑤ globe particles: read back the newest trail node of the first n particles (grid and the
+       * GPU-placed ENU) and compare with the exact float64 placement (metres). `minAglM` is the lowest
+       * live node above its ground (terrain on: the bilinear ground g(u, v)).
+       */
+      particlePlacement: (n = 4096) => {
+        const gv = globeOpt();
+        if (!particles || !gv || !globeFrame) return null;
+        let nodes: { grid: number[][]; enu: number[][] } = { grid: [], enu: [] };
+        runLayerGl(() => { nodes = particles!.sampleNodes(n); });
+        const ground = globeGroundField();
+        const k = globeK();
+        const s = gv.map.enu_unit_m;
+        let max = 0, sum = 0, cnt = 0, minAgl = Infinity, maxAgl = -Infinity, outside = 0;
+        nodes.grid.forEach((g, i) => {
+          const e = nodes.enu[i];
+          if (!e) return;
+          const [u, v, zKm] = g as [number, number, number];
+          if (u < 0 || u > 1 || v < 0 || v > 1) { outside += 1; return; }
+          const exact = placeEnuUnits(gv.grid, gv.map, globeFrame!, u, v, zKm * 1000, k, ground);
+          const d = Math.hypot(e[0]! - exact[0], e[1]! - exact[1], e[2]! - exact[2]) * s;
+          max = Math.max(max, d);
+          sum += d;
+          cnt += 1;
+          minAgl = Math.min(minAgl, zKm * 1000);
+          maxAgl = Math.max(maxAgl, zKm * 1000);
+        });
+        return { n: cnt, outside, k, terrain: Boolean(ground), maxResidualM: max, meanResidualM: cnt ? sum / cnt : 0, minAglM: minAgl, maxAglM: maxAgl, placeCount: particles.placeCount };
+      },
   });
 }
 
@@ -3035,7 +3086,8 @@ function applyBuildings(): void {
 }
 
 // ---------------------------------------------------------------- watchers (all cheap)
-watch(particleParams, () => particles?.setParams({ ...particleParams }), { deep: true });
+// a count change reallocates render targets / buffers: on the globe that GL work is isolated from Cesium
+watch(particleParams, () => runLayerGl(() => particles?.setParams({ ...particleParams })), { deep: true });
 watch(
   () => section.variable,
   (name) => {
@@ -3428,7 +3480,6 @@ onBeforeUnmount(() => {
         </div>
         <button class="icon" title="收起" @click="panelOpen = false">×</button>
       </div>
-      <p v-if="globeMode" class="panel-warn">地球页暂时关闭粒子（⑤），接入后恢复</p>
 
       <details open>
         <summary>图层</summary>
@@ -3478,7 +3529,7 @@ onBeforeUnmount(() => {
           />
         </div>
         <label class="row"
-          ><input v-model="layers.particles" type="checkbox" :disabled="globeMode" />风粒子（GPGPU 流线）</label
+          ><input v-model="layers.particles" type="checkbox" />风粒子（GPGPU 流线）</label
         >
         <label class="row"><input v-model="layers.probe" type="checkbox" />探针</label>
         <label v-if="layers.probe" class="row"

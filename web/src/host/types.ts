@@ -44,4 +44,11 @@ export interface ViewHost {
   setView(position: [number, number, number], target: [number, number, number]): void;
   /** Stops the loop and releases host resources. */
   dispose(): void;
+  /**
+   * Optional: run three.js GL work (render targets, full-screen passes) isolated from a host that
+   * shares the WebGL context. The Cesium host resets GL state before and after and puts Cesium's
+   * state cache back to its defaults. Hosts that own their context leave it out; callers then run
+   * the work directly.
+   */
+  isolateGl?(work: () => void): void;
 }

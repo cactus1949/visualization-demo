@@ -2,6 +2,16 @@ import * as THREE from "three";
 import { FullScreenQuad } from "three/addons/postprocessing/Pass.js";
 import { colormapTexture } from "./colormaps";
 import type { Domain } from "./fields";
+import type { GeoMap } from "../geo/mapping";
+import { placementKey } from "../geo/particlePlace";
+import {
+  LOGDEPTH_FRAGMENT,
+  LOGDEPTH_FRAGMENT_PARS,
+  LOGDEPTH_VERTEX,
+  LOGDEPTH_VERTEX_PARS,
+  geoPlaceGlsl,
+  type GeoUniforms,
+} from "../globe/geoShader";
 
 /**
  * GPGPU wind particles with persistent trails (WebGL2).
@@ -254,6 +264,139 @@ void main() {
 }
 `;
 
+/**
+ * Globe tab (⑤). The simulation is the box one (grid space). Each step a place pass turns the newest
+ * history layer into centre-ENU (geoPlace: h = terrain * g(u, v) + k * AGL, forward polynomial) and
+ * stores it in a second ring buffer, so the trail vertex shader only fetches positions: one
+ * polynomial per particle per step instead of three per ribbon vertex. When terrain or k changes every
+ * layer is placed again (see placementKey). The box-tab shaders above are not touched.
+ */
+export interface GlobeParticleOptions {
+  map: GeoMap;
+  /** shared globe uniforms (terrain / k), the same objects the volume and buildings use */
+  geo: GeoUniforms;
+}
+
+function globePlaceFragment(map: GeoMap): string {
+  return /* glsl */ `
+precision highp float;
+precision highp int;
+precision highp sampler2DArray;
+${geoPlaceGlsl(map)}
+uniform sampler2DArray uHistory;
+uniform int uLayer;
+out vec4 outColor;
+// grid (u, v, km above ground) -> centre-ENU scene units; w (age) passes through
+void main() {
+  vec4 s = texelFetch(uHistory, ivec3(ivec2(gl_FragCoord.xy), uLayer), 0);
+  outColor = vec4(geoPlace(vec3(s.xy, s.z * 1000.0)), s.w);
+}
+`;
+}
+
+const globeTrailVertex = /* glsl */ `
+precision highp float;
+precision highp int;
+precision highp sampler2DArray;
+${GLSL_WIND}
+${LOGDEPTH_VERTEX_PARS}
+uniform sampler2DArray uHistory;
+uniform sampler2DArray uHistoryEnu;
+uniform sampler2D uState;
+uniform sampler2D uColormap;
+uniform int uHead;
+uniform int uLayers;
+uniform int uTrail;
+uniform vec2 uResolution;
+uniform float uWidth;
+uniform float uTaper;
+uniform int uColorMode;
+uniform vec3 uColorRange;
+in float aNode;
+in float aSide;
+in vec2 aTexel;
+out float vAlpha;
+out float vSide;
+out vec3 vColor;
+
+int layerOf(int k) { return (uHead - k + uLayers) % uLayers; }
+vec3 nodeEnu(ivec2 texel, int k) {
+  return texelFetch(uHistoryEnu, ivec3(texel, layerOf(k)), 0).xyz;
+}
+vec4 toClip(vec3 enu) {
+  return projectionMatrix * modelViewMatrix * vec4(enu, 1.0);
+}
+
+void main() {
+  ivec2 texel = ivec2(aTexel);
+  float age = texelFetch(uState, texel, 0).w;
+  int maxK = min(uTrail - 1, int(age));
+  int k = int(aNode);
+  int kc = min(k, maxK);
+  vec3 g = texelFetch(uHistory, ivec3(texel, layerOf(kc)), 0).xyz;
+  vec4 clip = toClip(nodeEnu(texel, kc));
+  vec4 clipPrev = toClip(nodeEnu(texel, max(kc - 1, 0)));
+  vec4 clipNext = toClip(nodeEnu(texel, min(kc + 1, maxK)));
+  vec2 a = clipPrev.xy / max(clipPrev.w, 1e-4) * uResolution;
+  vec2 b = clipNext.xy / max(clipNext.w, 1e-4) * uResolution;
+  vec2 dir = b - a;
+  float len = length(dir);
+  dir = len > 1e-4 ? dir / len : vec2(1.0, 0.0);
+  vec2 normal = vec2(-dir.y, dir.x);
+  float f = maxK > 0 ? float(kc) / float(maxK) : 1.0;
+  float width = len > 1e-3 ? uWidth * mix(1.0, 0.25, f * uTaper) : 0.0;
+  clip.xy += normal * aSide * width / uResolution * clip.w;
+  gl_Position = clip;
+${LOGDEPTH_VERTEX}
+  vSide = aSide;
+  bool visible = k <= maxK && maxK > 0 && len > 1e-3 && clip.w > 0.0;
+  vAlpha = visible ? pow(1.0 - float(kc) / float(uTrail), 1.2) : 0.0;
+
+  vec4 raw = windRaw(g);
+  float t;
+  if (uColorMode == 0) {
+    float speed = raw.a;
+    t = (speed - uColorRange.y) / max(uColorRange.z - uColorRange.y, 1e-3);
+  } else if (uColorMode == 1) {
+    t = 0.5 + 0.5 * windMs(raw).z / uColorRange.x;
+  } else {
+    t = g.z / uDomain.z;
+  }
+  vColor = textureLod(uColormap, vec2(clamp(t, 0.0, 1.0), 0.5), 0.0).rgb;
+}
+`;
+
+const globeTrailFragment = /* glsl */ `
+precision highp float;
+${LOGDEPTH_FRAGMENT_PARS}
+uniform float uOpacity;
+uniform int uColorMode;
+uniform vec3 uSingle;
+in float vAlpha;
+in float vSide;
+in vec3 vColor;
+out vec4 outColor;
+void main() {
+${LOGDEPTH_FRAGMENT}
+  float edge = 1.0 - smoothstep(0.55, 1.0, abs(vSide));
+  float alpha = vAlpha * edge * uOpacity;
+  if (alpha < 0.004) discard;
+  vec3 color = uColorMode == 3 ? uSingle : vColor;
+  outColor = vec4(color, alpha);
+}
+`;
+
+function historyTarget(size: number, layers: number): THREE.WebGLArrayRenderTarget {
+  return new THREE.WebGLArrayRenderTarget(size, size, layers, {
+    type: THREE.FloatType,
+    format: THREE.RGBAFormat,
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+    depthBuffer: false,
+    generateMipmaps: false,
+  });
+}
+
 function floatTarget(size: number): THREE.WebGLRenderTarget {
   return new THREE.WebGLRenderTarget(size, size, {
     type: THREE.FloatType,
@@ -307,6 +450,12 @@ export class WindParticles {
   private needsReset = true;
   private state: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget] | null = null;
   private history: THREE.WebGLArrayRenderTarget | null = null;
+  /** globe only: the history ring placed into centre-ENU (same layer index as `history`) */
+  private historyEnu: THREE.WebGLArrayRenderTarget | null = null;
+  private placeMaterial: THREE.ShaderMaterial | null = null;
+  private placeQuad: FullScreenQuad | null = null;
+  /** placementKey(k, terrain) the ENU history was built with; "" = place every layer next step */
+  private placedKey = "";
   private readonly simQuad: FullScreenQuad;
   private readonly copyQuad: FullScreenQuad;
   private readonly simMaterial: THREE.ShaderMaterial;
@@ -319,6 +468,7 @@ export class WindParticles {
     private readonly domain: Domain,
     private readonly wind: WindBinding,
     params: Partial<ParticleParams> = {},
+    private readonly globe: GlobeParticleOptions | null = null,
   ) {
     this.params = { ...DEFAULT_PARTICLES, ...params };
     const windUniforms = () => ({
@@ -356,12 +506,24 @@ export class WindParticles {
     });
     this.simQuad = new FullScreenQuad(this.simMaterial);
     this.copyQuad = new FullScreenQuad(this.copyMaterial);
+    if (globe) {
+      this.placeMaterial = new THREE.ShaderMaterial({
+        glslVersion: THREE.GLSL3,
+        vertexShader: quadVertex,
+        fragmentShader: globePlaceFragment(globe.map),
+        uniforms: { ...globe.geo, uHistory: { value: null }, uLayer: { value: 0 } },
+        depthTest: false,
+        depthWrite: false,
+      });
+      this.placeQuad = new FullScreenQuad(this.placeMaterial);
+    }
     this.trailMaterial = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
-      vertexShader: trailVertex,
-      fragmentShader: trailFragment,
+      vertexShader: globe ? globeTrailVertex : trailVertex,
+      fragmentShader: globe ? globeTrailFragment : trailFragment,
       uniforms: {
         ...windUniforms(),
+        ...(globe ? { uHistoryEnu: { value: null } } : {}),
         uHistory: { value: null },
         uState: { value: null },
         uColormap: { value: colormapTexture("turbo") },
@@ -409,6 +571,10 @@ export class WindParticles {
       depthBuffer: false,
       generateMipmaps: false,
     });
+    if (this.globe) {
+      this.historyEnu = historyTarget(size, layers);
+      this.placedKey = "";
+    }
     this.object.geometry.dispose();
     this.object.geometry = trailGeometry(layers, count, size);
     this.needsReset = true;
@@ -488,6 +654,9 @@ export class WindParticles {
         renderer.setRenderTarget(this.history, this.head);
         this.copyQuad.render(renderer);
       }
+      if (this.globe) this.placeHistory(reset ? "all" : this.head);
+    } else if (this.globe) {
+      this.placeHistory(null); // paused: re-place only if terrain / k changed
     }
     renderer.setRenderTarget(previousTarget);
     renderer.autoClear = previousAutoClear;
@@ -495,7 +664,92 @@ export class WindParticles {
     trail.uHistory.value = this.history.texture;
     trail.uState.value = this.state[0].texture;
     trail.uHead.value = this.head;
-    renderer.getDrawingBufferSize(this.resolution);
+    if (this.globe) {
+      trail.uHistoryEnu.value = this.historyEnu!.texture;
+      // the Cesium host never calls renderer.setSize: three's cached size is stale, the context's is not
+      const gl = renderer.getContext();
+      this.resolution.set(gl.drawingBufferWidth, gl.drawingBufferHeight);
+    } else {
+      renderer.getDrawingBufferSize(this.resolution);
+    }
+  }
+
+  /**
+   * Globe: write centre-ENU of history layer(s) into historyEnu. `layer` = the layer just written,
+   * "all" after a reset, null = nothing new. A terrain / k change re-places every layer.
+   */
+  private placeHistory(layer: number | "all" | null): void {
+    if (!this.globe || !this.history || !this.historyEnu || !this.placeQuad || !this.placeMaterial) return;
+    const geo = this.globe.geo;
+    const key = placementKey(geo.uGeoK.value, geo.uGeoTerrain.value);
+    const all = layer === "all" || key !== this.placedKey;
+    if (!all && layer === null) return;
+    const renderer = this.renderer;
+    const u = this.placeMaterial.uniforms;
+    u.uHistory.value = this.history.texture;
+    const layers = all ? Array.from({ length: this.layers }, (_, i) => i) : [layer as number];
+    for (const l of layers) {
+      u.uLayer.value = l;
+      renderer.setRenderTarget(this.historyEnu, l);
+      this.placeQuad.render(renderer);
+    }
+    this.placedKey = key;
+    this.placeCount += layers.length;
+  }
+
+  /** globe debug: number of layer place passes run so far */
+  placeCount = 0;
+
+  /**
+   * Globe debug: the newest history layer as grid (u, v, km AGL, age) and as placed centre-ENU
+   * (scene units, age) for the first n particles. Slow readback; never in the frame loop.
+   */
+  sampleNodes(n: number): { grid: number[][]; enu: number[][] } {
+    if (!this.history) return { grid: [], enu: [] };
+    const rows = Math.min(this.size, Math.ceil(Math.min(n, this.count) / this.size));
+    const grid = this.readLayer(this.history, this.head, rows);
+    const enu = this.historyEnu ? this.readLayer(this.historyEnu, this.head, rows) : null;
+    const out = { grid: [] as number[][], enu: [] as number[][] };
+    for (let i = 0; i < Math.min(n, this.count, rows * this.size); i += 1) {
+      out.grid.push(Array.from(grid.subarray(i * 4, i * 4 + 4)));
+      if (enu) out.enu.push(Array.from(enu.subarray(i * 4, i * 4 + 4)));
+    }
+    return out;
+  }
+
+  private readLayer(source: THREE.WebGLArrayRenderTarget, layer: number, rows: number): Float32Array {
+    const target = new THREE.WebGLRenderTarget(this.size, rows, {
+      type: THREE.FloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: false,
+      generateMipmaps: false,
+    });
+    const material = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: quadVertex,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        precision highp sampler2DArray;
+        uniform sampler2DArray uSource;
+        uniform int uLayer;
+        out vec4 outColor;
+        void main() { outColor = texelFetch(uSource, ivec3(ivec2(gl_FragCoord.xy), uLayer), 0); }
+      `,
+      uniforms: { uSource: { value: source.texture }, uLayer: { value: layer } },
+    });
+    const quad = new FullScreenQuad(material);
+    const previous = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(target);
+    quad.render(this.renderer);
+    const px = new Float32Array(this.size * rows * 4);
+    this.renderer.readRenderTargetPixels(target, 0, 0, this.size, rows, px);
+    this.renderer.setRenderTarget(previous);
+    quad.dispose();
+    material.dispose();
+    target.dispose();
+    return px;
   }
 
   /** Debug readback of particle 0 (grid space). Never call this in the frame loop. */
@@ -544,8 +798,10 @@ export class WindParticles {
   private disposeTargets(): void {
     this.state?.forEach((t) => t.dispose());
     this.history?.dispose();
+    this.historyEnu?.dispose();
     this.state = null;
     this.history = null;
+    this.historyEnu = null;
   }
 
   dispose(): void {
@@ -556,5 +812,7 @@ export class WindParticles {
     this.trailMaterial.dispose();
     this.simQuad.dispose();
     this.copyQuad.dispose();
+    this.placeMaterial?.dispose();
+    this.placeQuad?.dispose();
   }
 }
