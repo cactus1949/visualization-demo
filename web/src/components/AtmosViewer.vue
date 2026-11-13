@@ -41,7 +41,8 @@ import { particlePlacementState } from "../geo/particlePlace";
 import { exactInverse, polyInverse, type EnuFrame } from "../geo/mapping";
 import type { SectionGlobe } from "../render/sections/globe";
 import { readSectionSamples } from "../render/sections/globeDebug";
-import { pickSections, type PickSurface } from "../render/sections/globePick";
+import { pickSections, polylineWalls, type PickSurface } from "../render/sections/globePick";
+import { sectionPickTargets } from "../render/sections/pickTargets";
 import { terrainBlocksSight } from "../geo/lineOfSight";
 import { sampleGrid, type GridField } from "../geo/placement";
 import {
@@ -1656,18 +1657,16 @@ let lastProbeHit: [number, number, number] | null = null;
 function pickTargets(): THREE.Object3D[] {
   const list: THREE.Object3D[] = [];
   // globe: section meshes are box km placed in the shader (raycast disabled); globeSectionPick() covers them
-  if (!globeMode) {
-    if (vsection?.group.visible) list.push(vsection.group);
-    if (hslice?.group.visible) list.push(hslice.mesh);
-  }
+  // first two tabs: section surface meshes only (outline lines would snap picks with their 1 km threshold)
+  if (!globeMode) list.push(...sectionPickTargets([vsection, hslice, polyline]));
   if (globeGround) list.push(globeGround.mesh);
   else if (atmos.ground.visible) list.push(atmos.ground);
   return list;
 }
 
 /**
- * Globe: the same probe targets as the first two tabs (height slice, lon/lat wall; the polyline is not
- * a probe target there either), picked analytically: the ENU pointer ray is clipped to the shell's
+ * Globe: the same probe targets as the first two tabs (height slice, lon/lat wall, polyline walls),
+ * picked analytically: the ENU pointer ray is clipped to the shell's
  * bounding sphere and to the ground hit, then render/sections/globePick finds the first crossing of each
  * section's box-km equation (sign change + bisection). Returns the hit in box km and in ENU units.
  */
@@ -1678,6 +1677,7 @@ function globeSectionPick(groundLocal: THREE.Vector3 | null): { box: THREE.Vecto
     const c = vsection.chord();
     if (c) surfaces.push({ kind: "wall", ax: c[0].x, az: c[0].y, bx: c[1].x, bz: c[1].y, top: domain.top });
   }
+  if (polyline?.group.visible) surfaces.push(...polylineWalls(polyline.points, domain.top));
   if (!surfaces.length || !globeFrame) return null;
   const o = atmos.root.worldToLocal(pointerRay!.ray.origin.clone());
   const d = atmos.root.worldToLocal(pointerRay!.ray.origin.clone().add(pointerRay!.ray.direction)).sub(o);

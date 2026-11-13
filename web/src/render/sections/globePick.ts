@@ -94,3 +94,14 @@ export function pickSections(
   });
   return best;
 }
+
+/** Polyline section walls (box km points, ground to `top`), one wall surface per segment. */
+export function polylineWalls(points: { x: number; z: number }[], top: number): PickSurface[] {
+  const out: PickSurface[] = [];
+  for (let i = 0; i + 1 < points.length; i += 1) {
+    const a = points[i]!, b = points[i + 1]!;
+    if (Math.hypot(b.x - a.x, b.z - a.z) < 1e-9) continue;
+    out.push({ kind: "wall", ax: a.x, az: a.z, bx: b.x, bz: b.z, top });
+  }
+  return out;
+}

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickSections, type PickSurface, type Vec3 } from "./globePick.ts";
+import { pickSections, polylineWalls, type PickSurface, type Vec3 } from "./globePick.ts";
 
 // A curved stand-in for the shell: ENU (km, z up) on a sphere of radius R tangent at the origin,
 // box km = (east, AGL, south). Exaggerated curvature (R = 60 km) so a flat-space pick would be wrong.
@@ -61,4 +61,32 @@ test("crossing outside the extent or past t1 is ignored", () => {
   const r = rayTo([0, 0.5, 0], [0, -20, 6]);
   assert.equal(pickSections(r.o, r.d, 0, 0.9, toBox, [wall]), null); // ground in front (t1 < hit)
   assert.ok(pickSections(r.o, r.d, 0, 2, toBox, [wall]));
+});
+
+test("polylineWalls: one wall per segment, zero-length segments dropped", () => {
+  const w = polylineWalls([{ x: -6, z: -4 }, { x: 0, z: 3 }, { x: 0, z: 3 }, { x: 6, z: -2 }], top);
+  assert.equal(w.length, 2);
+  assert.deepEqual(w[0], { kind: "wall", ax: -6, az: -4, bx: 0, bz: 3, top });
+  assert.deepEqual(w[1], { kind: "wall", ax: 0, az: 3, bx: 6, bz: -2, top });
+});
+
+test("polyline: nearest wall wins when the ray crosses two walls; a point on the far wall is reached through a gap", () => {
+  const walls = polylineWalls([{ x: -6, z: -4 }, { x: 0, z: 3 }, { x: 6, z: -2 }], top);
+  // looking from the south (+z) at a point on the first wall: the second wall is not in the way
+  const t1: Vec3 = [-3, 0.4, -0.5];
+  const r1 = rayTo(t1, [-3, -30, 10]);
+  const h1 = pickSections(r1.o, r1.d, 0, 2, toBox, walls);
+  assert.ok(h1);
+  assert.equal(h1.index, 0);
+  for (let i = 0; i < 3; i += 1) assert.ok(Math.abs(h1.box[i]! - t1[i]!) < 1e-6);
+  // a ray from inside the V towards the second wall's far side: first crossing is the second wall
+  const t2: Vec3 = [3, 0.7, 0.5];
+  const r2 = rayTo(t2, [0, 0, 2]);
+  const h2 = pickSections(r2.o, r2.d, 0, 2, toBox, walls);
+  assert.ok(h2);
+  assert.equal(h2.index, 1);
+  for (let i = 0; i < 3; i += 1) assert.ok(Math.abs(h2.box[i]! - t2[i]!) < 1e-6);
+  // above the wall top: no hit
+  const r3 = rayTo([-3, 1.2, -0.5], [-3, -30, 10]);
+  assert.equal(pickSections(r3.o, r3.d, 0, 2, toBox, walls), null);
 });
