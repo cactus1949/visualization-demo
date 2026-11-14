@@ -6,7 +6,7 @@
  * buildings, ground and legends are on this tab; sections (④) and particles (⑤) stay off.
  */
 import { computed, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
-import { Cartesian3, Color, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
+import { Cartesian3, Color, Ellipsoid, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
 import GlobeFormatSwitch from "./GlobeFormatSwitch.vue";
@@ -76,20 +76,38 @@ function applySky(theme: string): void {
   viewer.scene.backgroundColor = light ? LIGHT_SKY : Color.BLACK;
   if (viewer.scene.skyBox) viewer.scene.skyBox.show = !light;
   if (viewer.scene.moon) viewer.scene.moon.show = !light;
+  // Keep atmosphere lighting from following the sun / clock. Cesium's default
+  // dynamicAtmosphereLighting is true; on a dark theme, a night-side sun can
+  // paint the ground atmosphere (and the basemap under it) black. Light theme
+  // already leaves atmosphere off, which is why Jayden's A/B looked fine there.
+  viewer.scene.globe.dynamicAtmosphereLighting = false;
+  viewer.scene.globe.dynamicAtmosphereLightingFromSun = false;
   applyNadirAtmosphere(theme);
+}
+
+/** True when the camera is looking down steeper than about 70° from the horizon. */
+function isSteepLookDown(): boolean {
+  if (!viewer) return false;
+  if (viewer.camera.pitch < CMath.toRadians(-70)) return true;
+  // Some backends report a milder pitch after lookAtTransform(IDENTITY) even
+  // when the view is visually nadir; fall back to the world-space direction.
+  const up = Ellipsoid.WGS84.geodeticSurfaceNormal(viewer.camera.positionWC);
+  return Cartesian3.dot(viewer.camera.directionWC, up) < -Math.cos(CMath.toRadians(20));
 }
 
 /**
  * Dark theme turns on Cesium ground / sky atmosphere. Near nadir those shaders fill the view
  * and hide the basemap (reproduced under SwiftShader; light theme, which leaves atmosphere
- * off, shows the imagery at the same camera). Disable them when pitch is steeper than -70°.
+ * off, shows the imagery at the same camera). Disable them when the view is steeper than -70°.
+ * Applied in preRender so the flags are in effect for the frame that is about to draw.
  */
 function applyNadirAtmosphere(theme?: string): void {
   if (!viewer) return;
   const light = (theme ?? themeClass.value) === "light";
-  const steep = viewer.camera.pitch < CMath.toRadians(-70);
-  if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = !light && !steep;
-  viewer.scene.globe.showGroundAtmosphere = !light && !steep;
+  const steep = isSteepLookDown();
+  const show = !light && !steep;
+  if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = show;
+  viewer.scene.globe.showGroundAtmosphere = show;
 }
 
 watch(themeClass, (theme) => applySky(theme));
@@ -279,7 +297,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   setTerrain(ui.terrain);
   setView("overview");
   applySky(themeClass.value);
-  removeAtmosphereTick = viewer.scene.postUpdate.addEventListener(() => applyNadirAtmosphere());
+  removeAtmosphereTick = viewer.scene.preRender.addEventListener(() => applyNadirAtmosphere());
   status.value = "就绪";
   exposeApi(meta, ground);
   window.__globeReady = true;
