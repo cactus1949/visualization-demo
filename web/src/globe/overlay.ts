@@ -152,9 +152,26 @@ export class GlobeOverlay implements ViewHost {
     }
   }
 
-  /** ViewHost.isolateGl: layer GL work outside the draw pass (particle sim / place passes, debug readbacks). */
+  /**
+   * ViewHost.isolateGl: layer GL work outside the draw pass (particle sim / place passes, debug
+   * readbacks, disposal). Unlike resyncAfter the work always runs: callers put state changes and
+   * disposal in here too. With a lost context there is no GL state to protect (GL calls are no-ops).
+   */
   isolateGl(work: () => void): void {
-    this.resyncAfter(work);
+    if (this.lost) {
+      work();
+      return;
+    }
+    this.renderer.resetState();
+    try {
+      work();
+    } finally {
+      this.renderer.resetState();
+      const c = this.ctx;
+      c._currentRenderState = c._defaultRenderState;
+      c._currentPassState = c._defaultPassState;
+      c._currentFramebuffer = undefined;
+    }
   }
 
   captureOccluderDepth(target: WebGLRenderTarget, scene: Scene, hide: Object3D[]): void {

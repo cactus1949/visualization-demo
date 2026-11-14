@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { enuFrameAt, exactEnu, polyForward, type GeoGrid, type GeoMap } from "./mapping.ts";
 import { ellipsoidHeight, sampleGrid } from "./placement.ts";
-import { PARTICLE_MIN_AGL_KM, particleBoxKm, particleEllipsoidHeight, particleUvAgl, placementKey, type GridPos } from "./particlePlace.ts";
+import { PARTICLE_MIN_AGL_KM, particleBoxKm, particlePlacementState, particleEllipsoidHeight, particleUvAgl, placementKey, type GridPos } from "./particlePlace.ts";
 
 const { grid, map } = JSON.parse(readFileSync(new URL("./testdata/tianjin-map.json", import.meta.url), "utf8")) as { grid: GeoGrid; map: GeoMap };
 const frame = enuFrameAt(map.lon0, map.lat0);
@@ -74,5 +74,12 @@ describe("globe particle placement (CPU reference of the place pass)", () => {
     assert.equal(placementKey(3, 0), placementKey(3, 0.2));
     assert.notEqual(placementKey(3, 0), placementKey(3, 1));
     assert.notEqual(placementKey(3, 1), placementKey(2.5, 1));
+  });
+
+  it("placement state: unplaced until a place pass ran and no reset is pending", () => {
+    assert.equal(particlePlacementState("", false), "unplaced"); // fresh targets (count changed while hidden)
+    assert.equal(particlePlacementState("", true), "unplaced");
+    assert.equal(particlePlacementState(placementKey(1, 0), true), "unplaced"); // height / count change pending
+    assert.equal(particlePlacementState(placementKey(1, 0), false), "placed");
   });
 });
