@@ -3425,6 +3425,8 @@ async function reloadFormat(): Promise<void> {
   store.on(onData);
   timeFields?.wind.releaseOutside([]);
   if (timeFields) for (const r of timeFields.scalars.values()) r.releaseOutside([]);
+  // same t still looks "current" in speedShown; without this the speed target keeps the old format
+  timeFields?.invalidate();
   wantsDirty = true;
   syncWants(performance.now());
   status.value = "就绪";
@@ -3897,6 +3899,8 @@ onBeforeUnmount(() => {
 .mode-picks { display: inline-flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
 .mode-picks button { background: rgba(20,40,55,.8); color: inherit; border: 1px solid var(--line); border-radius: 3px; padding: 1px 6px; cursor: pointer; font: inherit; }
 .mode-picks button.on { border-color: var(--accent); color: var(--accent); }
+.viewer.light .mode-picks button { background: rgba(247, 250, 252, 0.95); color: #1c2d3a; border-color: rgba(60, 90, 110, 0.3); }
+.viewer.light .mode-picks button.on { border-color: #0f8aa3; color: #0f8aa3; background: #fff; }
 .section-tools { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
 .hint-line { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 4px 0; }
 .range-label span { display: block; margin-bottom: 4px; }
