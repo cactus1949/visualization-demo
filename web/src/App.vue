@@ -24,19 +24,36 @@ function setUrl(edit: (url: URL) => void): void {
   history.replaceState(null, "", url);
 }
 
+function writeFormatParam(url: URL, next: string): void {
+  url.searchParams.delete("codec");
+  if (next === formats[0]?.id) url.searchParams.delete("format");
+  else url.searchParams.set("format", next);
+}
+
+/** Top 「当前编码 / SZ3」 always open that format's box tab (leave the globe if we were there). */
 function selectFormat(next: string): void {
   if (globe.value) {
     globe.value = false;
-    setUrl((url) => url.searchParams.delete("tab"));
-    if (next === format.value) return;
+    format.value = next;
+    setUrl((url) => {
+      writeFormatParam(url, next);
+      url.searchParams.delete("tab");
+    });
+    return;
   }
   if (next === format.value) return;
   hold.value = viewer.value?.snapshot() ?? null;
   format.value = next;
+  setUrl((url) => writeFormatParam(url, next));
+}
+
+/** In-globe encoding switch: stay on the globe tab and keep Cesium / AtmosViewer mounted. */
+function switchGlobeFormat(next: string): void {
+  if (next === format.value) return;
+  format.value = next;
   setUrl((url) => {
-    url.searchParams.delete("codec");
-    if (next === formats[0]?.id) url.searchParams.delete("format");
-    else url.searchParams.set("format", next);
+    writeFormatParam(url, next);
+    url.searchParams.set("tab", "globe");
   });
 }
 
@@ -64,7 +81,7 @@ const showPanel = computed(() => !embedded);
       </button>
       <button type="button" :class="{ on: globe }" @click="selectGlobe">地球</button>
     </nav>
-    <GlobeViewer v-if="globe" class="shell-view" :format="current" />
+    <GlobeViewer v-if="globe" class="shell-view" :format="current" @switch-format="switchGlobeFormat" />
     <AtmosViewer
       v-else
       :key="format"

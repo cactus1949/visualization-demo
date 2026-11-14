@@ -5,10 +5,11 @@
  * (globe/overlay.ts). PR ③: the volume runs on the curved shell. PR ⑥: probe, height labels,
  * buildings, ground and legends are on this tab; sections (④) and particles (⑤) stay off.
  */
-import { onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowRef } from "vue";
-import { Cartesian3, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
+import { computed, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
+import { Cartesian3, Color, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
+import GlobeFormatSwitch from "./GlobeFormatSwitch.vue";
 import type { FormatDef } from "../formats/types";
 import type { CurvedVolumeOptions } from "../render/volume";
 import { GeoDecodeError, geoBaseUrl, lastDecodeMs, lastDecodeWhere, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
@@ -34,6 +35,12 @@ declare global {
 }
 
 const props = defineProps<{ format?: FormatDef }>();
+const emit = defineEmits<{ "switch-format": [id: string] }>();
+
+function onSwitchFormat(id: string): void {
+  emit("switch-format", id);
+}
+
 
 const host = ref<HTMLDivElement | null>(null);
 const atmos = ref<InstanceType<typeof AtmosViewer> | null>(null);
@@ -46,8 +53,23 @@ const source = pickBasemapSource({ dev: import.meta.env.DEV, devFlag: import.met
 const depthMode: GlobeDepthMode = depthModeFromQuery(location.search);
 // measurement hooks only in dev or with ?globeDebug=1
 const debug = import.meta.env.DEV || query.get("globeDebug") === "1";
-const ui = reactive({ style: "img" as BasemapStyle, terrain: false, testLayer: false, proxy: true, k: 1 });
+const ui = reactive({ style: "img" as BasemapStyle, terrain: false, testLayer: false, proxy: true, k: 3 });
 const EXAGGERATIONS = [1, 3, 5, 10];
+const themeClass = computed(() => atmos.value?.theme ?? "dark");
+const LIGHT_SKY = Color.fromCssColorString("#dfe7ee");
+
+function applySky(theme: string): void {
+  if (!viewer) return;
+  const light = theme === "light";
+  viewer.scene.backgroundColor = light ? LIGHT_SKY : Color.BLACK;
+  if (viewer.scene.skyBox) viewer.scene.skyBox.show = !light;
+  if (viewer.scene.moon) viewer.scene.moon.show = !light;
+  if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = !light;
+  viewer.scene.globe.showGroundAtmosphere = !light;
+}
+
+watch(themeClass, (theme) => applySky(theme));
+
 
 let viewer: Viewer | null = null;
 let terrains: TerrainSwitch | null = null;
@@ -218,6 +240,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   setExaggeration(ui.k);
   setTerrain(ui.terrain);
   setView("overview");
+  applySky(themeClass.value);
   status.value = "就绪";
   exposeApi(meta, ground);
   window.__globeReady = true;
@@ -265,8 +288,12 @@ onBeforeUnmount(() => {
 
 /** AtmosViewer's own onBeforeUnmount runs after this component's; tear the globe down after the layers. */
 function teardown(): void {
+  const canvas = viewer?.scene?.canvas;
+  const gl = canvas?.getContext("webgl2") ?? canvas?.getContext("webgl");
   overlay.value?.dispose();
   viewer?.destroy();
+  const lose = gl?.getExtension("WEBGL_lose_context");
+  if (lose && gl && !gl.isContextLost()) lose.loseContext();
   geoUniforms?.uGeoGround.value.dispose();
   overlay.value = null;
   viewer = null;
@@ -278,7 +305,7 @@ onUnmounted(teardown);
 </script>
 
 <template>
-  <div class="globe">
+  <div class="globe" :class="themeClass">
     <div ref="host" class="globe-host" />
     <AtmosViewer
       v-if="overlay && volumeOptions"
@@ -288,6 +315,7 @@ onUnmounted(teardown);
       :create-host="() => overlay!"
     />
     <aside class="globe-panel">
+      <GlobeFormatSwitch :model-value="props.format?.id ?? ''" @update:model-value="onSwitchFormat" />
       <div class="row">
         <span>底图</span>
         <button type="button" :class="{ on: ui.style === 'img' }" @click="setBasemap('img')">影像</button>
@@ -374,5 +402,36 @@ onUnmounted(teardown);
   transform: translateX(-50%);
   max-width: 560px;
   color: #f5c46b;
+}
+
+.globe.light .globe-panel {
+  background: rgba(250, 252, 255, 0.93);
+  border-color: rgba(60, 90, 110, 0.2);
+  color: #1c2d3a;
+}
+.globe.light .row button {
+  color: #5d7384;
+  border-color: rgba(60, 90, 110, 0.3);
+}
+.globe.light .row button.on {
+  color: #1c2d3a;
+  border-color: #0f8aa3;
+}
+.globe.light .muted {
+  color: #5d7384;
+}
+.globe.light .globe-panel select,
+.globe.light .globe-panel input[type="checkbox"] {
+  color: #1c2d3a;
+  background: #f7fafc;
+  accent-color: #0f8aa3;
+  border: 1px solid rgba(60, 90, 110, 0.35);
+}
+.globe.light .globe-panel select {
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.globe.light .warn {
+  color: #9a6b12;
 }
 </style>

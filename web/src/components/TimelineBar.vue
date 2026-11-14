@@ -10,7 +10,7 @@ import { computed, ref } from "vue";
 import { ANNOTATION_TOKENS as TK } from "../render/annotations/tokens";
 import { RATES, clockOf, setTime, stepFrame, type TimelineState } from "../state/timeline";
 
-const props = defineProps<{ tl: TimelineState }>();
+const props = defineProps<{ tl: TimelineState; theme?: "dark" | "light" }>();
 const emit = defineEmits<{ change: [] }>();
 
 const track = ref<HTMLDivElement>();
@@ -89,7 +89,7 @@ function toggleSmooth(): void {
 </script>
 
 <template>
-  <div class="timeline" :style="vars" @pointerdown.stop @wheel.stop>
+  <div class="timeline" :class="{ light: props.theme === 'light' }" :style="vars" @pointerdown.stop @wheel.stop>
     <div class="buttons">
       <button type="button" class="tb" title="上一帧（←）" aria-label="上一帧" @click="step(-1)">
         <svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 3h2v10H3zM13 3v10L6 8z" fill="currentColor" /></svg>
@@ -414,5 +414,45 @@ function toggleSmooth(): void {
   border-color: var(--tl-fixed);
   color: var(--tl-fixed);
   background: rgba(255, 194, 71, 0.12);
+}
+
+.timeline.light {
+  --tl-text: #1c2d3a;
+  background: rgba(250, 252, 255, 0.92);
+  border-color: rgba(60, 90, 110, 0.2);
+  box-shadow: 0 8px 28px rgba(28, 45, 58, 0.12);
+  color: #1c2d3a;
+}
+.timeline.light .tb {
+  border-color: rgba(60, 90, 110, 0.28);
+}
+.timeline.light .tick-label,
+.timeline.light .readout .date,
+.timeline.light .readout small {
+  color: rgba(28, 45, 58, 0.62);
+}
+.timeline.light .tick {
+  background: rgba(28, 45, 58, 0.7);
+  box-shadow: 0 0 0 1.5px rgba(250, 252, 255, 0.95);
+}
+.timeline.light .head,
+.timeline.light .track.hover .head {
+  box-shadow:
+    0 0 0 2px rgba(250, 252, 255, 0.95),
+    0 0 8px rgba(255, 194, 71, 0.45);
+}
+.timeline.light .rail {
+  background: rgba(28, 45, 58, 0.16);
+}
+.timeline.light .rates,
+.timeline.light .smooth {
+  border-color: rgba(60, 90, 110, 0.28);
+}
+.timeline.light .rates button,
+.timeline.light .smooth {
+  color: rgba(28, 45, 58, 0.75);
+}
+.timeline.light .rates button + button {
+  border-left-color: rgba(60, 90, 110, 0.18);
 }
 </style>

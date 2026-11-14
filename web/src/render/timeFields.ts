@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { Domain } from "./fields";
+import { invalidateShown, shownIsCurrent } from "./shownTarget";
 
 /**
  * Time-dependent 3D fields on the GPU.
@@ -326,7 +327,7 @@ export class TimeFields {
       drew = true;
     };
     for (const r of resources) {
-      if (r.shown.a === a && r.shown.b === b && r.shown.s === s && r.valid) continue;
+      if (shownIsCurrent(r.shown, a, b, s, r.valid)) continue;
       const A = r.slotOf(a);
       const B = s > 0 ? r.slotOf(b) : A;
       if (!A?.tex || !B?.tex) {
@@ -344,7 +345,7 @@ export class TimeFields {
         this.speed.texture.needsUpdate = true;
       }
       const sh = this.speedShown;
-      if (!(sh.a === a && sh.b === b && sh.s === s && this.speedValid)) {
+      if (!shownIsCurrent(sh, a, b, s, this.speedValid)) {
         const A = this.wind.slotOf(a);
         const B = s > 0 ? this.wind.slotOf(b) : A;
         if (A?.tex && B?.tex) {
@@ -376,9 +377,9 @@ export class TimeFields {
 
   /** Force the next blend of every target (e.g. after the smoothing switch). */
   invalidate(): void {
-    this.wind.shown.a = -1;
-    for (const r of this.scalars.values()) r.shown.a = -1;
-    this.speedShown.a = -1;
+    invalidateShown(this.wind.shown);
+    for (const r of this.scalars.values()) invalidateShown(r.shown);
+    invalidateShown(this.speedShown);
   }
 
   /** GPU bytes held by slots and targets (approximate). */
