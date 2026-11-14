@@ -26,6 +26,7 @@ import { measureInverseResidualGpu } from "../globe/inverseResidual";
 import { shellBounds } from "../geo/mapping";
 import { groundSampler } from "../geo/placement";
 import { depthModeFromQuery, type GlobeDepthMode } from "../globe/depthMode";
+import { VIEWS } from "../globe/viewPresets";
 
 declare global {
   interface Window {
@@ -142,16 +143,6 @@ function setProxy(on: boolean): void {
   ui.proxy = on;
   if (overlay.value) overlay.value.proxy.mesh.visible = on;
 }
-
-const VIEWS: Record<string, [number, number, number, number, number]> = {
-  // [u, v, heading°, pitch°, range m]
-  overview: [0.5, 0.5, 20, -35, 32000],
-  corner: [0, 0, 45, -12, 2500],
-  top: [0.5, 0.5, 0, -89.9, 30000],
-  curtain: [0.5, 0.5, 0, -12, 6000],
-  low: [0.5, 0.15, 0, -8, 9000],
-  edge: [1, 0.5, 270, -4, 4000],
-};
 
 function setView(name: string): void {
   if (!viewer || !geo.value) return;
