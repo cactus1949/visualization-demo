@@ -155,14 +155,12 @@ export class GlobeOverlay implements ViewHost {
   /**
    * ViewHost.isolateGl: layer GL work outside the draw pass (particle sim / place passes, debug
    * readbacks, disposal). Unlike resyncAfter the work always runs: callers put state changes and
-   * disposal in here too. With a lost context there is no GL state to protect (GL calls are no-ops).
+   * disposal in here too. With a lost context there is no GL state to protect (GL calls are no-ops),
+   * but three's and Cesium's JS-side state caches still get reset afterwards, also when the work throws,
+   * so a restored context does not start from bindings the work left behind.
    */
   isolateGl(work: () => void): void {
-    if (this.lost) {
-      work();
-      return;
-    }
-    this.renderer.resetState();
+    if (!this.lost) this.renderer.resetState();
     try {
       work();
     } finally {
