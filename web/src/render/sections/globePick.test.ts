@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickSections, polylineWalls, type PickSurface, type Vec3 } from "./globePick.ts";
+import { globePickSurfaces, pickSections, polylineWalls, type PickSurface, type Vec3 } from "./globePick.ts";
 
 // A curved stand-in for the shell: ENU (km, z up) on a sphere of radius R tangent at the origin,
 // box km = (east, AGL, south). Exaggerated curvature (R = 60 km) so a flat-space pick would be wrong.
@@ -89,4 +89,30 @@ test("polyline: nearest wall wins when the ray crosses two walls; a point on the
   // above the wall top: no hit
   const r3 = rayTo([-3, 1.2, -0.5], [-3, -30, 10]);
   assert.equal(pickSections(r3.o, r3.d, 0, 2, toBox, walls), null);
+});
+
+test("polylineWalls: fewer than 2 points gives no walls", () => {
+  assert.deepEqual(polylineWalls([], top), []);
+  assert.deepEqual(polylineWalls([{ x: 1, z: 2 }], top), []);
+});
+
+test("globe: a hidden polyline is no longer picked (visible one is)", () => {
+  const domain = { sx: 18, sz: 18, top };
+  const points = [{ x: -6, z: -4 }, { x: 0, z: 3 }, { x: 6, z: -2 }];
+  const target: Vec3 = [-3, 0.4, -0.5];
+  const { o, d } = rayTo(target, [-3, -30, 10]);
+  const shown = globePickSurfaces({ polyline: { visible: true, points } }, domain);
+  assert.equal(shown.length, 2);
+  const hit = pickSections(o, d, 0, 2, toBox, shown);
+  assert.ok(hit);
+  for (let i = 0; i < 3; i += 1) assert.ok(Math.abs(hit.box[i]! - target[i]!) < 1e-6);
+  const hidden = globePickSurfaces({ polyline: { visible: false, points } }, domain);
+  assert.deepEqual(hidden, []);
+  assert.equal(pickSections(o, d, 0, 2, toBox, hidden), null);
+  // other sections stay pickable while the polyline is hidden; the hidden walls never block them
+  const mixed = globePickSurfaces({ height: { visible: true, y: 0.2 }, polyline: { visible: false, points } }, domain);
+  assert.equal(mixed.length, 1);
+  const h2 = pickSections(o, d, 0, 2, toBox, mixed);
+  assert.ok(h2);
+  assert.ok(Math.abs(h2.box[1] - 0.2) < 1e-9);
 });

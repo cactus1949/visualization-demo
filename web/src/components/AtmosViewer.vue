@@ -41,7 +41,7 @@ import { particlePlacementState } from "../geo/particlePlace";
 import { exactInverse, polyInverse, type EnuFrame } from "../geo/mapping";
 import type { SectionGlobe } from "../render/sections/globe";
 import { readSectionSamples } from "../render/sections/globeDebug";
-import { pickSections, polylineWalls, type PickSurface } from "../render/sections/globePick";
+import { globePickSurfaces, pickSections } from "../render/sections/globePick";
 import { sectionPickTargets } from "../render/sections/pickTargets";
 import { terrainBlocksSight } from "../geo/lineOfSight";
 import { sampleGrid, type GridField } from "../geo/placement";
@@ -1671,13 +1671,11 @@ function pickTargets(): THREE.Object3D[] {
  * section's box-km equation (sign change + bisection). Returns the hit in box km and in ENU units.
  */
 function globeSectionPick(groundLocal: THREE.Vector3 | null): { box: THREE.Vector3; enu: THREE.Vector3 } | null {
-  const surfaces: PickSurface[] = [];
-  if (hslice?.group.visible) surfaces.push({ kind: "height", y: hslice.group.position.y, hx: domain.sx / 2, hz: domain.sz / 2 });
-  if (vsection?.group.visible) {
-    const c = vsection.chord();
-    if (c) surfaces.push({ kind: "wall", ax: c[0].x, az: c[0].y, bx: c[1].x, bz: c[1].y, top: domain.top });
-  }
-  if (polyline?.group.visible) surfaces.push(...polylineWalls(polyline.points, domain.top));
+  const surfaces = globePickSurfaces({
+    height: hslice && { visible: hslice.group.visible, y: hslice.group.position.y },
+    wall: vsection && { visible: vsection.group.visible, chord: () => vsection!.chord() },
+    polyline: polyline && { visible: polyline.group.visible, points: polyline.points },
+  }, domain);
   if (!surfaces.length || !globeFrame) return null;
   const o = atmos.root.worldToLocal(pointerRay!.ray.origin.clone());
   const d = atmos.root.worldToLocal(pointerRay!.ray.origin.clone().add(pointerRay!.ray.direction)).sub(o);

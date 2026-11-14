@@ -105,3 +105,22 @@ export function polylineWalls(points: { x: number; z: number }[], top: number): 
   }
   return out;
 }
+
+/** What the globe probe can see of the sections (visibility gates picking, like the first two tabs). */
+export interface GlobeSectionState {
+  height?: { visible: boolean; y: number } | null;
+  wall?: { visible: boolean; chord: () => [{ x: number; y: number }, { x: number; y: number }] | null } | null;
+  polyline?: { visible: boolean; points: { x: number; z: number }[] } | null;
+}
+
+/** Pick surfaces of the visible sections (box km; wall chord (x, y) is box (x, z)). */
+export function globePickSurfaces(s: GlobeSectionState, domain: { sx: number; sz: number; top: number }): PickSurface[] {
+  const out: PickSurface[] = [];
+  if (s.height?.visible) out.push({ kind: "height", y: s.height.y, hx: domain.sx / 2, hz: domain.sz / 2 });
+  if (s.wall?.visible) {
+    const c = s.wall.chord();
+    if (c) out.push({ kind: "wall", ax: c[0].x, az: c[0].y, bx: c[1].x, bz: c[1].y, top: domain.top });
+  }
+  if (s.polyline?.visible) out.push(...polylineWalls(s.polyline.points, domain.top));
+  return out;
+}
