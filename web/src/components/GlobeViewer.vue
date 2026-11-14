@@ -55,7 +55,6 @@ const depthMode: GlobeDepthMode = depthModeFromQuery(location.search);
 // measurement hooks only in dev or with ?globeDebug=1
 const debug = import.meta.env.DEV || query.get("globeDebug") === "1";
 const ui = reactive({ style: "img" as BasemapStyle, terrain: false, testLayer: false, proxy: true, k: 3 });
-const EXAGGERATIONS = [1, 3, 5, 10];
 const themeClass = computed(() => atmos.value?.theme ?? "dark");
 const LIGHT_SKY = Color.fromCssColorString("#dfe7ee");
 
@@ -65,8 +64,20 @@ function applySky(theme: string): void {
   viewer.scene.backgroundColor = light ? LIGHT_SKY : Color.BLACK;
   if (viewer.scene.skyBox) viewer.scene.skyBox.show = !light;
   if (viewer.scene.moon) viewer.scene.moon.show = !light;
-  if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = !light;
-  viewer.scene.globe.showGroundAtmosphere = !light;
+  applyNadirAtmosphere(theme);
+}
+
+/**
+ * Dark theme turns on Cesium ground / sky atmosphere. Near nadir those shaders fill the view
+ * and hide the basemap (reproduced under SwiftShader; light theme, which leaves atmosphere
+ * off, shows the imagery at the same camera). Disable them when pitch is steeper than -70°.
+ */
+function applyNadirAtmosphere(theme?: string): void {
+  if (!viewer) return;
+  const light = (theme ?? themeClass.value) === "light";
+  const steep = viewer.camera.pitch < CMath.toRadians(-70);
+  if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = !light && !steep;
+  viewer.scene.globe.showGroundAtmosphere = !light && !steep;
 }
 
 watch(themeClass, (theme) => applySky(theme));
@@ -74,6 +85,7 @@ watch(themeClass, (theme) => applySky(theme));
 
 let viewer: Viewer | null = null;
 let terrains: TerrainSwitch | null = null;
+let removeAtmosphereTick: (() => void) | undefined;
 let outline: PolylineCollection | null = null;
 let geoUniforms: GeoUniforms | null = null;
 const overlay = shallowRef<GlobeOverlay | null>(null);
@@ -118,10 +130,32 @@ function setTerrain(on: boolean): void {
   shapeChanged();
 }
 
+function clampK(k: number): number {
+  const n = Number(k);
+  if (!Number.isFinite(n)) return ui.k;
+  return Math.min(10, Math.max(1, Math.round(n * 10) / 10));
+}
+
+/** Overlay uniforms and shell refresh immediately. Terrain provider is not rebuilt (k is not in the DEM). */
 function setExaggeration(k: number): void {
-  ui.k = k;
-  if (geoUniforms) geoUniforms.uGeoK.value = k;
+  ui.k = clampK(k);
+  if (geoUniforms) geoUniforms.uGeoK.value = ui.k;
   shapeChanged();
+}
+
+/** During a slider drag, hold particle place-replays; 100 ms after the last input, or on pointerup, run one. */
+let exagPlaceTimer = 0;
+function onExagInput(ev: Event): void {
+  const v = Number((ev.target as HTMLInputElement).value);
+  setExaggeration(v);
+  atmos.value?.setParticlePlaceDeferred(true);
+  window.clearTimeout(exagPlaceTimer);
+  exagPlaceTimer = window.setTimeout(() => atmos.value?.setParticlePlaceDeferred(false), 100);
+}
+function onExagCommit(): void {
+  window.clearTimeout(exagPlaceTimer);
+  exagPlaceTimer = 0;
+  atmos.value?.setParticlePlaceDeferred(false);
 }
 
 function shapeChanged(): void {
@@ -232,6 +266,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   setTerrain(ui.terrain);
   setView("overview");
   applySky(themeClass.value);
+  removeAtmosphereTick = viewer.scene.postUpdate.addEventListener(() => applyNadirAtmosphere());
   status.value = "就绪";
   exposeApi(meta, ground);
   window.__globeReady = true;
@@ -279,8 +314,12 @@ onBeforeUnmount(() => {
 
 /** AtmosViewer's own onBeforeUnmount runs after this component's; tear the globe down after the layers. */
 function teardown(): void {
+  window.clearTimeout(exagPlaceTimer);
+  exagPlaceTimer = 0;
   const canvas = viewer?.scene?.canvas;
   const gl = canvas?.getContext("webgl2") ?? canvas?.getContext("webgl");
+  removeAtmosphereTick?.();
+  removeAtmosphereTick = undefined;
   overlay.value?.dispose();
   viewer?.destroy();
   const lose = gl?.getExtension("WEBGL_lose_context");
@@ -313,11 +352,19 @@ onUnmounted(teardown);
         <button type="button" :class="{ on: ui.style === 'vec' }" @click="setBasemap('vec')">矢量</button>
       </div>
       <label class="row"><input type="checkbox" :checked="ui.terrain" @change="setTerrain(($event.target as HTMLInputElement).checked)" /> 地形（自建 DEM）</label>
-      <label class="row">
-        垂直夸张
-        <select :value="ui.k" @change="setExaggeration(Number(($event.target as HTMLSelectElement).value))">
-          <option v-for="k in EXAGGERATIONS" :key="k" :value="k">{{ k }}×</option>
-        </select>
+      <label class="exag">
+        垂直夸张 {{ ui.k.toFixed(1) }}×
+        <input
+          type="range"
+          min="1"
+          max="10"
+          step="0.1"
+          :value="ui.k"
+          @input="onExagInput"
+          @pointerup="onExagCommit"
+          @pointercancel="onExagCommit"
+          @change="onExagCommit"
+        />
       </label>
       <label class="row"><input type="checkbox" :checked="ui.testLayer" @change="setTestLayer(($event.target as HTMLInputElement).checked)" /> 对齐测试图层</label>
       <div class="row">
@@ -366,6 +413,19 @@ onUnmounted(teardown);
   align-items: center;
   gap: 6px;
   margin: 6px 0;
+}
+.exag {
+  display: block;
+  margin: 6px 0;
+}
+.exag input {
+  display: block;
+  width: 100%;
+  margin: 3px 0 0;
+  accent-color: #5fd3e6;
+}
+.globe.light .exag input {
+  accent-color: #0f8aa3;
 }
 .row button {
   background: transparent;
