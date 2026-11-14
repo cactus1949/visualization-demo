@@ -10,6 +10,7 @@ import { dataBase as resolvedDataBase } from "../data/dataBase";
 import { AtmosScene, field2D, type Theme } from "../render/scene";
 import { floatRange, domainOf, textureUploadMs, type Domain } from "../render/fields";
 import { TimeFields, type TimeResource } from "../render/timeFields";
+import { particleRanges, type ParticleRanges } from "../render/particleRanges";
 import { timesOf } from "../data/manifest";
 import {
   advance as advanceTimeline,
@@ -1226,6 +1227,16 @@ function runLayerGl(work: () => void): void {
   else work();
 }
 
+/** Particle speed / w colour scales from the open encoding's manifest. */
+function currentParticleRanges(wMeta: { data_min: number; data_max: number }): ParticleRanges {
+  return particleRanges({
+    speedDisplay: displayRange(SPEED),
+    speedFallback: speedRangeA,
+    wDisplay: displayRange("w"),
+    wData: wMeta,
+  });
+}
+
 function ensureParticles(): void {
   if (particles || !host || !manifest.value || !timeFields?.wind.valid) return;
   const wMeta = manifest.value.variables.w;
@@ -1233,12 +1244,7 @@ function ensureParticles(): void {
   // The particles sample the blended "current time" wind target; it never needs rebinding.
   const texture = timeFields.wind.texture;
   if (timeFields.wind.firstUploadMs !== null) recordUpload("wind", timeFields.wind.firstUploadMs);
-  const wAbs = Math.max(Math.abs(wMeta.data_min), Math.abs(wMeta.data_max));
-  const colourSpeed = displayRange(SPEED) ?? speedRangeA();
-  const wDisplay = displayRange("w");
-  const wRange = wDisplay
-    ? Math.max(Math.abs(wDisplay[0]), Math.abs(wDisplay[1]))
-    : Math.max(0.05, wAbs * 0.6);
+  const { speedRange: colourSpeed, wRange } = currentParticleRanges(wMeta);
   const gv = globeMode ? globeOpt() : null;
   runLayerGl(() => {
     particles = new WindParticles(
@@ -2546,6 +2552,9 @@ function exposeApi(): void {
       runLayerGl(() => { r = particles?.sample() ?? []; });
       return r;
     },
+    /** particle colour scales: trail uColorRange as uploaded, plus the binding's speed / w ranges */
+    particleColorRange: () =>
+      particles ? { mode: particleParams.colorMode, ...particles.ranges, speedRangeRef: [...speedRange.value] } : null,
     sampleHistory: () => {
       let r: number[][] = [];
       runLayerGl(() => { r = particles?.sampleHistory() ?? []; });
@@ -3427,6 +3436,16 @@ async function reloadFormat(): Promise<void> {
   if (timeFields) for (const r of timeFields.scalars.values()) r.releaseOutside([]);
   // same t still looks "current" in speedShown; without this the speed target keeps the old format
   timeFields?.invalidate();
+  // the CPU speed cache is keyed by frame index only; the same t now means the new encoding
+  speedCache.frame = -1;
+  speedCache.values = null;
+  // particle colour scales come from the manifest just opened (manifest.value is the new one here)
+  const wMeta = store.manifest.variables.w;
+  if (wMeta) {
+    const r = currentParticleRanges(wMeta);
+    runLayerGl(() => particles?.setRanges(r.speedRange, r.wRange));
+    if (particles) speedRange.value = r.speedRange;
+  }
   wantsDirty = true;
   syncWants(performance.now());
   status.value = "就绪";

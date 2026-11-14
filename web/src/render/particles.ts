@@ -4,6 +4,7 @@ import { colormapTexture } from "./colormaps";
 import type { Domain } from "./fields";
 import type { GeoMap } from "../geo/mapping";
 import { placementKey } from "../geo/particlePlace";
+import { colorRangeUniform, type ParticleColorMode } from "./particleRanges";
 import {
   LOGDEPTH_FRAGMENT,
   LOGDEPTH_FRAGMENT_PARS,
@@ -29,7 +30,7 @@ import {
  * No CPU work per particle, no readbacks in the frame loop.
  */
 
-export type ColorMode = "speed" | "w" | "height" | "single";
+export type ColorMode = ParticleColorMode;
 
 export interface ParticleParams {
   count: number;
@@ -591,6 +592,28 @@ export class WindParticles {
     this.apply();
   }
 
+  /**
+   * Colour scales of the open encoding changed (in-place format switch): speed / w ranges
+   * come from the new manifest. Uniform-only, no reset of the particle state.
+   */
+  setRanges(speedRange: [number, number], wRange: number): void {
+    this.wind.speedRange = [speedRange[0], speedRange[1]];
+    this.wind.wRange = wRange;
+    this.applyColorRange();
+  }
+
+  /** Current speed / w colour scales (debug readback). */
+  get ranges(): { speedRange: [number, number]; wRange: number; uColorRange: [number, number, number] } {
+    const v = this.trailMaterial.uniforms.uColorRange.value as THREE.Vector3;
+    return { speedRange: [...this.wind.speedRange], wRange: this.wind.wRange, uColorRange: [v.x, v.y, v.z] };
+  }
+
+  /** uColorRange for the current colour mode; height / single leave it untouched. */
+  private applyColorRange(): void {
+    const r = colorRangeUniform(this.params.colorMode, this.wind);
+    if (r) (this.trailMaterial.uniforms.uColorRange.value as THREE.Vector3).set(r[0], r[1], r[2]);
+  }
+
   private apply(): void {
     const p = this.params;
     const sim = this.simMaterial.uniforms;
@@ -610,12 +633,7 @@ export class WindParticles {
     trail.uColormap.value = colormapTexture(p.colormap);
     const modes: Record<ColorMode, number> = { speed: 0, w: 1, height: 2, single: 3 };
     trail.uColorMode.value = modes[p.colorMode];
-    if (p.colorMode === "speed") {
-      const [lo, hi] = this.wind.speedRange;
-      trail.uColorRange.value.set(this.wind.maxSpeed, lo, hi);
-    } else if (p.colorMode === "w") {
-      trail.uColorRange.value.set(this.wind.wRange, 0, 0);
-    }
+    this.applyColorRange();
     (trail.uSingle.value as THREE.Color).set(p.color);
     this.trailMaterial.blending = p.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
     // only draw the segments that are inside the requested trail length
