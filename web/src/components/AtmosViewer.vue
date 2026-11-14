@@ -2247,7 +2247,8 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   boxStack?.material.setRoot(atmos.root);
   if (particles) {
     particles.object.visible = layers.particles;
-    if (layers.particles) runLayerGl(() => particles!.step(dt));
+    // globe k-slider: skip step while dragging so placeHistory does not replay every layer each frame
+    if (layers.particles && !particlePlaceDeferred) runLayerGl(() => particles!.step(dt));
   }
   if (volume?.mesh.visible) {
     updateDepthOccluders();
@@ -3458,7 +3459,13 @@ watch(() => props.format.id, (id, prev) => {
   void reloadFormat();
 });
 
-defineExpose({ snapshot, refreshShell, globeVolumeInfo, theme: computed(() => view.theme) });
+/** Globe k-slider: while true, afterCamera does not call particles.step (no 64-layer re-place). */
+let particlePlaceDeferred = false;
+function setParticlePlaceDeferred(on: boolean): void {
+  particlePlaceDeferred = on;
+}
+
+defineExpose({ snapshot, refreshShell, globeVolumeInfo, setParticlePlaceDeferred, theme: computed(() => view.theme) });
 
 onMounted(() => void start());
 onBeforeUnmount(() => {
@@ -3985,6 +3992,15 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(10px);
   font-variant-numeric: tabular-nums;
 }
+/* leave a gap before GlobeViewer's left panel (right: 328px, width: 210px) */
+.viewer.globe .hud {
+  max-width: calc(100% - 566px);
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.viewer.globe .hud span {
+  max-width: 100%;
+}
 .hud b {
   font-size: 14px;
   white-space: nowrap;
@@ -4051,6 +4067,21 @@ onBeforeUnmount(() => {
   font-size: 11px;
   white-space: nowrap;
   pointer-events: none;
+}
+/* globe Cesium controls make this line much longer; wrap so 1280 (and 1024) show all of it.
+   box tabs keep nowrap and the same single-line layout.
+   left:50% + max-width shrinks to the remaining 50%, so pin both sides instead
+   (right: 326px leaves a 12 px gap before the 300 px layer panel). */
+.viewer.globe .hint {
+  left: 16px;
+  right: 326px;
+  width: auto;
+  transform: none;
+  max-width: none;
+  white-space: normal;
+  text-align: center;
+  line-height: 1.45;
+  box-sizing: border-box;
 }
 .hint.above-timeline {
   bottom: 84px;
