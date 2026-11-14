@@ -275,6 +275,9 @@ function start({ meta, dem, ground }: GeoFoundation): void {
     infoBox: false,
     selectionIndicator: false,
     fullscreenButton: false,
+    // Cesium CompositeOITFS compares opaque to czm_backgroundColor exactly.
+    // Dark theme #000000 makes that test drop the globe at steep pitches; disable OIT.
+    orderIndependentTranslucency: false,
     terrainProvider: terrains.provider(false),
   });
   viewer.scene.verticalExaggeration = 1;
