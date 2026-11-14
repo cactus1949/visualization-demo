@@ -27,13 +27,25 @@ import { shellBounds } from "../geo/mapping";
 import { groundSampler } from "../geo/placement";
 import { depthModeFromQuery, type GlobeDepthMode } from "../globe/depthMode";
 import { VIEWS } from "../globe/viewPresets";
+import { JulianDate } from "cesium";
+import { SKY_KEYS, SkyDebugState, normalizeSkyValue, skyKey, type SkyKey, type SkyTarget, type SkyValue } from "../globe/skyDebug";
 
 declare global {
   interface Window {
     __globeReady?: boolean;
-    __globeApi?: Record<string, (...args: any[]) => unknown>;
+    __globeApi?: GlobeApi;
   }
 }
+
+/** Debug-only (dev or ?globeDebug=1): window.__globeApi.sky, see globe/skyDebug.ts. */
+interface SkyDebugApi {
+  keys: readonly SkyKey[];
+  set(key: string, value: unknown): unknown;
+  clear(key: string): unknown;
+  reset(): unknown;
+  status(): unknown;
+}
+type GlobeApi = { [name: string]: ((...args: any[]) => unknown) | SkyDebugApi | undefined; sky?: SkyDebugApi };
 
 const props = defineProps<{ format?: FormatDef }>();
 const emit = defineEmits<{ "switch-format": [id: string] }>();
@@ -86,6 +98,7 @@ watch(themeClass, (theme) => applySky(theme));
 let viewer: Viewer | null = null;
 let terrains: TerrainSwitch | null = null;
 let removeAtmosphereTick: (() => void) | undefined;
+let removeSkyDebug: (() => void) | undefined;
 let outline: PolylineCollection | null = null;
 let geoUniforms: GeoUniforms | null = null;
 const overlay = shallowRef<GlobeOverlay | null>(null);
@@ -303,7 +316,111 @@ function exposeApi(meta: GeoFoundation["meta"], ground: GeoFoundation["ground"])
     },
     benchFrames: (n = 30) => o.benchFrames(n),
     volumeInfo: () => ({ ...atmos.value?.globeVolumeInfo(), depthEncoding: o.depthEncoding, k: ui.k, terrain: ui.terrain, near: o.camera.near, far: o.camera.far }),
+    sky: skyDebugApi(viewer!),
   });
+}
+
+/**
+ * Sticky sky / atmosphere overrides for bisecting the dark top-view black basemap on a real GPU.
+ * The app rewrites atmosphere each frame (postUpdate today, preRender in #24) and background /
+ * skyBox / moon on theme change; these listeners are registered after the app's, on both
+ * postUpdate and preRender, so the table is the last word right before Cesium draws.
+ */
+function skyDebugApi(v: Viewer): SkyDebugApi {
+  const scene = v.scene;
+  const colors = new Map<string, Color>();
+  const cssColor = (css: string) => {
+    let c = colors.get(css);
+    if (!c) {
+      c = Color.fromCssColorString(css);
+      if (c) colors.set(css, c);
+    }
+    return c;
+  };
+  const target: SkyTarget = {
+    read: (k) => {
+      switch (k) {
+        case "skyAtmosphere": return scene.skyAtmosphere?.show;
+        case "groundAtmosphere": return scene.globe.showGroundAtmosphere;
+        case "skyBox": return scene.skyBox?.show;
+        case "moon": return scene.moon?.show;
+        case "backgroundColor": return scene.backgroundColor.toCssHexString();
+        case "dynamicAtmosphereLighting": return scene.globe.dynamicAtmosphereLighting;
+        case "dynamicAtmosphereLightingFromSun": return scene.globe.dynamicAtmosphereLightingFromSun;
+      }
+    },
+    write: (k, x: SkyValue) => {
+      switch (k) {
+        case "skyAtmosphere": if (scene.skyAtmosphere) scene.skyAtmosphere.show = x as boolean; break;
+        case "groundAtmosphere": scene.globe.showGroundAtmosphere = x as boolean; break;
+        case "skyBox": if (scene.skyBox) scene.skyBox.show = x as boolean; break;
+        case "moon": if (scene.moon) scene.moon.show = x as boolean; break;
+        case "backgroundColor": scene.backgroundColor = cssColor(x as string) ?? scene.backgroundColor; break;
+        case "dynamicAtmosphereLighting": scene.globe.dynamicAtmosphereLighting = x as boolean; break;
+        case "dynamicAtmosphereLightingFromSun": scene.globe.dynamicAtmosphereLightingFromSun = x as boolean; break;
+      }
+    },
+  };
+  const state = new SkyDebugState();
+  let frame = 0;
+  let lastFrame: { frame: number; pitchDeg: number } | null = null;
+  let lastRendered: Record<SkyKey, SkyValue | null> | null = null;
+  const apply = () => {
+    if (Object.keys(state.overrides).length) state.apply(target);
+  };
+  const offPostUpdate = scene.postUpdate.addEventListener(apply);
+  const offPreRender = scene.preRender.addEventListener(() => {
+    frame++;
+    lastFrame = { frame, pitchDeg: CMath.toDegrees(v.camera.pitch) };
+    apply();
+  });
+  // what the frame that was just drawn actually used
+  const offPostRender = scene.postRender.addEventListener(() => { lastRendered = state.read(target); });
+  removeSkyDebug = () => { offPostUpdate(); offPreRender(); offPostRender(); };
+
+  const status = () => {
+    const cam = v.camera;
+    return {
+      ...state.read(target),
+      pitchDeg: CMath.toDegrees(cam.pitch),
+      headingDeg: CMath.toDegrees(cam.heading),
+      heightM: cam.positionCartographic.height,
+      lastFrame,
+      lastRendered,
+      enableLighting: scene.globe.enableLighting,
+      clockUtc: JulianDate.toDate(v.clock.currentTime).toISOString(),
+      globeShow: scene.globe.show,
+      tilesLoaded: scene.globe.tilesLoaded,
+      theme: themeClass.value,
+      overrides: { ...state.overrides },
+      saved: { ...state.saved },
+      appliedFrames: state.applied,
+    };
+  };
+  return {
+    keys: SKY_KEYS,
+    set: (key, value) => {
+      const k = skyKey(key);
+      state.set(k, normalizeSkyValue(k, value, (css) => cssColor(css) !== undefined), target);
+      scene.requestRender();
+      return status();
+    },
+    clear: (key) => {
+      state.clear(skyKey(key), target);
+      applySky(themeClass.value);
+      state.apply(target); // the keys still overridden win over applySky
+      scene.requestRender();
+      return status();
+    },
+    reset: () => {
+      state.reset(target);
+      // let the app's own theme / nadir logic decide again
+      applySky(themeClass.value);
+      scene.requestRender();
+      return status();
+    },
+    status,
+  };
 }
 
 onBeforeUnmount(() => {
@@ -320,6 +437,8 @@ function teardown(): void {
   const gl = canvas?.getContext("webgl2") ?? canvas?.getContext("webgl");
   removeAtmosphereTick?.();
   removeAtmosphereTick = undefined;
+  removeSkyDebug?.();
+  removeSkyDebug = undefined;
   overlay.value?.dispose();
   viewer?.destroy();
   const lose = gl?.getExtension("WEBGL_lose_context");
