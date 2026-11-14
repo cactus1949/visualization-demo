@@ -53,6 +53,7 @@ Cesium 没有公开接口，`globe/overlay.ts` 直接用了 `scene.context` 上�
 ## 体渲染（PR ③）
 
 - 地球 tab 是 `GlobeViewer.vue` 里套一个 `AtmosViewer`（Cesium 宿主 + `globeVolume`），面板、时间轴、过滤、色带、图例与前两个 tab 是同一套代码。地球面板（底图、地形、夸张、视角）在它左边。
+- 视角预设在 `globe/viewPresets.ts`（`[u, v, heading, pitch, range]`，Cesium lookAt 目标点在格网 (u, v) 地面）。「西南角」看向域内 u = v = 0.3，heading 45°、pitch −25°、range 4500 m，相机在域内上空约 (0.14, 0.14)、1.9 km，近景就是域内；不随 k 变（k = 1–3 时高于最高建筑，k 很大时高楼会高过相机）。总览、俯视不变。
 - 打开时默认：体渲染关、垂直夸张 3×（左侧面板的 k，只乘离地高度），与前两个 tab 对齐；粒子默认开（⑤ 已接入）。
 - 顶栏「当前编码 / SZ3」回到对应的盒体 tab；地球页左侧面板的「编码」切换会留在地球 tab，并保持夸张、地形、相机和剖面（该控件可单独删掉）。
 - 弯壳步进（`render/volume.ts` 的弯壳着色器）：光线在中心 ENU 里是直线，包围盒由 `geo/mapping.ts` 的 `shellBounds` 用精确 float64 坐标在 41×41 个 (u, v) 上取地面和顶面再外扩 20 m，域四角因地球曲率比中心低约 13 m，已算在盒里。每一步 `geoInverse`（ENU → u, v, h），`AGL = (h − 地形开关 × g(u, v)) / k`，按与盒体相同的节点 / 层中心约定采样；过滤窗口、透明阈值、低值渐显、色带都与盒体一致；每步不透明度按「去掉夸张后的公里数」算，所以 k 和步数改变时浓淡一致。裁切用 (u, AGL 比例, v)，z 方向与盒体一样从北往南。
