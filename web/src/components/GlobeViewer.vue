@@ -314,6 +314,8 @@ onBeforeUnmount(() => {
 
 /** AtmosViewer's own onBeforeUnmount runs after this component's; tear the globe down after the layers. */
 function teardown(): void {
+  window.clearTimeout(exagPlaceTimer);
+  exagPlaceTimer = 0;
   const canvas = viewer?.scene?.canvas;
   const gl = canvas?.getContext("webgl2") ?? canvas?.getContext("webgl");
   removeAtmosphereTick?.();
@@ -361,7 +363,6 @@ onUnmounted(teardown);
           @input="onExagInput"
           @pointerup="onExagCommit"
           @pointercancel="onExagCommit"
-          @keyup.enter="onExagCommit"
           @change="onExagCommit"
         />
       </label>

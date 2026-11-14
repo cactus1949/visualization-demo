@@ -4070,10 +4070,12 @@ onBeforeUnmount(() => {
 }
 /* globe Cesium controls make this line much longer; wrap so 1280 (and 1024) show all of it.
    box tabs keep nowrap and the same single-line layout.
-   left:50% + max-width shrinks to the remaining 50%, so pin both sides instead
-   (right: 326px leaves a 12 px gap before the 300 px layer panel). */
+   left starts after the left legend column (~16 + 220 min-width + padding, measured right edge 236)
+   so the taller wrapped hint does not cover ticks / colour bars. right: 326px leaves a 12 px
+   gap before the 300 px layer panel. At 1600 the remaining width is less than the one-line
+   1530 px, so it may wrap to two lines; the text stays fully visible. */
 .viewer.globe .hint {
-  left: 16px;
+  left: 248px;
   right: 326px;
   width: auto;
   transform: none;
