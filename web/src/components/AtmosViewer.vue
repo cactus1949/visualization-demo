@@ -3678,7 +3678,7 @@ onBeforeUnmount(() => {
         </template>
       </details>
 
-      <details v-if="!globeMode" open>
+      <details open>
         <summary>
           粒子样式 <em>{{ particleParams.count.toLocaleString() }}</em>
         </summary>
