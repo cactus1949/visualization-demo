@@ -28,7 +28,9 @@
 | `setCameraControl(on)` | 拖手柄 / 画框时关掉相机交互 |
 | `setDrawMode(on)` | 绘制模式下左键让给绘制、右键旋转 |
 | `capturePointer(id)` / `releasePointer(id)` | 拖动期间的指针捕获（未捕获时 release 是空操作） |
-| `getView()` / `setView(pos, target)` | 相机位置和注视点（`snapshot()`、`setCamera`、视角预设、切 tab 保留视角都走这里） |
+| `getView()` / `setView(pos, target)` | 相机位置和注视点（`snapshot()`、`setCamera`、视角预设、切 tab 保留视角、右下角复位都走这里） |
+| `zoomBy(scale)` | 距离乘 `scale`（小于 1 靠近）。盒体夹在轨道控件的最近/最远距离；地球沿视线按屏幕中心到地表的距离走，最近 80 m |
+| `faceNorth()` | 地理北朝屏幕上方，注视点和俯仰不变。盒体把相机挪到注视点正南；地球绕屏幕中心地表点转航向 |
 | `dispose()` | 停循环、断 ResizeObserver、释放控件和 renderer |
 | `isolateGl?(work)` | 可选。图层在绘制 pass 之外做的 GL 工作（粒子模拟 / 放置 pass、调试读回）放进来；Cesium 宿主前后 `resetState()` 并复位 Cesium 的状态缓存，盒体宿主不实现，调用方直接执行 |
 
@@ -48,7 +50,7 @@
 - 每帧在 `scene.postRender` 里：`beforeCamera` → RTC 相机同步（代替 `controls.update()`）→ `afterCamera` → 清深度、画只写深度的地形代理、宿主自己的测试图层、图层场景 → `afterRender` → `resetState()` 并把 Cesium 缓存的渲染状态设回默认。
 - 帧外 GL：数据回调里的 TimeFields 上传 / 混合不在 `postRender` 里，所以 `scene.preRender` 上也做一次 `resetState()` + 复位 Cesium 缓存，Cesium 每帧开始时都按真实 GL 状态重设。
 - 相机：`matrixAutoUpdate` 和 `matrixWorldAutoUpdate` 都关掉，RTC 同步写 `matrixWorld`，同时分解进 `position / quaternion`（体渲染用 `camera.position` 当光线起点）。`afterCamera` 里的 `camera.updateMatrixWorld()` 因此不会覆盖它。near / far 只由宿主按图层包围球设置，钩子不改。
-- `setCameraControl` 对应 `screenSpaceCameraController.enableInputs`；`setDrawMode` 为空操作；`getView / setView` 在 ENU 单位和 Cesium 相机之间换算。
+- `setCameraControl` 对应 `screenSpaceCameraController.enableInputs`；`setDrawMode` 为空操作；`getView / setView` 在 ENU 单位和 Cesium 相机之间换算。`zoomBy` 用 `camera.zoomIn / zoomOut`；`faceNorth` 对屏幕中心的地表交点 `lookAt` 到航向 0，再 `lookAtTransform(IDENTITY)` 解开锁定。
 - `dispose` 只释放宿主自己的对象和 three 渲染器，Viewer 由 `GlobeViewer.vue` 在图层卸载之后销毁。
 
 ## 图层怎么挂

@@ -3,6 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { FrameHooks, ViewHost } from "./types";
 import { applyLayerRendererConfig, beginLayerFrame } from "./rendererConfig";
 import { withHidden } from "./hidden";
+import { scaledOffset, southOfTarget } from "./viewMotion";
 
 export type ThreeHostOptions = {
   initialView?: { position: [number, number, number]; target: [number, number, number] } | null;
@@ -126,6 +127,21 @@ export function createThreeHost(
     setView(position, target) {
       camera.position.set(...position);
       controls.target.set(...target);
+      controls.update();
+    },
+    zoomBy(scale) {
+      const offset = camera.position.clone().sub(controls.target);
+      const next = scaledOffset([offset.x, offset.y, offset.z], scale, controls.minDistance, controls.maxDistance);
+      camera.position.set(controls.target.x + next[0], controls.target.y + next[1], controls.target.z + next[2]);
+      controls.update();
+    },
+    faceNorth() {
+      const next = southOfTarget(
+        [camera.position.x, camera.position.y, camera.position.z],
+        [controls.target.x, controls.target.y, controls.target.z],
+      );
+      if (!next) return;
+      camera.position.set(next[0], next[1], next[2]);
       controls.update();
     },
     dispose() {

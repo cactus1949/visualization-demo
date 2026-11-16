@@ -42,6 +42,10 @@ export interface ViewHost {
   getView(): { position: [number, number, number]; target: [number, number, number] };
   /** Sets the camera position and orbit target, then updates controls. */
   setView(position: [number, number, number], target: [number, number, number]): void;
+  /** Multiplies distance to the look point. `scale` < 1 moves closer. */
+  zoomBy(scale: number): void;
+  /** Turns the view so geographic north is up, keeping the look point and tilt. */
+  faceNorth(): void;
   /** Stops the loop and releases host resources. */
   dispose(): void;
   /**

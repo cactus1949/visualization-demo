@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch 
 import * as THREE from "three";
 import type { ViewHost } from "../host/types";
 import { createThreeHost } from "../host/threeHost";
+import { clonePose, northScreenDeg, type CameraPose } from "../host/viewMotion";
 import type { Manifest, VariableMeta } from "../data/manifest";
 import { loadFormats, type FormatDef } from "../formats/types";
 import { DataStore } from "../data/store";
@@ -79,6 +80,7 @@ import ProfileChart from "./ProfileChart.vue";
 import RangeSlider from "./RangeSlider.vue";
 import UnfoldedPlot from "./UnfoldedPlot.vue";
 import TimelineBar from "./TimelineBar.vue";
+import ViewTools from "./ViewTools.vue";
 
 export type ViewSnapshot = {
   t: number;
@@ -103,6 +105,8 @@ const props = withDefaults(defineProps<{
   globeVolume?: CurvedVolumeOptions | null;
   /** Globe tab: cartographic position under the pointer. Box tabs use the ground plane instead. */
   pickLonLat?: (clientX: number, clientY: number) => { lon: number; lat: number } | null;
+  /** Pose to restore with the home button. Globe passes the overview snapshot; the box tab uses its own startup view. */
+  homeView?: CameraPose | null;
 }>(), {
   manifestUrl: "",
   showPanel: true,
@@ -110,6 +114,7 @@ const props = withDefaults(defineProps<{
   initialView: null,
   createHost: undefined,
   globeVolume: null,
+  homeView: null,
 });
 const globeMode = props.globeVolume != null;
 const viewerRoot = ref<HTMLDivElement | null>(null);
@@ -2273,6 +2278,69 @@ function snapshot(): ViewSnapshot {
   };
 }
 
+const ZOOM_IN = 0.8;
+const ZOOM_OUT = 1.25;
+/** 打开这一屏时的相机。复位只恢复它，不动图层。 */
+let homePose: CameraPose | null = null;
+const compassDeg = ref(0);
+const compassRight: [number, number, number] = [1, 0, 0];
+const compassUp: [number, number, number] = [0, 1, 0];
+const fullscreen = ref(false);
+
+function rememberHome(): void {
+  if (props.homeView) homePose = clonePose(props.homeView);
+  else if (host) homePose = clonePose(host.getView());
+}
+
+function resetHomeView(): void {
+  if (!host || !homePose) return;
+  host.setView(homePose.position, homePose.target);
+}
+
+function zoomView(scale: number): void {
+  host?.zoomBy(scale);
+}
+
+function faceNorth(): void {
+  host?.faceNorth();
+}
+
+function updateCompass(): void {
+  const cam = host?.camera;
+  if (!cam) return;
+  const e = cam.matrixWorld.elements;
+  compassRight[0] = e[0]!;
+  compassRight[1] = e[1]!;
+  compassRight[2] = e[2]!;
+  compassUp[0] = e[4]!;
+  compassUp[1] = e[5]!;
+  compassUp[2] = e[6]!;
+  const north: [number, number, number] = globeMode ? [0, 1, 0] : [0, 0, -1];
+  const deg = Math.round(northScreenDeg(compassRight, compassUp, north));
+  if (deg !== compassDeg.value) compassDeg.value = deg;
+}
+
+/**
+ * 全屏目标必须包住真正的画布。地球页的 Cesium 画布是这个叠加层的兄弟节点，
+ * 只全屏叠加层会得到一块黑屏，缩放和复位都画不回来。
+ */
+function fullscreenRoot(): HTMLElement | null {
+  const el = viewerRoot.value;
+  if (!el) return null;
+  return (el.closest(".shell") as HTMLElement | null) ?? el;
+}
+
+function syncFullscreen(): void {
+  fullscreen.value = document.fullscreenElement === fullscreenRoot();
+}
+
+function toggleFullscreen(): void {
+  const el = fullscreenRoot();
+  if (!el) return;
+  if (document.fullscreenElement) void document.exitFullscreen();
+  else void el.requestFullscreen();
+}
+
 function setView(name: string): void {
   const preset = VIEWS[name] ?? VIEWS.overview;
   host!.setView(preset.pos, preset.target);
@@ -2314,6 +2382,7 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   atmos.root.scale.y = globeMode ? 1 : view.exaggeration;
   atmos.root.updateMatrixWorld();
   host!.camera.updateMatrixWorld();
+  updateCompass();
   if (boxStack?.group.visible) {
     const camBox = globeMode && globeOpt()
       ? enuToBox(atmos.root.worldToLocal(camBoxTmp.copy(host!.camera.position)), camBoxTmp)
@@ -3126,6 +3195,7 @@ async function start(): Promise<void> {
   } else if (!globeMode) {
     setView("overview");
   }
+  rememberHome();
   const el = host!.element;
   pointerTarget = el;
   for (const [name, listener] of pointerListeners()) el.addEventListener(name, listener);
@@ -3548,9 +3618,13 @@ function setParticlePlaceDeferred(on: boolean): void {
 
 defineExpose({ snapshot, refreshShell, globeVolumeInfo, setParticlePlaceDeferred, theme: computed(() => view.theme) });
 
-onMounted(() => void start());
+onMounted(() => {
+  document.addEventListener("fullscreenchange", syncFullscreen);
+  void start();
+});
 onBeforeUnmount(() => {
   disposed = true;
+  document.removeEventListener("fullscreenchange", syncFullscreen);
   // the Cesium canvas outlives this component: remove exactly what start() added
   if (pointerTarget) for (const [name, listener] of pointerListeners()) pointerTarget.removeEventListener(name, listener);
   pointerTarget = null;
@@ -3601,6 +3675,17 @@ onBeforeUnmount(() => {
     <LonLatReadout v-if="cursor" :lon="cursor.lon" :lat="cursor.lat" />
 
     <TimelineBar v-if="showTimeline" :tl="tl" :theme="view.theme" @change="onTimelineChange" />
+
+    <ViewTools
+      :class="{ 'panel-open': panelOpen, raised: showTimeline }"
+      :compass-deg="compassDeg"
+      :fullscreen="fullscreen"
+      @reset="resetHomeView"
+      @zoom-in="zoomView(ZOOM_IN)"
+      @zoom-out="zoomView(ZOOM_OUT)"
+      @north="faceNorth"
+      @fullscreen="toggleFullscreen"
+    />
 
     <ProfileChart
       v-if="layers.probe && probe"
@@ -4041,8 +4126,26 @@ onBeforeUnmount(() => {
 .viewer.globe .panel,
 .viewer.globe .open-panel,
 .viewer.globe .timeline,
-.viewer.globe .profile-box {
+.viewer.globe .profile-box,
+.viewer.globe .view-tools {
   pointer-events: auto;
+}
+.view-tools {
+  position: absolute;
+  z-index: 7;
+  right: 16px;
+  bottom: 18px;
+}
+.view-tools.panel-open {
+  right: 328px;
+}
+.view-tools.panel-open.raised {
+  bottom: 96px;
+}
+@media (max-width: 1100px) {
+  .view-tools.raised {
+    bottom: 96px;
+  }
 }
 .viewer.light {
   --card: rgba(250, 252, 255, 0.82);

@@ -27,6 +27,13 @@ button {
   width: 100%;
   height: 100%;
 }
+.shell:fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #07111f;
+}
 .shell-view {
   flex: 1;
   min-height: 0;

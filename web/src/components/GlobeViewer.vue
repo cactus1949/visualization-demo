@@ -26,6 +26,7 @@ import { shellBounds } from "../geo/mapping";
 import { groundSampler } from "../geo/placement";
 import { depthModeFromQuery, type GlobeDepthMode } from "../globe/depthMode";
 import { VIEWS } from "../globe/viewPresets";
+import { clonePose, type CameraPose } from "../host/viewMotion";
 import { JulianDate } from "cesium";
 import { SKY_KEYS, SkyDebugState, normalizeSkyValue, skyKey, type SkyKey, type SkyTarget, type SkyValue } from "../globe/skyDebug";
 
@@ -55,6 +56,8 @@ const emit = defineEmits<{
 
 const host = ref<HTMLDivElement | null>(null);
 const atmos = ref<InstanceType<typeof AtmosViewer> | null>(null);
+/** 打开地球页时的视角，右下角复位按钮回到这里，不跟随后续拖动。 */
+const homeView = shallowRef<CameraPose | null>(null);
 const status = ref("加载地理底座…");
 const error = ref<string | null>(null);
 const tileErrors = ref(0);
@@ -314,6 +317,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   setExaggeration(ui.k);
   setTerrain(ui.terrain);
   setView("overview");
+  homeView.value = clonePose(overlay.value!.getView());
   applySky(themeClass.value);
   removeAtmosphereTick = viewer.scene.preRender.addEventListener(() => applyNadirAtmosphere());
   status.value = "就绪";
@@ -498,6 +502,7 @@ onUnmounted(teardown);
       :format="props.format"
       :globe-volume="volumeOptions"
       :pick-lon-lat="pickLonLat"
+      :home-view="homeView"
       :create-host="() => overlay!"
       @set-format="emit('set-format', $event)"
       @set-cesium="emit('set-cesium', $event)"

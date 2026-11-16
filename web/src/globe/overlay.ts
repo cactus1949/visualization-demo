@@ -10,7 +10,7 @@
  * work layers do outside the frame (TimeFields uploads / blends from data callbacks) can't leave
  * Cesium with a stale cache. Recheck on Cesium upgrades (docs/globe-geo.md).
  */
-import { Cartesian3, Matrix4, type Scene as CesiumScene } from "cesium";
+import { Cartesian2, Cartesian3, HeadingPitchRange, Matrix4, type Scene as CesiumScene } from "cesium";
 import { Group, Mesh, PerspectiveCamera, Raycaster, Scene, Vector2, WebGLRenderer, type Material, type Object3D, type WebGLRenderTarget } from "three";
 import type { GeoMap } from "../geo/mapping";
 import { DepthProxy } from "./depthProxy";
@@ -19,6 +19,7 @@ import { DEFAULT_DEPTH_MODE, depthEncodingOf, depthModeFromQuery, type Box3Like,
 import { applyLayerRendererConfig, beginLayerFrame } from "../host/rendererConfig";
 import { withHidden } from "../host/hidden";
 import type { FrameHooks, ViewHost } from "../host/types";
+import { zoomTravelM } from "../host/viewMotion";
 
 export type DepthEncoding = ViewHost["depthEncoding"];
 
@@ -220,6 +221,41 @@ export class GlobeOverlay implements ViewHost {
     const right = Cartesian3.normalize(Cartesian3.cross(direction, up, new Cartesian3()), new Cartesian3());
     const trueUp = Cartesian3.cross(right, direction, new Cartesian3());
     this.cesium.camera.setView({ destination: p, orientation: { direction, up: trueUp } });
+  }
+
+  /** 沿视线靠近（scale < 1）或远离。步长按屏幕中心到地表的距离，最近 80 m。 */
+  zoomBy(scale: number): void {
+    const travel = zoomTravelM(this.lookRangeM(), scale, 80, 2.5e7);
+    const cam = this.cesium.camera;
+    if (travel > 0.5) cam.zoomIn(travel);
+    else if (travel < -0.5) cam.zoomOut(-travel);
+  }
+
+  /** 绕屏幕中心的地表点转到正北，俯仰和距离保持不变。看不到地表时只改航向。 */
+  faceNorth(): void {
+    const cam = this.cesium.camera;
+    const hit = this.lookHit();
+    if (hit) {
+      const range = Math.max(Cartesian3.distance(cam.positionWC, hit), 80);
+      cam.lookAt(hit, new HeadingPitchRange(0, cam.pitch, range));
+      cam.lookAtTransform(Matrix4.IDENTITY);
+      return;
+    }
+    cam.setView({ orientation: { heading: 0, pitch: cam.pitch, roll: 0 } });
+  }
+
+  /** 屏幕中心射线与地球的交点；没有交点时返回 undefined。 */
+  private lookHit(): Cartesian3 | undefined {
+    const cam = this.cesium.camera;
+    const ray = cam.getPickRay(new Cartesian2(this.element.clientWidth / 2, this.element.clientHeight / 2));
+    return ray ? this.cesium.globe.pick(ray, this.cesium) : undefined;
+  }
+
+  private lookRangeM(): number {
+    const cam = this.cesium.camera;
+    const hit = this.lookHit();
+    if (hit) return Cartesian3.distance(cam.positionWC, hit);
+    return cam.positionCartographic.height;
   }
 
   private toEcef(p: [number, number, number]): Cartesian3 {
