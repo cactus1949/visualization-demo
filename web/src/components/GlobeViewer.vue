@@ -1,15 +1,14 @@
 <script setup lang="ts">
 /**
- * Third tab "地球": Cesium globe (Tianditu imagery, optional self-built terrain) with the data layers
- * of AtmosViewer drawn by three.js in the same WebGL context through the Cesium ViewHost
- * (globe/overlay.ts). PR ③: the volume runs on the curved shell. PR ⑥: probe, height labels,
- * buildings, ground and legends are on this tab; sections (④) and particles (⑤) stay off.
+ * Cesium globe (`?format=sz3&tab=globe`): Tianditu imagery, optional self-built terrain, with the
+ * data layers of AtmosViewer drawn by three.js in the same WebGL context through the Cesium ViewHost
+ * (globe/overlay.ts). The volume runs on the curved shell. Probe, height labels, buildings, ground
+ * and legends are on this view.
  */
 import { computed, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
 import { Cartesian3, Color, Ellipsoid, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
-import GlobeFormatSwitch from "./GlobeFormatSwitch.vue";
 import type { FormatDef } from "../formats/types";
 import type { CurvedVolumeOptions } from "../render/volume";
 import { GeoDecodeError, geoBaseUrl, lastDecodeMs, lastDecodeWhere, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
@@ -48,11 +47,10 @@ interface SkyDebugApi {
 type GlobeApi = { [name: string]: ((...args: any[]) => unknown) | SkyDebugApi | undefined; sky?: SkyDebugApi };
 
 const props = defineProps<{ format?: FormatDef }>();
-const emit = defineEmits<{ "switch-format": [id: string] }>();
-
-function onSwitchFormat(id: string): void {
-  emit("switch-format", id);
-}
+const emit = defineEmits<{
+  "set-format": [id: string];
+  "set-cesium": [on: boolean];
+}>();
 
 
 const host = ref<HTMLDivElement | null>(null);
@@ -483,9 +481,15 @@ onUnmounted(teardown);
       :format="props.format"
       :globe-volume="volumeOptions"
       :create-host="() => overlay!"
+      @set-format="emit('set-format', $event)"
+      @set-cesium="emit('set-cesium', $event)"
     />
     <aside class="globe-panel">
-      <GlobeFormatSwitch :model-value="props.format?.id ?? ''" @update:model-value="onSwitchFormat" />
+      <!-- Geo failed before AtmosViewer mounted: keep the same switches so this page can be left. -->
+      <template v-if="error">
+        <label class="row"><input type="checkbox" :checked="props.format?.id === 'sz3'" @change="emit('set-format', ($event.target as HTMLInputElement).checked ? 'sz3' : 'current')" /> SZ3</label>
+        <label class="row"><input type="checkbox" checked @change="emit('set-cesium', ($event.target as HTMLInputElement).checked)" /> Cesium</label>
+      </template>
       <div class="row">
         <span>底图</span>
         <button type="button" :class="{ on: ui.style === 'img' }" @click="setBasemap('img')">影像</button>
@@ -506,11 +510,9 @@ onUnmounted(teardown);
           @change="onExagCommit"
         />
       </label>
-      <label class="row"><input type="checkbox" :checked="ui.testLayer" @change="setTestLayer(($event.target as HTMLInputElement).checked)" /> 对齐测试图层</label>
       <div class="row">
         <span>视角</span>
         <button type="button" @click="setView('overview')">总览</button>
-        <button type="button" @click="setView('corner')">西南角</button>
         <button type="button" @click="setView('top')">俯视</button>
       </div>
       <p v-if="source === 'esri-dev'" class="warn">开发用 Esri 影像（仅 vite dev），正式版用天地图</p>

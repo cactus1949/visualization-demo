@@ -1,7 +1,7 @@
 /**
- * One entry of the top menu = one export format, read from `$WEB_ROOT/<id>/yyyymm/yyyymmdd/`.
+ * One export format, read from `$WEB_ROOT/<id>/yyyymm/yyyymmdd/`.
  * Every `formats/*.ts` file (except this one) default-exports a FormatDef; App.vue picks them
- * up with import.meta.glob, so deleting a file removes its menu entry.
+ * up with import.meta.glob, so deleting a file removes that format.
  */
 export interface FormatDef {
   /** directory name under $WEB_ROOT and value of `?format=` */

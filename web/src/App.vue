@@ -3,16 +3,17 @@ import { ref, computed, defineAsyncComponent } from "vue";
 import AtmosViewer, { type ViewSnapshot } from "./components/AtmosViewer.vue";
 import { loadFormats } from "./formats/types";
 
-// Cesium is only downloaded when the globe tab is opened.
+// Cesium is only downloaded when the globe view is opened.
 const GlobeViewer = defineAsyncComponent(() => import("./components/GlobeViewer.vue"));
 
 const formats = loadFormats();
 const params = new URLSearchParams(location.search);
 const embedded = params.get("embed") === "1";
-// `?format=sz3` (v6.12 links used `?codec=sz3`)
+// `?format=sz3` (v6.12 links used `?codec=sz3`). No format → SZ3.
 const asked = params.get("format") ?? params.get("codec") ?? "";
-const format = ref<string>(formats.find((f) => f.id === asked)?.id ?? formats[0]?.id ?? "current");
-// `?tab=globe` opens the globe tab
+const known = formats.find((f) => f.id === asked)?.id;
+const format = ref<string>(known ?? formats.find((f) => f.id === "sz3")?.id ?? formats[0]?.id ?? "sz3");
+// `?tab=globe` opens the Cesium globe.
 const globe = ref(params.get("tab") === "globe");
 const viewer = ref<InstanceType<typeof AtmosViewer> | null>(null);
 const hold = ref<ViewSnapshot | null>(null);
@@ -26,42 +27,38 @@ function setUrl(edit: (url: URL) => void): void {
 
 function writeFormatParam(url: URL, next: string): void {
   url.searchParams.delete("codec");
-  if (next === formats[0]?.id) url.searchParams.delete("format");
-  else url.searchParams.set("format", next);
+  url.searchParams.set("format", next);
 }
 
-/** Top 「当前编码 / SZ3」 always open that format's box tab (leave the globe if we were there). */
-function selectFormat(next: string): void {
-  if (globe.value) {
-    globe.value = false;
-    format.value = next;
-    setUrl((url) => {
-      writeFormatParam(url, next);
-      url.searchParams.delete("tab");
-    });
-    return;
-  }
-  if (next === format.value) return;
-  hold.value = viewer.value?.snapshot() ?? null;
-  format.value = next;
-  setUrl((url) => writeFormatParam(url, next));
+// Keep the address bar aligned with the checkbox state, including a bare `/` → `?format=sz3`.
+if (params.get("codec") || params.get("format") !== format.value) {
+  setUrl((url) => writeFormatParam(url, format.value));
 }
 
-/** In-globe encoding switch: stay on the globe tab and keep Cesium / AtmosViewer mounted. */
-function switchGlobeFormat(next: string): void {
-  if (next === format.value) return;
+/** Layer-panel SZ3 checkbox. Stays on the box or the globe, whichever is open. */
+function onSetFormat(next: string): void {
+  if (!formats.some((f) => f.id === next) || next === format.value) return;
+  if (!globe.value) hold.value = viewer.value?.snapshot() ?? null;
   format.value = next;
   setUrl((url) => {
     writeFormatParam(url, next);
-    url.searchParams.set("tab", "globe");
+    if (globe.value) url.searchParams.set("tab", "globe");
   });
 }
 
-function selectGlobe(): void {
-  if (globe.value) return;
-  hold.value = viewer.value?.snapshot() ?? null;
-  globe.value = true;
-  setUrl((url) => url.searchParams.set("tab", "globe"));
+/** Layer-panel Cesium checkbox. On → `?format=sz3&tab=globe`; off → `?format=sz3`. */
+function onSetCesium(on: boolean): void {
+  const sz3 = formats.find((f) => f.id === "sz3")?.id;
+  if (!sz3) return;
+  if (on === globe.value && format.value === sz3) return;
+  if (on && !globe.value) hold.value = viewer.value?.snapshot() ?? null;
+  format.value = sz3;
+  globe.value = on;
+  setUrl((url) => {
+    writeFormatParam(url, sz3);
+    if (on) url.searchParams.set("tab", "globe");
+    else url.searchParams.delete("tab");
+  });
 }
 
 const showPanel = computed(() => !embedded);
@@ -69,19 +66,13 @@ const showPanel = computed(() => !embedded);
 
 <template>
   <div class="shell">
-    <nav v-if="!embedded" class="codec-nav">
-      <button
-        v-for="f in formats"
-        :key="f.id"
-        type="button"
-        :class="{ on: !globe && format === f.id }"
-        @click="selectFormat(f.id)"
-      >
-        {{ f.label }}
-      </button>
-      <button type="button" :class="{ on: globe }" @click="selectGlobe">地球</button>
-    </nav>
-    <GlobeViewer v-if="globe" class="shell-view" :format="current" @switch-format="switchGlobeFormat" />
+    <GlobeViewer
+      v-if="globe"
+      class="shell-view"
+      :format="current"
+      @set-format="onSetFormat"
+      @set-cesium="onSetCesium"
+    />
     <AtmosViewer
       v-else
       :key="format"
@@ -90,6 +81,8 @@ const showPanel = computed(() => !embedded);
       :format="current"
       :initial-view="hold"
       :show-panel="showPanel"
+      @set-format="onSetFormat"
+      @set-cesium="onSetCesium"
     />
   </div>
 </template>

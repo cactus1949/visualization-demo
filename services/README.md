@@ -64,11 +64,12 @@ uvicorn services.api:app --host 0.0.0.0 --port 8000
 
 ## 前端怎么选数据
 
-顶部菜单一项对应一种格式，切换时相机和时间保持不变。地址参数：
+右侧「图层」里的 SZ3、Cesium 开关选视图，可以同时打开。盒体页里切换格式时相机和时间保持不变。地址参数：
 
-- `?format=sz3`：选 SZ3 页，不带就是当前编码。旧链接里的 `?codec=sz3` 也认。
+- `?format=sz3`：SZ3 盒体页。不带 `format` 时也会打开 SZ3，并把地址写成 `?format=sz3`。`?format=current` 是当前编码。旧链接里的 `?codec=sz3` 会改写成 `?format=sz3`。
+- `?format=sz3&tab=globe`：SZ3 叠在 Cesium 地球上。Cesium 只在勾选后下载。
 - `?date=20261111`：打开这一天，读 `/data/<格式>/202611/20261111/manifest.json`。
-- 不带 `?date`：先问 `/api/days` 要这种格式最新的一天。接口不通或还没导出时，当前编码退回仓库自带的样例 `data/web/lowair_atmos_6h`；SZ3 没有样例，会提示先导出。
+- 不带 `?date`：先问 `/api/days` 要这种格式最新的一天。接口不通或还没导出时，当前编码退回仓库自带的样例 `data/web/lowair_atmos_6h`；SZ3 没有样例，加载失败写在右侧面板「状态」里。
 - `?data=lowair_atmos`：打开仓库里的样例。
 
 本地开发：
@@ -82,7 +83,7 @@ cd web && npm run dev                      # 终端 2，打开 http://localhost:
 
 ## 只留一种格式：要删的文件
 
-共用、两种都不能删的有：`pipeline/ncpipe/ncread.py`（读 nc、网格、时间轴）、`pipeline/config/variables.yaml`、`pipeline/config/quant_config_6h.yaml`（色标范围）、`services/paths.py`、`services/api.py`、`services/formats/__init__.py`、`nc_export/`，以及前端的 `data/codecs/types.ts`、`data/loader.worker.ts`、`formats/types.ts`、时间轴和渲染。导出命令、接口和前端菜单都按文件自动发现格式，删文件以后不用改代码。
+共用、两种都不能删的有：`pipeline/ncpipe/ncread.py`（读 nc、网格、时间轴）、`pipeline/config/variables.yaml`、`pipeline/config/quant_config_6h.yaml`（色标范围）、`services/paths.py`、`services/api.py`、`services/formats/__init__.py`、`nc_export/`，以及前端的 `data/codecs/types.ts`、`data/loader.worker.ts`、`formats/types.ts`、时间轴和渲染。导出命令、接口和前端格式列表都按文件自动发现格式，删文件以后不用改代码。
 
 **删 SZ3：**
 ```
@@ -108,4 +109,4 @@ data/web/lowair_atmos_6h/  data/web/lowair_atmos/   (仓库样例，没有 curre
 ```
 `pipeline/ncpipe/build.py`、`quantize.py` 是单时次样例和建筑管线用的旧工具，跟导出命令无关，可以留着。
 
-只剩一种格式时，顶部菜单自动隐藏。
+只剩 SZ3 一种格式时，图层里的 SZ3 开关取消勾选不会切走。

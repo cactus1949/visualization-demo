@@ -78,9 +78,9 @@ npm run build          # 类型检查 + 生产构建（同时把 data/web 复制
 npx vite preview --port 4173 --strictPort
 ```
 
-默认打开 `data/web/lowair_atmos_6h`（不存在时自动退回单时次 `lowair_atmos`）；`?data=lowair_atmos` 强制单时次，`?t=2.5` 打开指定时刻，`?timeline=0` 隐藏时间轴。
+默认打开 SZ3（地址会写成 `?format=sz3`）。`?format=current` 打开当前编码；没有接口或还没导出时，当前编码退回 `data/web/lowair_atmos_6h`（不存在时退回单时次 `lowair_atmos`）。`?data=lowair_atmos` 强制单时次，`?t=2.5` 打开指定时刻，`?timeline=0` 隐藏时间轴。
 
-顶部第三个 tab「地球」（`?tab=globe`）用 CesiumJS，懒加载，前两个 tab 不下载 Cesium。它需要先生成地理底座（`pipeline/README.md` 的 geopipe），并在 `web/.env.local` 里写天地图 key `VITE_TIANDITU_TK=...`（参考 `web/.env.example`）。说明见 `docs/globe-geo.md`。
+右侧「图层」里的 Cesium 开关打开地球页（`?format=sz3&tab=globe`），用 CesiumJS，懒加载，不勾选时不下载 Cesium。它需要先生成地理底座（`pipeline/README.md` 的 geopipe），并在 `web/.env.local` 里写天地图 key `VITE_TIANDITU_TK=...`（参考 `web/.env.example`）。说明见 `docs/globe-geo.md`。
 
 浏览器需要支持 WebGL2 和 `EXT_color_buffer_float`（桌面端 Chrome、Edge、Firefox、Safari 17+ 都支持）。`?embed=1` 会隐藏控制面板；在 iframe 中运行时，组件会向父页面发送 `atmos:ready` 和 `atmos:probe` 消息。
 
@@ -95,7 +95,7 @@ npx vite preview --port 4173 --strictPort
 
 | 分组     | 参数                                                                                                                                                                                                                     |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 图层     | 建筑白膜开关、建筑不透明度、地面底图（近地面风速、2 米气温、能见度等 2D 变量，或纯色）、风粒子、体渲染（默认关闭，可选变量、不透明度、阈值、物理单位的“显示范围”双端滑块和可选“截面同步过滤”）；体渲染色带会标出当前窗口 |
+| 图层     | SZ3（默认开；取消勾选切到另一种已安装的格式）、Cesium（默认关；开为 `?format=sz3&tab=globe`，关为 `?format=sz3`）、建筑白膜开关、建筑不透明度、地面底图（近地面风速、2 米气温、能见度等 2D 变量，或纯色）、风粒子、体渲染（默认关闭，可选变量、不透明度、阈值、物理单位的“显示范围”双端滑块和可选“截面同步过滤”）；体渲染色带会标出当前窗口 |
 | 粒子样式 | 粒子数量（4k–262k）、尾迹长度（2–64 步）、速度倍率、线宽（像素）、生命周期、不透明度、着色方式（按风速 / 按 w / 按高度 / 单色）、色带、高度下限和上限、w 垂直放大、尾迹收细、叠加发光、暂停                              |
 | 水平切片 | 开关、变量（水平风速和全部 3D 变量）、高度（12.5–987.5 m 连续可调）、色带、自动或手动范围、不透明度、等值线条数                                                                                                          |
 | 垂直剖面 | 经度方向、纬度方向、折线、框选四种模式；变量、色带、自动或手动范围、不透明度、等值线。框选支持高度范围、层间距、拉伸和每 1/2/5 层取样（默认每 5 层，最多 16 层） |

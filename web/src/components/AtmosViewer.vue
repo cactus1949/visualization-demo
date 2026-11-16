@@ -4,7 +4,7 @@ import * as THREE from "three";
 import type { ViewHost } from "../host/types";
 import { createThreeHost } from "../host/threeHost";
 import type { Manifest, VariableMeta } from "../data/manifest";
-import type { FormatDef } from "../formats/types";
+import { loadFormats, type FormatDef } from "../formats/types";
 import { DataStore } from "../data/store";
 import { dataBase as resolvedDataBase } from "../data/dataBase";
 import { AtmosScene, field2D, type Theme } from "../render/scene";
@@ -112,7 +112,40 @@ const viewerRoot = ref<HTMLDivElement | null>(null);
 const emit = defineEmits<{
   ready: [{ backend: string }];
   probe: [Record<string, unknown>];
+  /** SZ3 checkbox: `sz3`, or the other export format when that box is cleared. */
+  "set-format": [id: string];
+  /** Cesium checkbox. */
+  "set-cesium": [on: boolean];
 }>();
+
+const formatChoices = loadFormats();
+
+/** SZ3 stays on unless another export format exists to switch to. */
+function onSz3Toggle(on: boolean, event: Event): void {
+  const input = event.target as HTMLInputElement;
+  if (on) {
+    if (!formatChoices.some((f) => f.id === "sz3")) {
+      input.checked = false;
+      return;
+    }
+    emit("set-format", "sz3");
+    return;
+  }
+  const other = formatChoices.find((f) => f.id !== "sz3");
+  if (!other) {
+    input.checked = true;
+    return;
+  }
+  emit("set-format", other.id);
+}
+
+function onCesiumToggle(on: boolean, event: Event): void {
+  if (!formatChoices.some((f) => f.id === "sz3")) {
+    (event.target as HTMLInputElement).checked = globeMode;
+    return;
+  }
+  emit("set-cesium", on);
+}
 
 const query = new URLSearchParams(location.search);
 const embed = query.has("embed") && query.get("embed") !== "0";
@@ -3497,16 +3530,6 @@ onBeforeUnmount(() => {
   <div ref="viewerRoot" class="viewer" :class="[view.theme, { globe: globeMode }]">
     <canvas v-if="!globeMode" ref="canvas" class="canvas" />
 
-    <div class="hud">
-      <b>天津低空三维风场</b>
-      <span>WebGL2 · {{ gpu }}{{ manifest?.codec_label ? ` · ${manifest.codec_label}` : "" }}</span>
-      <span
-        >{{ fps || "—" }} FPS · {{ particles?.count?.toLocaleString() ?? "—" }} 粒子 ·
-        {{ drawCalls }} draw</span
-      >
-      <span class="muted">{{ status }}</span>
-    </div>
-
     <div class="legends">
       <ColorLegend
         v-for="l in legends"
@@ -3547,13 +3570,6 @@ onBeforeUnmount(() => {
     />
     <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
 
-    <div class="hint" :class="{ 'above-timeline': showTimeline }">
-      <template v-if="globeMode">左键拖动：旋转 · 右键拖动：缩放 · 中键拖动：俯仰 · 滚轮：缩放 · Ctrl+左键/右键拖动：俯仰 · Shift+左键拖动：环视 · 经度/纬度剖面可拖动平移 · </template>
-      <template v-else>拖动：旋转 · 右键：平移 · 滚轮：缩放 · 经度/纬度剖面可拖动平移 · </template>
-      折线：左键放点，双击/回车/右键完成；框选：拖拽松开即完成；Esc 取消 ·
-      打开探针 → 悬停预览位置（不改读数）→ 单击（非拖动）固定并更新廓线；可选跟随鼠标
-    </div>
-
     <div v-if="section.enabled && section.drawMode" class="draw-chip">
       <span class="dot" />{{ section.kind === "polyline" ? "绘制折线" : "绘制框选" }} · {{ drawHint }}
     </div>
@@ -3569,6 +3585,20 @@ onBeforeUnmount(() => {
 
       <details open>
         <summary>图层</summary>
+        <label class="row"
+          ><input
+            type="checkbox"
+            :checked="format.id === 'sz3'"
+            @change="onSz3Toggle(($event.target as HTMLInputElement).checked, $event)"
+          />SZ3</label
+        >
+        <label class="row"
+          ><input
+            type="checkbox"
+            :checked="globeMode"
+            @change="onCesiumToggle(($event.target as HTMLInputElement).checked, $event)"
+          />Cesium</label
+        >
         <label class="row"
           ><input v-model="layers.buildings" type="checkbox" />建筑白膜
           <small>{{ buildingsInfo }}</small></label
@@ -3908,6 +3938,7 @@ onBeforeUnmount(() => {
       <details>
         <summary>状态</summary>
         <div class="stats">
+          <div>{{ status }}</div>
           <div>渲染：WebGL2 · {{ gpu }}</div>
           <div>粒子路径：{{ particles?.label ?? "等待 u/v/w" }}</div>
           <div>
@@ -3955,7 +3986,6 @@ onBeforeUnmount(() => {
   inset: 0;
   pointer-events: none;
 }
-.viewer.globe .hud,
 .viewer.globe .legends,
 .viewer.globe .panel,
 .viewer.globe .open-panel,
@@ -3976,40 +4006,6 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   touch-action: none;
-}
-.hud {
-  position: absolute;
-  z-index: 5;
-  left: 16px;
-  top: 14px;
-  display: flex;
-  gap: 14px;
-  align-items: baseline;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  backdrop-filter: blur(10px);
-  font-variant-numeric: tabular-nums;
-}
-/* leave a gap before GlobeViewer's left panel (right: 328px, width: 210px) */
-.viewer.globe .hud {
-  max-width: calc(100% - 566px);
-  flex-wrap: wrap;
-  row-gap: 2px;
-}
-.viewer.globe .hud span {
-  max-width: 100%;
-}
-.hud b {
-  font-size: 14px;
-  white-space: nowrap;
-}
-.hud span {
-  max-width: 420px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .muted {
   color: var(--muted);
@@ -4033,7 +4029,7 @@ onBeforeUnmount(() => {
   position: absolute;
   z-index: 5;
   left: 16px;
-  top: 60px;
+  top: 16px;
 }
 .draw-chip {
   position: absolute;
@@ -4054,40 +4050,6 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .draw-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: #5ce1ff; box-shadow: 0 0 6px #5ce1ff; }
-.hint {
-  position: absolute;
-  z-index: 5;
-  bottom: 14px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 4px 10px;
-  border-radius: 8px;
-  background: var(--card);
-  color: var(--muted);
-  font-size: 11px;
-  white-space: nowrap;
-  pointer-events: none;
-}
-/* globe Cesium controls make this line much longer; wrap so 1280 (and 1024) show all of it.
-   box tabs keep nowrap and the same single-line layout.
-   left starts after the left legend column (~16 + 220 min-width + padding, measured right edge 236)
-   so the taller wrapped hint does not cover ticks / colour bars. right: 326px leaves a 12 px
-   gap before the 300 px layer panel. At 1600 the remaining width is less than the one-line
-   1530 px, so it may wrap to two lines; the text stays fully visible. */
-.viewer.globe .hint {
-  left: 248px;
-  right: 326px;
-  width: auto;
-  transform: none;
-  max-width: none;
-  white-space: normal;
-  text-align: center;
-  line-height: 1.45;
-  box-sizing: border-box;
-}
-.hint.above-timeline {
-  bottom: 84px;
-}
 .panel {
   position: absolute;
   z-index: 6;
