@@ -37,7 +37,8 @@ import { ProbeMarker } from "../render/probeMarker";
 import { AnnotationLayer, HeightOccluder } from "../render/annotations";
 import { ShellHeightLabels, shellLabelHeights } from "../render/annotations/shellLabels";
 import { GlobeGround } from "../render/globeGround";
-import { cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../geo/boxEnu";
+import { boxToUv, cellToUv, enuUnitsToUvAgl, frameOf, placeEnuUnits, uvToCell } from "../geo/boxEnu";
+import { lonLatInBounds } from "../geo/lonLatFormat";
 import { particlePlacementState } from "../geo/particlePlace";
 import { exactInverse, polyInverse, type EnuFrame } from "../geo/mapping";
 import type { SectionGlobe } from "../render/sections/globe";
@@ -73,6 +74,7 @@ import {
   type DataRange,
 } from "../state/legendRange";
 import ColorLegend from "./ColorLegend.vue";
+import LonLatReadout from "./LonLatReadout.vue";
 import ProfileChart from "./ProfileChart.vue";
 import RangeSlider from "./RangeSlider.vue";
 import UnfoldedPlot from "./UnfoldedPlot.vue";
@@ -99,6 +101,8 @@ const props = withDefaults(defineProps<{
   createHost?: (container: HTMLElement) => ViewHost;
   /** Globe tab: the volume runs in curved-shell mode; ④ sections stay off, ⑤ particles are placed on the shell. */
   globeVolume?: CurvedVolumeOptions | null;
+  /** Globe tab: cartographic position under the pointer. Box tabs use the ground plane instead. */
+  pickLonLat?: (clientX: number, clientY: number) => { lon: number; lat: number } | null;
 }>(), {
   manifestUrl: "",
   showPanel: true,
@@ -319,6 +323,8 @@ const probe = ref<{
   speed: number[];
   direction: number[];
 } | null>(null);
+/** 鼠标下的经纬度。离开视图或指到数据范围外时清空。 */
+const cursor = ref<{ lon: number; lat: number } | null>(null);
 
 const COLOR_MODES: { value: ColorMode; label: string }[] = [
   { value: "speed", label: "按风速" },
@@ -1647,6 +1653,45 @@ function setPointer(event: PointerEvent): void {
   pointerRay = host!.raycaster(event.clientX, event.clientY);
 }
 
+const cursorPlane = new THREE.Plane();
+const cursorHit = new THREE.Vector3();
+const cursorNormal = new THREE.Vector3();
+
+/** 盒体：射线与地面（y = 0）的交点，落在数据范围内才有经纬度。地面图层关掉时同样有效。 */
+function boxCursorLonLat(): { lon: number; lat: number } | null {
+  const grid = manifest.value?.grid;
+  if (!grid || !pointerRay || !atmos) return null;
+  cursorNormal.set(0, 1, 0).transformDirection(atmos.root.matrixWorld);
+  cursorHit.set(0, 0, 0).applyMatrix4(atmos.root.matrixWorld);
+  cursorPlane.setFromNormalAndCoplanarPoint(cursorNormal, cursorHit);
+  if (!pointerRay.ray.intersectPlane(cursorPlane, cursorHit)) return null;
+  atmos.root.worldToLocal(cursorHit);
+  const { u, v } = boxToUv(domain.sx, domain.sz, cursorHit.x, cursorHit.z);
+  const eps = 1e-4;
+  if (u < -eps || u > 1 + eps || v < -eps || v > 1 + eps) return null;
+  return lonLatInBounds(
+    { lonMin: grid.lon_min, lonMax: grid.lon_max, latMin: grid.lat_min, latMax: grid.lat_max },
+    THREE.MathUtils.clamp(u, 0, 1),
+    THREE.MathUtils.clamp(v, 0, 1),
+  );
+}
+
+function updateCursor(event: PointerEvent): void {
+  if (globeMode) {
+    cursor.value = props.pickLonLat?.(event.clientX, event.clientY) ?? null;
+    return;
+  }
+  cursor.value = boxCursorLonLat();
+}
+
+/** 移到读数按钮上时 relatedTarget 仍在视图内，保留读数以便点击切换格式。 */
+function onPointerLeave(event: PointerEvent): void {
+  const root = viewerRoot.value;
+  const next = event.relatedTarget;
+  if (root && next instanceof Node && root.contains(next)) return;
+  cursor.value = null;
+}
+
 function cellPosition(ix: number, iy: number): [number, number] {
   const g = manifest.value!.grid;
   return [
@@ -2032,9 +2077,11 @@ function onPointerMove(event: PointerEvent): void {
 
 /** Pointer handling is batched to one raycast per animation frame. */
 function processPointer(): void {
-  if (!pointerDirty || !pointerEvent || !manifest.value) return;
+  if (!pointerDirty || !pointerEvent || !host) return;
   pointerDirty = false;
   setPointer(pointerEvent);
+  updateCursor(pointerEvent);
+  if (!manifest.value) return;
   if (drag.active && drag.kind === "height" && hslice) {
     let yKm: number;
     if (globeMode && globeOpt()) {
@@ -2942,13 +2989,14 @@ function exposeApi(): void {
   });
 }
 
-/** The five input listeners start() puts on host.element (removed symmetrically on unmount). */
+/** The input listeners start() puts on host.element (removed symmetrically on unmount). */
 let pointerTarget: HTMLElement | null = null;
 function pointerListeners(): Array<[string, EventListener]> {
   return [
     ["pointerdown", onPointerDown as EventListener],
     ["pointermove", onPointerMove as EventListener],
     ["pointerup", onPointerUp as EventListener],
+    ["pointerleave", onPointerLeave as EventListener],
     ["contextmenu", onContextMenu as EventListener],
     ["dblclick", onDoubleClick as EventListener],
   ];
@@ -3530,7 +3578,7 @@ onBeforeUnmount(() => {
   <div ref="viewerRoot" class="viewer" :class="[view.theme, { globe: globeMode }]">
     <canvas v-if="!globeMode" ref="canvas" class="canvas" />
 
-    <div class="legends">
+    <div class="legends" :class="{ raised: cursor }">
       <ColorLegend
         v-for="l in legends"
         :key="l.key"
@@ -3549,6 +3597,8 @@ onBeforeUnmount(() => {
         :warn="l.warn"
       />
     </div>
+
+    <LonLatReadout v-if="cursor" :lon="cursor.lon" :lat="cursor.lat" />
 
     <TimelineBar v-if="showTimeline" :tl="tl" :theme="view.theme" @change="onTimelineChange" />
 
@@ -3987,6 +4037,7 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .viewer.globe .legends,
+.viewer.globe .lonlat,
 .viewer.globe .panel,
 .viewer.globe .open-panel,
 .viewer.globe .timeline,
@@ -4024,6 +4075,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.legends.raised {
+  bottom: 48px;
 }
 .profile-box {
   position: absolute;

@@ -6,7 +6,7 @@
  * and legends are on this view.
  */
 import { computed, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
-import { Cartesian3, Color, Ellipsoid, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
+import { Cartesian2, Cartesian3, Cartographic, Color, Ellipsoid, HeadingPitchRange, Math as CMath, Matrix4, PolylineCollection, Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
 import type { FormatDef } from "../formats/types";
@@ -120,6 +120,23 @@ let geoUniforms: GeoUniforms | null = null;
 const overlay = shallowRef<GlobeOverlay | null>(null);
 const geo = shallowRef<GeoFoundation | null>(null);
 const volumeOptions = shallowRef<CurvedVolumeOptions | null>(null);
+
+const pickWindow = new Cartesian2();
+
+/** 鼠标下的地表经纬度。视线不落地（天空）时返回 null。 */
+function pickLonLat(clientX: number, clientY: number): { lon: number; lat: number } | null {
+  if (!viewer) return null;
+  const canvas = viewer.scene.canvas;
+  const rect = canvas.getBoundingClientRect();
+  pickWindow.x = clientX - rect.left;
+  pickWindow.y = clientY - rect.top;
+  const ray = viewer.camera.getPickRay(pickWindow);
+  if (!ray) return null;
+  const hit = viewer.scene.globe.pick(ray, viewer.scene);
+  if (!hit) return null;
+  const carto = Cartographic.fromCartesian(hit);
+  return { lon: CMath.toDegrees(carto.longitude), lat: CMath.toDegrees(carto.latitude) };
+}
 
 function setBasemap(style: BasemapStyle): void {
   ui.style = style;
@@ -480,6 +497,7 @@ onUnmounted(teardown);
       ref="atmos"
       :format="props.format"
       :globe-volume="volumeOptions"
+      :pick-lon-lat="pickLonLat"
       :create-host="() => overlay!"
       @set-format="emit('set-format', $event)"
       @set-cesium="emit('set-cesium', $event)"
@@ -515,10 +533,6 @@ onUnmounted(teardown);
         <button type="button" @click="setView('overview')">总览</button>
         <button type="button" @click="setView('top')">俯视</button>
       </div>
-      <p v-if="source === 'esri-dev'" class="warn">开发用 Esri 影像（仅 vite dev），正式版用天地图</p>
-      <p v-else-if="!tk" class="warn">没有配置 VITE_TIANDITU_TK，天地图瓦片会加载失败</p>
-      <p v-if="tileErrors > 0" class="warn">底图瓦片失败 {{ tileErrors }} 次</p>
-      <p class="muted">{{ status }}</p>
     </aside>
     <p v-if="error" class="globe-error">{{ error }}</p>
   </div>
