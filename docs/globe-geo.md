@@ -41,7 +41,7 @@ DEM 处理：Copernicus GLO-30 → 150 m 开运算 + 闭运算 + 轻微高斯 �
 
 - 相机（`globe/rtcCamera.ts`）：在 JS 里用 float64 算 `Cesium viewMatrix × 中心 ENU × 单位缩放`，交给 three，GPU 上的坐标只有几个单位大。默认 `log`：three `logarithmicDepthBuffer`，near/far 按图层包围盒的最近/最远点收紧；`?globeDepth=linear` 或 `near` 用同样的包围盒和线性深度；`legacy` 保留 PR ① 的包围球算法作对照。宿主接口和帧顺序见 `docs/view-host.md`。
 - 每帧在 Cesium 的 `postRender` 里：`resetState()`，清深度，画只写深度的地形代理网格（`globe/depthProxy.ts`，同一份 DEM，关地形时是弯曲椭球面片），再画图层，最后 `resetState()`。Cesium 画完后的深度不能直接用，所以靠代理网格做遮挡。
-- WebGL 上下文丢失（`webglcontextlost`）时停止 three 绘制，页面提示刷新。卸载 tab 时释放 `layers` 下所有几何体和材质、代理网格、three 渲染器和 Viewer。
+- WebGL 上下文丢失时停止 three 绘制。事件本身不带原因，页面不把它写成显存不足。`webglcontextrestored` 之后从最低绘制预算继续，并重新向 worker 要当前窗口的解码。OIT 仍然关闭。卸载 tab 时释放 `layers` 下所有几何体和材质、代理网格、three 渲染器和 Viewer。
 
 ### 升级 Cesium 要复查的私有字段
 
@@ -59,7 +59,7 @@ Cesium 没有公开接口，`globe/overlay.ts` 直接用了 `scene.context` 上�
 - 弯壳步进（`render/volume.ts` 的弯壳着色器）：光线在中心 ENU 里是直线，包围盒由 `geo/mapping.ts` 的 `shellBounds` 用精确 float64 坐标在 41×41 个 (u, v) 上取地面和顶面再外扩 20 m，域四角因地球曲率比中心低约 13 m，已算在盒里。每一步 `geoInverse`（ENU → u, v, h），`AGL = (h − 地形开关 × g(u, v)) / k`，按与盒体相同的节点 / 层中心约定采样；过滤窗口、透明阈值、低值渐显、色带都与盒体一致；每步不透明度按「去掉夸张后的公里数」算，所以 k 和步数改变时浓淡一致。裁切用 (u, AGL 比例, v)，z 方向与盒体一样从北往南。
 - 地形开关和 k 只改共享 uniform、代理网格、Cesium 地形和体渲染包围盒，不重新取数据。
 - 遮挡深度：宿主把地形代理（和场景里其余遮挡物）画进体渲染的深度纹理，体渲染据此截短光线。编码默认 `log`（three 渲染器开 `logarithmicDepthBuffer`，体渲染按 three 的 logdepthbuf 公式反解深度）；`?globeDepth=linear` 切回线性（NDC z）。这是任务 A 定下的默认值。
-- 步数默认 128，`?volSteps=` 可改（调试）。
+- 产品满档步数仍是 128。自动预算从 32 步、约 0.4 倍分辨率起步，帧时间允许时加回。`?volSteps=` 钉住步数（调试），分辨率仍走预算。每一帧按当前相机重画，不沿用上一帧。
 - ⑥ 已接入（只在地球 tab 改放置，前两个 tab 不受影响）：探针按经纬 / AGL 取样并在弯曲壳体上插标注；层高标签挂在壳体西南角；建筑白膜按真实经纬贴在 DEM / 椭球面上（k 只乘离地高度）；地面 2D 场贴在壳体地面，开关不重新取体数据；图例与盒体 tab 共用。粒子（⑤）见下节。
 - ④ 剖面已接入：经度、纬度、高度、折线、框选五种剖面和统一剖面面板、拖动手柄与前两个 tab 共用代码。剖面几何仍是盒体公里坐标（只做细分：高度剖面每个网格单元一格，竖墙和框选层按 0.06 km，约等于地面网格间距），顶点着色器里走 `盒体 km → (u, v, AGL) → h = 地形开关 × g + k × AGL → geoPlace`（`render/sections/globe.ts`），所以跟随 k 和地形开关、不重新取数据；片元仍在插值后的盒体坐标上采样，数值与盒体 tab 同一纹素。深度按 three 的 logdepthbuf 公式写 `gl_FragDepth`。剖面和体渲染在面板里互斥（和前两个 tab 一样），所以剖面与体按光线顺序合成只在调试模式（`allowSectionWithVolume`）下能走到；正常使用时合成的只有体渲染的切面。（仅调试）两者同时打开时，剖面（含框选的各层，最多 16 个面）在弯壳光线步进里按光线顺序合成：每步把采样点换回盒体坐标，用符号变化找穿越点，再做两次割线细化。超过 16 个面时，折线和框选整组退回普通网格绘制，并在控制台警告一次。探针拾取剖面和前两个 tab 的目标一样（高度剖面、经/纬剖面、折线各段墙面；前两个 tab 只拾取剖面网格，不拾取边框线），但剖面网格在着色器里放置、CPU 射线打不中，所以用解析方法：指针射线在 ENU 里按壳体包围球和地面命中点截断，逐点换回盒体坐标，找每个剖面方程第一次变号的位置，再二分细化（`render/sections/globePick.ts`）。标注和手柄用盒体坐标登记（`space: "box"`），每帧经精确 float64 放置映射到 ENU；拖动时相机输入关闭。
 - 标注地形遮挡（`geo/lineOfSight.ts`）：相机到锚点的 ENU 线段先裁到 DEM 域内，按距离采样，步长不超过 60 m，最多 256 点；任一点低于地面超过 3 m，或连续两点低于地面超过 1 m，即判为遮挡。DEM 范围以外的地形不参与遮挡。线性深度调试模式（`?globeDepth=linear`）下，相机很低又在数据域外时 near 会退到 1 m，可能出现 z-fighting。

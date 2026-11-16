@@ -62,3 +62,11 @@
 - 体渲染：`VolumeLayer` 的 `mesh` 加到 `atmos.root`，`captureDepth / update / resize` 用 `host.renderer` 和 `host.camera`。
 
 在地球上，`atmos.root` 是单位矩阵，局部坐标就是中心 ENU（单位 `map.enu_unit_m`）。体渲染用弯壳模式（`new VolumeLayer(domain, curvedOptions)`）；剖面仍是盒坐标，在地球 tab 上暂时关闭，由 ④ 用 `globe/geoShader.ts` 的 `geoPlace` / `geoInverse` 接上；粒子（⑤）的模拟仍在网格空间，绘制时放到弯曲壳体上，见 `docs/globe-geo.md`「粒子（⑤）」。
+
+## 帧预算
+
+`render/frameBudget.ts` 按最近稳态帧的 p95 在五档之间升降，有降档后 5 秒内不回升、升档后 1 秒内不降的滞回。启动、打开体渲染、相机跳转和上下文恢复后的半秒记为尖峰，不进入 p95。滑条、色标、阈值和图层开关不改；界面左下角只显示当前生效的绘制预算。
+
+体渲染画进与预算同分辨率的离屏目标，再合成到主画面。相机每一帧都重画当前视角，不复用上一帧。遮挡预通道用同一分辨率，材质仍是原来的（地球放置和对数深度不变），只关掉颜色写出，阴影留到主通道。尾迹用 `setRenderTrailDivisor` 少画段数，不重新分配历史缓冲。盒体像素比从 1 起，测得快可以回到 2；抗锯齿仍在创建上下文时打开。地球 `msaaSamples` 从 1 起、屏幕空间误差从 6 起，都可以加回去。OIT 保持关闭。
+
+30 FPS 是验收线，不是这一档算通过。`web/scripts/frame-budget-check.mjs` 在指定页面上采样 p50/p95/p99、超过 33.3 ms 的比例、尖峰和上下文丢失次数，并写明浏览器渲染器。软件渲染的结果不能当成 GT730。
