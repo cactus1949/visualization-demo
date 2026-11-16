@@ -1,4 +1,4 @@
-import type { Material, Object3D } from "three";
+import { MeshDepthMaterial, type Material, type Mesh, type Object3D } from "three";
 
 /**
  * The occluder pass only needs depth. Materials stay the ones that already place globe geometry
@@ -26,6 +26,30 @@ export function withColorWriteDisabled(roots: readonly Object3D[], draw: () => v
     draw();
   } finally {
     for (const item of saved) item.material.colorWrite = item.colorWrite;
+  }
+}
+
+const sharedDepthMaterial = new MeshDepthMaterial();
+
+/**
+ * Occluder pass stand-in: a mesh that already has a placement-aware `customDepthMaterial`
+ * (globe buildings) keeps that material; everything else uses a plain depth material.
+ * The lit material is restored even if drawing throws, so the main pass is unchanged.
+ */
+export function withDepthStandIns(roots: readonly Object3D[], draw: () => void): void {
+  const saved: { mesh: Mesh; material: Material | Material[] }[] = [];
+  for (const root of roots) {
+    root.traverse((obj) => {
+      const mesh = obj as Mesh;
+      if (!mesh.isMesh) return;
+      saved.push({ mesh, material: mesh.material });
+      mesh.material = mesh.customDepthMaterial ?? sharedDepthMaterial;
+    });
+  }
+  try {
+    draw();
+  } finally {
+    for (const item of saved) item.mesh.material = item.material;
   }
 }
 

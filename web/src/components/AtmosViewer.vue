@@ -212,6 +212,7 @@ let volumeStepsPin: number | null = null;
 let removeContextListener: (() => void) | null = null;
 let budgetApplied = false;
 let loseExt: { loseContext: () => void; restoreContext: () => void } | null = null;
+const passCpu = { depthMs: 0, volumeMs: 0, particlesMs: 0 };
 const drawCalls = ref(0);
 const loadMs = reactive<Record<string, number>>({});
 const uploadMs: Record<string, number> = {};
@@ -2385,9 +2386,10 @@ function applyBudget(): void {
   volume?.setPresentation(knobs.volumeScale, steps);
   if (volume?.mesh.visible) volume.resize(host.renderer);
   particles?.setRenderTrailDivisor(knobs.trailDivisor);
-  atmos.setShadowMapSize(knobs.shadowMapSize);
+  if (knobs.shadowMapSize > 0) atmos.setShadowMapSize(knobs.shadowMapSize);
+  atmos.setShadows(view.shadows && knobs.shadowMapSize > 0);
   host.setPixelRatioCap?.(knobs.pixelRatioCap);
-  host.applyGlobeCost?.(knobs.cesiumMsaa, knobs.cesiumScreenSpaceError);
+  host.applyGlobeCost?.(knobs.cesiumMsaa, knobs.cesiumScreenSpaceError, knobs.cesiumResolutionScale);
   budgetLabelText.value = budgetText({ ...knobs, volumeSteps: steps }, particleParams.trailLength);
   budgetApplied = true;
   budget.consumeChange();
@@ -2438,17 +2440,25 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   if (particles) {
     particles.object.visible = layers.particles;
     // globe k-slider: skip step while dragging so placeHistory does not replay every layer each frame
-    if (layers.particles && !particlePlaceDeferred) runLayerGl(() => particles!.step(dt));
+    if (layers.particles && !particlePlaceDeferred) {
+      const t0 = performance.now();
+      runLayerGl(() => particles!.step(dt));
+      passCpu.particlesMs = performance.now() - t0;
+    }
   }
   if (volume) volume.present.visible = volume.mesh.visible;
   if (volume?.mesh.visible) {
     updateDepthOccluders();
     volume.resize(host!.renderer);
+    const depthT = performance.now();
     host!.captureOccluderDepth(volume.depthTarget, atmos.scene, depthOccluders);
+    passCpu.depthMs = performance.now() - depthT;
     volume.markDepthValid();
     volume.update(host!.camera, atmos.root, host!.renderer);
     // Current view, every frame. The offscreen target is cleared inside renderOffscreen.
+    const volumeT = performance.now();
     runLayerGl(() => volume!.renderOffscreen(host!.renderer, atmos.scene, host!.camera));
+    passCpu.volumeMs = performance.now() - volumeT;
   }
 }
 
@@ -2544,6 +2554,94 @@ function afterRender(_now: number): void {
 function resize(width: number, height: number): void {
   boxStack?.setResolution(width, height);
   volume?.resize(host!.renderer);
+}
+
+function buildingTriangles(): number {
+  let triangles = 0;
+  buildings?.group.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const index = mesh.geometry.index;
+    const position = mesh.geometry.getAttribute("position");
+    triangles += index ? index.count / 3 : (position?.count ?? 0) / 3;
+  });
+  return triangles;
+}
+
+/** Local JSON only. Nothing is uploaded. */
+function diagnosticReport(): Record<string, unknown> {
+  const gl = host?.renderer.getContext() as WebGL2RenderingContext | undefined;
+  const debugInfo = gl?.getExtension("WEBGL_debug_renderer_info");
+  return {
+    sha: __APP_GIT_SHA__,
+    exportedAt: new Date().toISOString(),
+    note: "文件只留在本机。cpuSubmitMs 是主线程提交耗时，不是 GPU 计时。p95 来自 rAF 间隔，含上一帧等待。不能据此宣称已达到 30 FPS。",
+    renderer: debugInfo && gl ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : "",
+    vendor: debugInfo && gl ? String(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL)) : "",
+    limits: gl
+      ? {
+          maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+          max3dTextureSize: gl.getParameter(gl.MAX_3D_TEXTURE_SIZE),
+          maxSamples: gl.getParameter(gl.MAX_SAMPLES),
+          maxArrayTextureLayers: gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS),
+        }
+      : null,
+    devicePixelRatio: window.devicePixelRatio,
+    drawingBuffer: gl ? { width: gl.drawingBufferWidth, height: gl.drawingBufferHeight } : null,
+    css: host?.size() ?? null,
+    globe: host?.globeCost?.() ?? null,
+    layers: {
+      buildings: layers.buildings,
+      ground: layers.ground,
+      groundVar: layers.groundVar,
+      particles: layers.particles,
+      volume: layers.volume,
+      volumeVar: layers.volumeVar,
+      shadowsChecked: view.shadows,
+    },
+    budget: {
+      level: budget.level,
+      label: budgetLabelText.value,
+      knobs: budget.knobs(),
+      stats: budget.stats(),
+      spikes: budget.recentSpikes().map((spike) => ({ ...spike })),
+      levelHistory: budget.levelHistory.map((entry) => ({ ...entry })),
+      lossCount: budget.lossCount,
+      restoreCount: budget.restoreCount,
+    },
+    volume: volume
+      ? {
+          scale: volume.resolutionScale,
+          steps: volume.steps,
+          bufferWidth: volume.bufferWidth,
+          bufferHeight: volume.bufferHeight,
+          drawingWidth: volume.drawingWidth,
+          drawingHeight: volume.drawingHeight,
+          renders: volume.renderCount,
+          visible: volume.mesh.visible,
+        }
+      : null,
+    particles: {
+      count: particleParams.count,
+      trailLength: particleParams.trailLength,
+      divisor: budget.knobs().trailDivisor,
+    },
+    shadowCasting: Boolean(atmos?.sun.castShadow),
+    shadowMap: atmos ? { x: atmos.sun.shadow.mapSize.x, y: atmos.sun.shadow.mapSize.y } : null,
+    buildingTriangles: buildingTriangles(),
+    cpuSubmitMs: { ...passCpu },
+  };
+}
+
+function exportDiagnostic(): void {
+  const report = diagnosticReport();
+  const sha = String(report.sha).slice(0, 7);
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `atmos-budget-${sha}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
 function exposeApi(): void {
@@ -2694,6 +2792,7 @@ function exposeApi(): void {
       budget.setLevel(level, performance.now());
       applyBudget();
     },
+    diagnostic: () => diagnosticReport(),
     frameBudget: () => ({
       level: budget.level,
       knobs: budget.knobs(),
@@ -3508,7 +3607,7 @@ watch(
 );
 watch(
   () => view.shadows,
-  (on) => atmos?.setShadows(on),
+  (on) => atmos?.setShadows(on && budget.knobs().shadowMapSize > 0),
 );
 watch(
   () => view.theme,
@@ -3826,7 +3925,10 @@ onBeforeUnmount(() => {
     />
     <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
 
-    <div class="budget-chip" :title="'当前绘制预算，滑条仍是你设的数值'">{{ budgetLabelText }}</div>
+    <div class="budget-row">
+      <div class="budget-chip" title="当前绘制预算。滑条、色标和图层勾选没有被改。">{{ budgetLabelText }}</div>
+      <button type="button" class="budget-export" @click="exportDiagnostic">导出诊断</button>
+    </div>
     <p v-if="gpuNotice" class="gpu-notice">{{ gpuNotice }}</p>
     <div v-if="section.enabled && section.drawMode" class="draw-chip">
       <span class="dot" />{{ section.kind === "polyline" ? "绘制折线" : "绘制框选" }} · {{ drawHint }}
@@ -4330,12 +4432,17 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .draw-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: #5ce1ff; box-shadow: 0 0 6px #5ce1ff; }
-.budget-chip {
+.budget-row {
   position: absolute;
   z-index: 6;
   left: 16px;
   bottom: 58px;
-  max-width: min(560px, calc(100% - 32px));
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  max-width: min(720px, calc(100% - 32px));
+}
+.budget-chip {
   padding: 4px 10px;
   border-radius: 999px;
   background: var(--panel);
@@ -4343,6 +4450,16 @@ onBeforeUnmount(() => {
   color: var(--text);
   font-size: 12px;
   pointer-events: none;
+}
+.budget-export {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
 }
 .gpu-notice {
   position: absolute;

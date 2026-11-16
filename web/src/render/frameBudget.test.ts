@@ -44,8 +44,8 @@ describe("volume buffer and trail draw length", () => {
   });
 
   it("the label reports the effective draw, not a rewritten slider", () => {
-    assert.equal(budgetText(BUDGET_LEVELS[0]!, 48), "体 40% · 32 步 · 尾迹 12/48 · 阴影 1024");
-    assert.equal(budgetText(BUDGET_LEVELS[4]!, 48), "体 100% · 128 步 · 尾迹 48/48 · 阴影 4096");
+    assert.equal(budgetText(BUDGET_LEVELS[0]!, 48), "体 30% · 24 步 · 尾迹 12/48 · 阴影关 · 地球 67%");
+    assert.equal(budgetText(BUDGET_LEVELS[4]!, 48), "体 100% · 128 步 · 尾迹 48/48 · 阴影 4096 · 地球 100%");
   });
 });
 
@@ -57,7 +57,9 @@ describe("frame budget hysteresis", () => {
   it("starts conservative and climbs to full detail when frames stay fast", () => {
     const budget = new FrameBudget({ now: 0, startupSuppressMs: 0 });
     assert.equal(budget.level, 0);
-    assert.equal(budget.knobs().volumeSteps, 32);
+    assert.equal(budget.knobs().volumeSteps, 24);
+    assert.equal(budget.knobs().cesiumResolutionScale, 0.67);
+    assert.equal(budget.knobs().shadowMapSize, 0);
     drive(budget, 0, CLIMB_WINDOW_MS - 200, 16);
     assert.equal(budget.level, 0);
     drive(budget, CLIMB_WINDOW_MS, 0, 16);
@@ -117,6 +119,7 @@ describe("frame budget hysteresis", () => {
     assert.equal(budget.lossCount, 1);
     assert.equal(budget.restoreCount, 1);
     assert.equal(budget.level, 0);
-    assert.equal(budget.knobs().shadowMapSize, 1024);
+    assert.equal(budget.knobs().shadowMapSize, 0);
+    assert.equal(budget.levelHistory.at(-1)?.reason, "context-restored");
   });
 });

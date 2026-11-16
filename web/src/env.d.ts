@@ -2,6 +2,7 @@
 export {};
 
 declare global {
+  const __APP_GIT_SHA__: string;
   interface Window {
     __atmosReady?: boolean;
     __atmosStatus?: Record<string, unknown> & { fps?: number; buildings?: number };

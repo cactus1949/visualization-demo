@@ -18,7 +18,7 @@ import { RtcCameraSync, type EnuSphere } from "./rtcCamera";
 import { DEFAULT_DEPTH_MODE, depthEncodingOf, depthModeFromQuery, type Box3Like, type GlobeDepthMode } from "./depthMode";
 import { applyLayerRendererConfig, beginLayerFrame } from "../host/rendererConfig";
 import { withHidden } from "../host/hidden";
-import { withColorWriteDisabled, withoutShadowPass } from "../render/depthPrepass";
+import { withDepthStandIns, withoutShadowPass } from "../render/depthPrepass";
 import type { FrameHooks, ViewHost } from "../host/types";
 import { zoomTravelM } from "../host/viewMotion";
 
@@ -58,6 +58,8 @@ export class GlobeOverlay implements ViewHost {
   private readonly onContextLost: () => void;
   private readonly onContextRestored: () => void;
   private readonly contextListeners: { lost: () => void; restored: () => void }[] = [];
+  private canvasScale: (scale: number) => void = () => {};
+  private appliedGlobe = { msaa: 1, screenSpaceError: 8, resolutionScale: 1 };
   private readonly ray = new Raycaster();
   private removePre: (() => void) | null = null;
   private removePost: (() => void) | null = null;
@@ -189,24 +191,42 @@ export class GlobeOverlay implements ViewHost {
   captureOccluderDepth(target: WebGLRenderTarget, scene: Scene, hide: Object3D[]): void {
     this.resyncAfter(() => {
       withoutShadowPass(this.renderer, () => {
-        withColorWriteDisabled([this.proxyScene, scene], () => {
+        withHidden(hide, () => {
           this.renderer.setRenderTarget(target);
           this.renderer.clear(true, true, true);
           // the proxy stands in for Cesium's terrain / ellipsoid (Cesium's own depth is not usable here)
           this.renderer.render(this.proxyScene, this.camera);
-          withHidden(hide, () => this.renderer.render(scene, this.camera));
+          // Lit building/ground shaders are not run again here. Globe buildings keep their
+          // placement depth material; other meshes use a plain depth material.
+          withDepthStandIns([scene], () => this.renderer.render(scene, this.camera));
           this.renderer.setRenderTarget(null);
         });
       });
     });
   }
 
-  /** Cesium multisample count and terrain screen-space error. Both are runtime values and can rise again. */
-  applyGlobeCost(msaa: number, screenSpaceError: number): void {
+  /** Called by GlobeViewer: `resolutionScale` lives on the Viewer, not the Scene. */
+  setCanvasScaleHandler(handler: (scale: number) => void): void {
+    this.canvasScale = handler;
+  }
+
+  /**
+   * Cesium multisample count, terrain error, and canvas resolutionScale.
+   * All three can rise again when the steady frame time allows.
+   */
+  applyGlobeCost(msaa: number, screenSpaceError: number, resolutionScale = 1): void {
     const samples = Math.max(1, Math.round(msaa));
     if (this.cesium.msaaSamples !== samples) this.cesium.msaaSamples = samples;
     const error = Math.max(1, screenSpaceError);
     if (this.cesium.globe.maximumScreenSpaceError !== error) this.cesium.globe.maximumScreenSpaceError = error;
+    const scale = Math.min(1, Math.max(0.5, resolutionScale));
+    this.canvasScale(scale);
+    this.appliedGlobe = { msaa: samples, screenSpaceError: error, resolutionScale: scale };
+  }
+
+  /** Values last requested by the budget. The diagnostic compares these with the volume buffer. */
+  globeCost(): { msaa: number; screenSpaceError: number; resolutionScale: number } {
+    return { ...this.appliedGlobe };
   }
 
   addContextListener(listener: { lost: () => void; restored: () => void }): () => void {

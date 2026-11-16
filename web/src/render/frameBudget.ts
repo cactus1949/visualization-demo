@@ -16,17 +16,23 @@ export interface BudgetKnobs {
   shadowMapSize: number;
   cesiumMsaa: number;
   cesiumScreenSpaceError: number;
+  /**
+   * Cesium canvas scale (1 = CSS pixels). The box host ignores this.
+   * The previous budget never changed it, so a moving globe stayed at full resolution.
+   */
+  cesiumResolutionScale: number;
   /** Box host uses min(devicePixelRatio, pixelRatioCap). 2 is the previous product cap. */
   pixelRatioCap: number;
 }
 
 /** Product defaults sit at the top. Index 0 is the conservative start. */
 export const BUDGET_LEVELS: readonly BudgetKnobs[] = [
-  { volumeScale: 0.4, volumeSteps: 32, trailDivisor: 4, shadowMapSize: 1024, cesiumMsaa: 1, cesiumScreenSpaceError: 6, pixelRatioCap: 1 },
-  { volumeScale: 0.55, volumeSteps: 48, trailDivisor: 2, shadowMapSize: 1024, cesiumMsaa: 1, cesiumScreenSpaceError: 4, pixelRatioCap: 1 },
-  { volumeScale: 0.75, volumeSteps: 64, trailDivisor: 2, shadowMapSize: 2048, cesiumMsaa: 2, cesiumScreenSpaceError: 2, pixelRatioCap: 1 },
-  { volumeScale: 1, volumeSteps: 96, trailDivisor: 1, shadowMapSize: 2048, cesiumMsaa: 2, cesiumScreenSpaceError: 2, pixelRatioCap: 1 },
-  { volumeScale: 1, volumeSteps: 128, trailDivisor: 1, shadowMapSize: 4096, cesiumMsaa: 4, cesiumScreenSpaceError: 2, pixelRatioCap: 2 },
+  // Floor: globe canvas itself shrinks, the shadow pass is not drawn, volume stays coarse.
+  { volumeScale: 0.3, volumeSteps: 24, trailDivisor: 4, shadowMapSize: 0, cesiumMsaa: 1, cesiumScreenSpaceError: 8, cesiumResolutionScale: 0.67, pixelRatioCap: 1 },
+  { volumeScale: 0.45, volumeSteps: 32, trailDivisor: 2, shadowMapSize: 1024, cesiumMsaa: 1, cesiumScreenSpaceError: 4, cesiumResolutionScale: 0.8, pixelRatioCap: 1 },
+  { volumeScale: 0.7, volumeSteps: 48, trailDivisor: 2, shadowMapSize: 1024, cesiumMsaa: 1, cesiumScreenSpaceError: 2, cesiumResolutionScale: 1, pixelRatioCap: 1 },
+  { volumeScale: 1, volumeSteps: 80, trailDivisor: 1, shadowMapSize: 2048, cesiumMsaa: 2, cesiumScreenSpaceError: 2, cesiumResolutionScale: 1, pixelRatioCap: 1 },
+  { volumeScale: 1, volumeSteps: 128, trailDivisor: 1, shadowMapSize: 4096, cesiumMsaa: 4, cesiumScreenSpaceError: 2, cesiumResolutionScale: 1, pixelRatioCap: 2 },
 ];
 
 export const FRAME_BUDGET_TARGET_MS = 1000 / 30;
@@ -99,13 +105,22 @@ export function volumeBufferSize(drawingWidth: number, drawingHeight: number, sc
 export function budgetText(knobs: BudgetKnobs, userTrail: number): string {
   const drawn = drawnTrailLength(userTrail, knobs.trailDivisor, 64);
   const pct = Math.round(knobs.volumeScale * 100);
-  return `体 ${pct}% · ${knobs.volumeSteps} 步 · 尾迹 ${drawn}/${Math.round(userTrail)} · 阴影 ${knobs.shadowMapSize}`;
+  const globe = Math.round(knobs.cesiumResolutionScale * 100);
+  const shadow = knobs.shadowMapSize <= 0 ? "阴影关" : `阴影 ${knobs.shadowMapSize}`;
+  return `体 ${pct}% · ${knobs.volumeSteps} 步 · 尾迹 ${drawn}/${Math.round(userTrail)} · ${shadow} · 地球 ${globe}%`;
+}
+
+export interface LevelChange {
+  at: number;
+  level: number;
+  reason: string;
 }
 
 export class FrameBudget {
   level = 0;
   lossCount = 0;
   restoreCount = 0;
+  readonly levelHistory: LevelChange[] = [];
   private steady: FrameSample[] = [];
   private spikes: FrameSpike[] = [];
   private suppressUntil = 0;
@@ -142,6 +157,7 @@ export class FrameBudget {
     this.steady = [];
     this.suppressUntil = now + TRANSITION_SUPPRESS_MS;
     this.suppressKind = kind;
+    this.remember(now, 0, kind);
   }
 
   /** Test and screenshot hook. Still suppresses the transition so one slow frame cannot undo it. */
@@ -154,6 +170,7 @@ export class FrameBudget {
     this.steady = [];
     this.suppressUntil = now + TRANSITION_SUPPRESS_MS;
     this.suppressKind = "manual";
+    this.remember(now, next, "manual");
   }
 
   noteLost(now: number): void {
@@ -207,6 +224,7 @@ export class FrameBudget {
       this.lastDownAt = now;
       this.dirty = true;
       this.steady = [];
+      this.remember(now, this.level, "slow");
       return;
     }
     const climbSamples = this.steady.filter((sample) => sample.at >= now - CLIMB_WINDOW_MS);
@@ -222,6 +240,12 @@ export class FrameBudget {
       this.lastUpAt = now;
       this.dirty = true;
       this.steady = [];
+      this.remember(now, this.level, "fast");
     }
+  }
+
+  private remember(at: number, level: number, reason: string): void {
+    this.levelHistory.push({ at, level, reason });
+    if (this.levelHistory.length > 40) this.levelHistory.shift();
   }
 }

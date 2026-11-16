@@ -3,7 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { FrameHooks, ViewHost } from "./types";
 import { applyLayerRendererConfig, beginLayerFrame } from "./rendererConfig";
 import { withHidden } from "./hidden";
-import { withColorWriteDisabled, withoutShadowPass } from "../render/depthPrepass";
+import { withDepthStandIns, withoutShadowPass } from "../render/depthPrepass";
 import { scaledOffset, southOfTarget } from "./viewMotion";
 
 export type ContextListener = { lost: () => void; restored: () => void };
@@ -105,7 +105,7 @@ export function createThreeHost(
       // each mesh's own material so placement and logarithmic depth are unchanged.
       withHidden(hide, () => {
         withoutShadowPass(renderer, () => {
-          withColorWriteDisabled([sceneToRender], () => {
+          withDepthStandIns([sceneToRender], () => {
             renderer.setRenderTarget(target);
             renderer.clear(true, true, true);
             renderer.render(sceneToRender, camera);

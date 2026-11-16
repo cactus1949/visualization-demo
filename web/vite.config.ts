@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { defineConfig, type Connect, type Plugin, type ProxyOptions } from "vite";
@@ -110,12 +111,20 @@ export function cesiumBaseFor(base: string | undefined): string {
   return `${base.endsWith("/") ? base : `${base}/`}${cesiumBaseUrl}`;
 }
 
+function gitSha(): string {
+  try {
+    return execSync("git rev-parse HEAD", { cwd: path.resolve(import.meta.dirname, "..") }).toString().trim();
+  } catch {
+    return "unknown";
+  }
+}
+
 function cesiumBasePlugin(): Plugin {
   return {
     name: "cesium-base-url",
     // `config` sees the merged config, CLI --base included
     config(config) {
-      return { define: { CESIUM_BASE_URL: JSON.stringify(cesiumBaseFor(config.base)) } };
+      return { define: { CESIUM_BASE_URL: JSON.stringify(cesiumBaseFor(config.base)), __APP_GIT_SHA__: JSON.stringify(gitSha()) } };
     },
   };
 }

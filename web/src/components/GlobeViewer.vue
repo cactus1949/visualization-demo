@@ -17,6 +17,7 @@ import { pickBasemapSource, type BasemapStyle } from "../globe/basemapChoice";
 import { terrainSwitch, type TerrainSwitch } from "../globe/terrain";
 import { DepthProxy } from "../globe/depthProxy";
 import { GlobeOverlay } from "../globe/overlay";
+import { BUDGET_LEVELS } from "../render/frameBudget";
 import { createGeoUniforms, type GeoUniforms } from "../globe/geoShader";
 import { createTestLayer } from "../globe/testLayer";
 import { buildReferenceOutline } from "../globe/referenceOutline";
@@ -298,11 +299,12 @@ function start({ meta, dem, ground }: GeoFoundation): void {
     // Dark theme #000000 makes that test drop the globe at steep pitches; disable OIT.
     orderIndependentTranslucency: false,
     // Multisample starts at 1. The frame budget raises it when the steady frame time allows.
-    msaaSamples: 1,
+    msaaSamples: BUDGET_LEVELS[0]!.cesiumMsaa,
     terrainProvider: terrains.provider(false),
   });
   viewer.scene.verticalExaggeration = 1;
-  viewer.scene.globe.maximumScreenSpaceError = 6;
+  viewer.resolutionScale = BUDGET_LEVELS[0]!.cesiumResolutionScale;
+  viewer.scene.globe.maximumScreenSpaceError = BUDGET_LEVELS[0]!.cesiumScreenSpaceError;
   setBasemap(ui.style);
   const proxy = new DepthProxy(meta.grid, meta.map, dem);
   overlay.value = new GlobeOverlay(viewer.scene, meta.map, proxy, {
@@ -321,6 +323,10 @@ function start({ meta, dem, ground }: GeoFoundation): void {
         viewer.scene.requestRender();
       }
     },
+  });
+  overlay.value.setCanvasScaleHandler((scale) => {
+    if (!viewer || Math.abs(viewer.resolutionScale - scale) < 0.001) return;
+    viewer.resolutionScale = scale;
   });
   geoUniforms = createGeoUniforms(meta.map, ground);
   overlay.value.layers.add(createTestLayer(meta.map, geoUniforms, meta.grid.top_m, debug ? depthFaceAglParam(query.get("depthFaceAgl")) : 50));
