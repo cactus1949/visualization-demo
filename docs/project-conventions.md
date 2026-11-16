@@ -14,7 +14,7 @@
 - 编解码：每个变量解码后的误差不超过约定上限；派生变量超限时自动改为存储。
 - 时间轴：播放跨整点时，下一帧没到就停在整点等待缓冲，不跳帧、不卡死。
 - 图例数据范围：两帧混合后的 min/max 要包住逐点混合的真实值域；全零提示文案（积冰「本日无积冰」、其他「当前无数据」）；透明阈值高于当前最大值时才提示。
-- 接口：已导出的日期返回 200，没导出的返回 404；`.br` 文件带 `Content-Encoding: br`；不可变的帧文件（`.bin.br`、`.sz3pack`、按帧 index json）带长期 `Cache-Control: immutable`，`manifest.json` 不长期缓存。
+- 接口：已导出的日期返回 200，没导出的返回 404；`.br` 文件在 `Accept-Encoding` 含 `br` 时带 `Content-Encoding: br`，不含时返回解开后的字节；不可变的帧文件（`.bin.br`、`.sz3pack`、按帧 index json）带长期 `Cache-Control: immutable`，`manifest.json` 不长期缓存。
 
 ## 需要同步维护的文档
 

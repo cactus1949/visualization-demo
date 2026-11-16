@@ -13,7 +13,9 @@ Path(os.environ["WEB_ROOT"]).mkdir(parents=True, exist_ok=True)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from services.api import PayloadFiles
+import brotli
+
+from services.api import PayloadFiles, accepts_brotli
 from services.cache_headers import IMMUTABLE_CACHE, MANIFEST_CACHE, cache_control_for
 
 
@@ -55,7 +57,10 @@ def test_payload_files_set_cache_headers_and_keep_content_encoding():
         app.mount("/data", PayloadFiles(directory=str(root), html=False))
         client = TestClient(app)
 
-        br = client.head("/data/current/202611/20261111/t000/u.bin.br")
+        br = client.head(
+            "/data/current/202611/20261111/t000/u.bin.br",
+            headers={"Accept-Encoding": "gzip, deflate, br"},
+        )
         assert br.status_code == 200
         assert br.headers["cache-control"] == IMMUTABLE_CACHE
         assert br.headers["content-encoding"] == "br"
@@ -81,3 +86,46 @@ def test_payload_files_set_cache_headers_and_keep_content_encoding():
 
         missing = client.head("/data/current/202611/20261111/t000/missing.bin.br")
         assert missing.status_code == 404
+
+
+def test_accepts_brotli_ignores_zero_quality():
+    assert accepts_brotli(None) is False
+    assert accepts_brotli("gzip, deflate") is False
+    assert accepts_brotli("gzip, deflate, br") is True
+    assert accepts_brotli("br;q=0, gzip") is False
+
+
+def test_brotli_file_is_decompressed_when_client_does_not_accept_br():
+    import tempfile
+
+    payload = b"\x01\x02\x03\x04"
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        frame = root / "geo"
+        frame.mkdir()
+        (frame / "dem.u16.bin.br").write_bytes(brotli.compress(payload))
+        app = FastAPI()
+        app.mount("/data", PayloadFiles(directory=str(root), html=False))
+        client = TestClient(app)
+
+        plain = client.get("/data/geo/dem.u16.bin.br", headers={"Accept-Encoding": "gzip, deflate"})
+        assert plain.status_code == 200
+        assert "content-encoding" not in plain.headers
+        assert plain.content == payload
+
+        encoded = client.get(
+            "/data/geo/dem.u16.bin.br",
+            headers={"Accept-Encoding": "gzip, deflate, br"},
+        )
+        assert encoded.status_code == 200
+        assert encoded.headers["content-encoding"] == "br"
+        # 测试客户端会按 Content-Encoding 解开，这里拿到的是原始字节。
+        assert encoded.content == payload
+
+        ranged = client.get(
+            "/data/geo/dem.u16.bin.br",
+            headers={"Accept-Encoding": "br", "Range": "bytes=0-3"},
+        )
+        assert ranged.status_code == 200
+        assert ranged.headers["content-encoding"] == "br"
+        assert "content-range" not in ranged.headers
