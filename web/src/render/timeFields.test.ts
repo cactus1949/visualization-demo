@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { invalidateShown, shownIsCurrent } from "./shownTarget.ts";
+import { instantsMatch, invalidateShown, shownIsCurrent } from "./shownTarget.ts";
 
 /**
  * reloadFormat releases GPU slots then reloads the same timeline index (e.g. t = 4).
@@ -20,5 +20,14 @@ describe("speed target freshness after a same-t reload", () => {
     const shown = { a: 4, b: 4, s: 0 };
     invalidateShown(shown);
     assert.equal(shownIsCurrent(shown, 4, 4, 0, true), false);
+  });
+
+  it("wind, speed and the volume scalar are one display instant, or they are not ready together", () => {
+    const wind = { a: 2, b: 3, s: 0.25 };
+    const speed = { a: 2, b: 3, s: 0.25 };
+    const scalar = { a: 2, b: 3, s: 0.25 };
+    assert.equal(instantsMatch([wind, speed, scalar]), true);
+    assert.equal(instantsMatch([wind, speed, { a: 2, b: 3, s: 0.5 }]), false);
+    assert.equal(instantsMatch([wind, { a: 1, b: 2, s: 0.25 }, scalar]), false);
   });
 });

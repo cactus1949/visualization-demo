@@ -10,3 +10,10 @@ export function shownIsCurrent(shown: ShownTarget, a: number, b: number, s: numb
 export function invalidateShown(shown: ShownTarget): void {
   shown.a = -1;
 }
+
+/** Every visible GPU field must be the same (a, b, s). A partial blend is not a display instant. */
+export function instantsMatch(rows: readonly ShownTarget[]): boolean {
+  const first = rows[0];
+  if (!first) return true;
+  return rows.every((row) => row.a === first.a && row.b === first.b && row.s === first.s);
+}
