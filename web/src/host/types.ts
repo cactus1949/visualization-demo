@@ -55,4 +55,10 @@ export interface ViewHost {
    * the work directly.
    */
   isolateGl?(work: () => void): void;
+  /** Box host: cap devicePixelRatio. 1 is the conservative start; 2 is the previous product cap. */
+  setPixelRatioCap?(cap: number): void;
+  /** Globe host: Cesium MSAA and screen-space error. Both can move back up when frames allow. */
+  applyGlobeCost?(msaa: number, screenSpaceError: number): void;
+  /** Context loss and restore. Loss is reported as-is; the event does not name a cause. */
+  addContextListener?(listener: { lost: () => void; restored: () => void }): () => void;
 }

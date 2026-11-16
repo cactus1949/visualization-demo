@@ -170,6 +170,19 @@ export class TimeResource {
     return true;
   }
 
+  /** Forget GPU slot copies so a restored context can upload a fresh decode of the same frames. */
+  resetSlots(): void {
+    for (const slot of this.slots) {
+      slot.tex?.dispose();
+      slot.tex = null;
+      slot.frame = -1;
+      slot.next = 0;
+      slot.data = null;
+    }
+    this.valid = false;
+    this.shown = { a: -1, b: -1, s: -1 };
+  }
+
   /** Drop slots whose frames have left the window; the texture is kept for reuse. */
   releaseOutside(keep: number[]): void {
     for (const s of this.slots) {
@@ -373,6 +386,24 @@ export class TimeFields {
     gl.readPixels(ix, iy, 1, 1, gl.RGBA, gl.FLOAT, out);
     this.renderer.setRenderTarget(prev);
     return [...out];
+  }
+
+  /** GPU textures died with the context. Slot objects are cleared; the worker must decode again. */
+  dropGpuCopies(): void {
+    this.wind.resetSlots();
+    this.speedValid = false;
+    this.speedShown = { a: -1, b: -1, s: -1 };
+    for (const resource of this.scalars.values()) resource.resetSlots();
+  }
+
+  /** (a, b, s) currently shown by each GPU field. Callers require these to match. */
+  displayInstants(): { name: string; a: number; b: number; s: number }[] {
+    const rows = [{ name: this.wind.name, ...this.wind.shown }];
+    if (this.speedValid) rows.push({ name: "speed", ...this.speedShown });
+    for (const [name, resource] of this.scalars) {
+      if (resource.valid) rows.push({ name, ...resource.shown });
+    }
+    return rows;
   }
 
   /** Force the next blend of every target (e.g. after the smoothing switch). */

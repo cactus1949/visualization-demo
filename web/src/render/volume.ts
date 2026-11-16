@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { colormapTexture } from "./colormaps";
+import { volumeBufferSize } from "./frameBudget";
+import { withoutShadowPass } from "./depthPrepass";
 import { GLSL_DOMAIN, domainUniforms, type Domain } from "./fields";
 import { GLSL_LOW_ALPHA, type ScalarBinding } from "./slices";
 import type { CompositeSurface } from "./sections/composite";
@@ -437,15 +439,73 @@ void main() {
 }`;
 }
 
+const presentVertex = /* glsl */ `
+out vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+
+/**
+ * Full-screen composite of the low-resolution volume. At full resolution this is one sample.
+ * Below that, taps whose occluder depth disagrees with the centre are dropped so volume colour
+ * does not bleed across a building edge. The current camera is always redrawn; this shader
+ * never reads a previous frame.
+ */
+const presentFragment = /* glsl */ `
+precision highp float;
+uniform sampler2D uColor;
+uniform sampler2D uDepth;
+uniform vec2 uTexel;
+uniform float uAware;
+in vec2 vUv;
+out vec4 outColor;
+void main() {
+  vec4 center = texture(uColor, vUv);
+  if (uAware < 0.5 || center.a < 0.004) {
+    outColor = center;
+    return;
+  }
+  float depth = texture(uDepth, vUv).r;
+  vec2 taps[4] = vec2[](vec2(uTexel.x, 0.0), vec2(-uTexel.x, 0.0), vec2(0.0, uTexel.y), vec2(0.0, -uTexel.y));
+  vec4 acc = center;
+  float weight = 1.0;
+  for (int i = 0; i < 4; i++) {
+    vec2 uv = clamp(vUv + taps[i], vec2(0.0), vec2(1.0));
+    float other = texture(uDepth, uv).r;
+    float w = abs(other - depth) < 0.02 ? 1.0 : 0.0;
+    acc += texture(uColor, uv) * w;
+    weight += w;
+  }
+  outColor = acc / weight;
+}
+`;
+
+/** Layer bit the raymarch mesh uses so the main camera does not draw it full-screen. */
+export const VOLUME_RAY_LAYER = 1;
+
 export class VolumeLayer {
   readonly mesh: THREE.Mesh;
   readonly material: THREE.ShaderMaterial;
-  readonly depthTarget: THREE.WebGLRenderTarget;
+  depthTarget: THREE.WebGLRenderTarget;
   private readonly inverse = new THREE.Matrix4();
   private readonly invProjection = new THREE.Matrix4();
   private readonly invView = new THREE.Matrix4();
   private depthWidth = 1;
   private depthHeight = 1;
+  bufferWidth = 1;
+  bufferHeight = 1;
+  drawingWidth = 1;
+  drawingHeight = 1;
+  /** Times the current view was raymarched. Increases every visible frame; frames are not reused. */
+  renderCount = 0;
+  resolutionScale = 1;
+  colorTarget: THREE.WebGLRenderTarget;
+  readonly present: THREE.Mesh;
+  private readonly presentMaterial: THREE.ShaderMaterial;
+  private disposed = false;
+  private readonly clearScratch = new THREE.Color();
   private domain: Domain;
   /** null = box mode (first two tabs) */
   private readonly curved: CurvedVolumeOptions | null;
@@ -516,7 +576,10 @@ export class VolumeLayer {
       vertexShader,
       fragmentShader: curved ? curvedFragmentShader(curved.map) : fragmentShader,
       uniforms,
-      transparent: true,
+      // Stored straight into the offscreen target (no blend). The present pass blends onto the scene.
+      transparent: false,
+      blending: THREE.NoBlending,
+      toneMapped: false,
       side: THREE.BackSide,
       depthWrite: false,
       depthTest: false,
@@ -527,6 +590,7 @@ export class VolumeLayer {
     this.mesh = new THREE.Mesh(box, this.material);
     this.mesh.renderOrder = 5;
     this.mesh.name = "volume";
+    this.mesh.layers.set(VOLUME_RAY_LAYER);
     this.depthTarget = new THREE.WebGLRenderTarget(1, 1, {
       depthBuffer: true,
       stencilBuffer: false,
@@ -538,6 +602,37 @@ export class VolumeLayer {
     this.depthTarget.depthTexture.minFilter = THREE.NearestFilter;
     this.depthTarget.depthTexture.magFilter = THREE.NearestFilter;
     this.material.uniforms.uDepth.value = this.depthTarget.depthTexture;
+    this.colorTarget = new THREE.WebGLRenderTarget(1, 1, {
+      depthBuffer: false,
+      stencilBuffer: false,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      generateMipmaps: false,
+    });
+    this.colorTarget.texture.generateMipmaps = false;
+    this.presentMaterial = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: presentVertex,
+      fragmentShader: presentFragment,
+      uniforms: {
+        uColor: { value: this.colorTarget.texture },
+        uDepth: { value: this.depthTarget.depthTexture },
+        uTexel: { value: new THREE.Vector2(1, 1) },
+        uAware: { value: 0 },
+      },
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      toneMapped: false,
+    });
+    const presentGeometry = new THREE.BufferGeometry();
+    presentGeometry.setAttribute("position", new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
+    presentGeometry.setAttribute("uv", new THREE.Float32BufferAttribute([0, 0, 2, 0, 0, 2], 2));
+    this.present = new THREE.Mesh(presentGeometry, this.presentMaterial);
+    this.present.frustumCulled = false;
+    this.present.renderOrder = 5;
+    this.present.name = "volume-present";
+    this.present.visible = false;
     if (curved) this.refreshShell();
   }
 
@@ -646,15 +741,107 @@ export class VolumeLayer {
     }
   }
 
+  /** Display resolution and step count from the frame budget. Does not change colour mapping. */
+  setPresentation(scale: number, steps: number): void {
+    this.resolutionScale = scale;
+    this.setSteps(steps);
+  }
+
   resize(renderer: THREE.WebGLRenderer): void {
-    const w = Math.max(1, renderer.domElement.width);
-    const h = Math.max(1, renderer.domElement.height);
-    if (w !== this.depthWidth || h !== this.depthHeight) {
-      this.depthTarget.setSize(w, h);
-      this.depthWidth = w;
-      this.depthHeight = h;
+    if (this.disposed) return;
+    const drawingW = Math.max(1, renderer.domElement.width);
+    const drawingH = Math.max(1, renderer.domElement.height);
+    const next = volumeBufferSize(drawingW, drawingH, this.resolutionScale);
+    this.drawingWidth = drawingW;
+    this.drawingHeight = drawingH;
+    if (next.width !== this.depthWidth || next.height !== this.depthHeight) {
+      this.depthTarget.setSize(next.width, next.height);
+      this.colorTarget.setSize(next.width, next.height);
+      this.depthWidth = next.width;
+      this.depthHeight = next.height;
     }
-    this.material.uniforms.uResolution.value.set(w, h);
+    this.bufferWidth = this.depthWidth;
+    this.bufferHeight = this.depthHeight;
+    this.material.uniforms.uResolution.value.set(this.bufferWidth, this.bufferHeight);
+    (this.presentMaterial.uniforms.uTexel.value as THREE.Vector2).set(1 / this.bufferWidth, 1 / this.bufferHeight);
+    this.presentMaterial.uniforms.uAware.value = this.resolutionScale < 0.999 ? 1 : 0;
+  }
+
+  /**
+   * Raymarch the current camera into `colorTarget`. Called every visible frame; the previous
+   * image is cleared and is not reprojected or reused when the camera moves.
+   */
+  renderOffscreen(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera): void {
+    if (this.disposed || !this.mesh.visible) return;
+    const previousTarget = renderer.getRenderTarget();
+    const previousAutoClear = renderer.autoClear;
+    const previousBackground = scene.background;
+    const clear = this.clearScratch;
+    renderer.getClearColor(clear);
+    const clearAlpha = renderer.getClearAlpha();
+    const layerMask = camera.layers.mask;
+    camera.layers.set(VOLUME_RAY_LAYER);
+    renderer.autoClear = false;
+    scene.background = null;
+    try {
+      renderer.setRenderTarget(this.colorTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear(true, true, true);
+      // Shadow maps are drawn by the main pass. This render only raymarches the volume mesh.
+      withoutShadowPass(renderer, () => renderer.render(scene, camera));
+      this.renderCount += 1;
+    } finally {
+      scene.background = previousBackground;
+      renderer.setClearColor(clear, clearAlpha);
+      renderer.setRenderTarget(previousTarget);
+      renderer.autoClear = previousAutoClear;
+      camera.layers.mask = layerMask;
+    }
+    this.presentMaterial.uniforms.uColor.value = this.colorTarget.texture;
+    this.presentMaterial.uniforms.uDepth.value = this.depthTarget.depthTexture;
+  }
+
+  /** After a restored context the old framebuffers are invalid. Texture identities stay put for uniforms. */
+  rebuildTargets(): void {
+    if (this.disposed) return;
+    this.depthTarget.dispose();
+    this.colorTarget.dispose();
+    const depth = new THREE.WebGLRenderTarget(1, 1, {
+      depthBuffer: true,
+      stencilBuffer: false,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+    });
+    depth.depthTexture = new THREE.DepthTexture(1, 1, THREE.UnsignedIntType);
+    depth.depthTexture.format = THREE.DepthFormat;
+    depth.depthTexture.minFilter = THREE.NearestFilter;
+    depth.depthTexture.magFilter = THREE.NearestFilter;
+    const color = new THREE.WebGLRenderTarget(1, 1, {
+      depthBuffer: false,
+      stencilBuffer: false,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      generateMipmaps: false,
+    });
+    color.texture.generateMipmaps = false;
+    this.depthTarget = depth;
+    this.colorTarget = color;
+    this.depthWidth = 1;
+    this.depthHeight = 1;
+    this.material.uniforms.uDepth.value = depth.depthTexture;
+    this.presentMaterial.uniforms.uColor.value = color.texture;
+    this.presentMaterial.uniforms.uDepth.value = depth.depthTexture;
+  }
+
+  framebufferStatus(renderer: THREE.WebGLRenderer): { depth: number; color: number } {
+    const gl = renderer.getContext() as WebGL2RenderingContext;
+    const previous = renderer.getRenderTarget();
+    renderer.setRenderTarget(this.depthTarget);
+    const depth = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    renderer.setRenderTarget(this.colorTarget);
+    const color = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    renderer.setRenderTarget(previous);
+    return { depth, color };
   }
 
   setSteps(steps: number): void {
@@ -678,7 +865,7 @@ export class VolumeLayer {
     this.invView.copy(camera.matrixWorld);
     u.uInvProjection.value.copy(this.invProjection);
     u.uInvView.value.copy(this.invView);
-    u.uResolution.value.set(renderer.domElement.width, renderer.domElement.height);
+    u.uResolution.value.set(this.bufferWidth, this.bufferHeight);
     u.uDepth.value = this.depthTarget.depthTexture;
     // three's logdepthbuf constant for the current far plane (only read when uDepthEncoding = log)
     if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
@@ -687,9 +874,14 @@ export class VolumeLayer {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.mesh.geometry.dispose();
+    this.present.geometry.dispose();
     this.material.dispose();
+    this.presentMaterial.dispose();
     this.depthTarget.depthTexture?.dispose();
     this.depthTarget.dispose();
+    this.colorTarget.dispose();
   }
 }

@@ -229,6 +229,7 @@ function setProxy(on: boolean): void {
 
 function setView(name: string): void {
   if (!viewer || !geo.value) return;
+  window.__atmosApi?.noteCameraJump?.();
   const g = geo.value.meta.grid;
   const [u, v, hd, pt, range] = VIEWS[name] ?? VIEWS.overview!;
   viewer.camera.lookAt(
@@ -296,9 +297,12 @@ function start({ meta, dem, ground }: GeoFoundation): void {
     // Cesium CompositeOITFS compares opaque to czm_backgroundColor exactly.
     // Dark theme #000000 makes that test drop the globe at steep pitches; disable OIT.
     orderIndependentTranslucency: false,
+    // Multisample starts at 1. The frame budget raises it when the steady frame time allows.
+    msaaSamples: 1,
     terrainProvider: terrains.provider(false),
   });
   viewer.scene.verticalExaggeration = 1;
+  viewer.scene.globe.maximumScreenSpaceError = 6;
   setBasemap(ui.style);
   const proxy = new DepthProxy(meta.grid, meta.map, dem);
   overlay.value = new GlobeOverlay(viewer.scene, meta.map, proxy, {
@@ -306,7 +310,16 @@ function start({ meta, dem, ground }: GeoFoundation): void {
     onContextLost: () => {
       window.__globeReady = false;
       status.value = "WebGL 上下文丢失";
-      error.value = "WebGL 上下文丢失（显卡重置或显存不足），请刷新页面。";
+      error.value = "WebGL 上下文丢失。浏览器事件没有说明是设备超时还是资源不足。恢复后会从较低的绘制预算继续。";
+    },
+    onContextRestored: () => {
+      window.__globeReady = true;
+      status.value = "已恢复";
+      error.value = null;
+      if (viewer) {
+        viewer.useDefaultRenderLoop = true;
+        viewer.scene.requestRender();
+      }
     },
   });
   geoUniforms = createGeoUniforms(meta.map, ground);

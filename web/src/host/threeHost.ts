@@ -3,7 +3,10 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { FrameHooks, ViewHost } from "./types";
 import { applyLayerRendererConfig, beginLayerFrame } from "./rendererConfig";
 import { withHidden } from "./hidden";
+import { withColorWriteDisabled, withoutShadowPass } from "../render/depthPrepass";
 import { scaledOffset, southOfTarget } from "./viewMotion";
+
+export type ContextListener = { lost: () => void; restored: () => void };
 
 export type ThreeHostOptions = {
   initialView?: { position: [number, number, number]; target: [number, number, number] } | null;
@@ -43,6 +46,8 @@ export function createThreeHost(
   let disposed = false;
   let last = options.initialNow ?? performance.now();
   let resizeObserver: ResizeObserver | null = null;
+  let pixelRatioCap = 1;
+  const contextListeners: ContextListener[] = [];
 
   function size(): { width: number; height: number } {
     return { width: canvas.clientWidth, height: canvas.clientHeight };
@@ -50,7 +55,7 @@ export function createThreeHost(
 
   function resize(): void {
     const { width, height } = size();
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    renderer.setPixelRatio(Math.min(pixelRatioCap, window.devicePixelRatio || 1));
     renderer.setSize(width, height, false);
     camera.aspect = width / Math.max(1, height);
     camera.updateProjectionMatrix();
@@ -59,7 +64,9 @@ export function createThreeHost(
 
   function frame(now: number): void {
     if (disposed || !hooks || !scene) return;
+    // Keep the loop armed while the context is lost, or a restore has nothing to draw with.
     raf = requestAnimationFrame(frame);
+    if (renderer.getContext().isContextLost()) return;
     const realDt = (now - last) / 1000;
     const dt = Math.min(0.1, realDt);
     last = now;
@@ -70,6 +77,14 @@ export function createThreeHost(
     renderer.render(scene, camera);
     hooks.afterRender(now);
   }
+
+  canvas.addEventListener("webglcontextlost", (event) => {
+    event.preventDefault();
+    for (const listener of [...contextListeners]) listener.lost();
+  });
+  canvas.addEventListener("webglcontextrestored", () => {
+    for (const listener of [...contextListeners]) listener.restored();
+  });
 
   const host: ViewHost = {
     renderer,
@@ -86,13 +101,31 @@ export function createThreeHost(
       raf = requestAnimationFrame(frame);
     },
     captureOccluderDepth(target, sceneToRender, hide) {
-      // same calls as the pre-ViewHost VolumeLayer.captureDepth (first two tabs stay pixel-identical)
+      // Colour writes stay off and the shadow map waits for the main pass. Depth still comes from
+      // each mesh's own material so placement and logarithmic depth are unchanged.
       withHidden(hide, () => {
-        renderer.setRenderTarget(target);
-        renderer.clear(true, true, true);
-        renderer.render(sceneToRender, camera);
-        renderer.setRenderTarget(null);
+        withoutShadowPass(renderer, () => {
+          withColorWriteDisabled([sceneToRender], () => {
+            renderer.setRenderTarget(target);
+            renderer.clear(true, true, true);
+            renderer.render(sceneToRender, camera);
+            renderer.setRenderTarget(null);
+          });
+        });
       });
+    },
+    setPixelRatioCap(cap: number) {
+      const next = Math.max(1, Math.min(2, cap));
+      if (next === pixelRatioCap) return;
+      pixelRatioCap = next;
+      resize();
+    },
+    addContextListener(listener: ContextListener) {
+      contextListeners.push(listener);
+      return () => {
+        const index = contextListeners.indexOf(listener);
+        if (index >= 0) contextListeners.splice(index, 1);
+      };
     },
     raycaster(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();

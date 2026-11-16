@@ -199,6 +199,15 @@ export class AtmosScene {
     this.sun.castShadow = on;
   }
 
+  /** Change the shadow map edge length. No-op when the size is already in use, so the budget can reapply it. */
+  setShadowMapSize(size: number): void {
+    const next = Math.max(256, Math.round(size));
+    if (this.sun.shadow.mapSize.x === next && this.sun.shadow.mapSize.y === next) return;
+    this.sun.shadow.mapSize.set(next, next);
+    this.sun.shadow.map?.dispose();
+    this.sun.shadow.map = null;
+  }
+
   /**
    * Re-aim the key light for centre-ENU (x east, y north, z up). The default
    * Y-up box setup would light from the north and miss the shadow frustum.

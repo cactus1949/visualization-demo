@@ -134,6 +134,11 @@ export class DataStore {
    * Re-sent only when the jobs or the window change. Frames that leave the window
    * have their in-flight fetches aborted and their cached bytes released.
    */
+  /** Allow the same wish list to be sent again after the GPU copies were dropped. */
+  forceResend(): void {
+    this.lastWant = "";
+  }
+
   want(jobs: WantJob[], frames: number[]): void {
     const text = `${jobs.map(DataStore.jobKey).join("|")}#${frames.join(",")}`;
     if (text === this.lastWant) return;

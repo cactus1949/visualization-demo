@@ -18,6 +18,7 @@ import { RtcCameraSync, type EnuSphere } from "./rtcCamera";
 import { DEFAULT_DEPTH_MODE, depthEncodingOf, depthModeFromQuery, type Box3Like, type GlobeDepthMode } from "./depthMode";
 import { applyLayerRendererConfig, beginLayerFrame } from "../host/rendererConfig";
 import { withHidden } from "../host/hidden";
+import { withColorWriteDisabled, withoutShadowPass } from "../render/depthPrepass";
 import type { FrameHooks, ViewHost } from "../host/types";
 import { zoomTravelM } from "../host/viewMotion";
 
@@ -29,6 +30,7 @@ export interface CesiumHostOptions {
   /** legacy | near | log; `?globeDepth=linear` is an alias of near. Overrides depthEncoding when set. */
   depthMode?: GlobeDepthMode;
   onContextLost?: () => void;
+  onContextRestored?: () => void;
 }
 
 /** Default is log. `?globeDepth=linear` (or `near`) uses a linear buffer; `legacy` is the PR ① sphere frustum. */
@@ -54,6 +56,8 @@ export class GlobeOverlay implements ViewHost {
   private readonly proxyScene = new Scene();
   private readonly ctx: CesiumContextInternals;
   private readonly onContextLost: () => void;
+  private readonly onContextRestored: () => void;
+  private readonly contextListeners: { lost: () => void; restored: () => void }[] = [];
   private readonly ray = new Raycaster();
   private removePre: (() => void) | null = null;
   private removePost: (() => void) | null = null;
@@ -71,6 +75,7 @@ export class GlobeOverlay implements ViewHost {
     this.depthMode = opts.depthMode ?? (opts.depthEncoding === "linear" ? "near" : opts.depthEncoding === "log" ? "log" : DEFAULT_DEPTH_MODE);
     this.depthEncoding = depthEncodingOf(this.depthMode);
     this.onContextLost = opts.onContextLost ?? (() => {});
+    this.onContextRestored = opts.onContextRestored ?? (() => {});
     this.renderer = new WebGLRenderer({ canvas: cesium.canvas, context: this.ctx._gl, logarithmicDepthBuffer: this.depthEncoding === "log" });
     this.renderer.autoClear = false;
     this.renderer.setPixelRatio(1);
@@ -83,6 +88,7 @@ export class GlobeOverlay implements ViewHost {
     this.proxyScene.add(proxy.mesh);
     this.scene.add(this.layers);
     cesium.canvas.addEventListener("webglcontextlost", this.handleLost);
+    cesium.canvas.addEventListener("webglcontextrestored", this.handleRestored);
     this.removePre = cesium.preRender.addEventListener(() => this.resyncAfter(() => {}));
     this.removePost = cesium.postRender.addEventListener(() => this.frame());
   }
@@ -91,6 +97,13 @@ export class GlobeOverlay implements ViewHost {
     event.preventDefault();
     this.lost = true;
     this.onContextLost();
+    for (const listener of [...this.contextListeners]) listener.lost();
+  };
+
+  private readonly handleRestored = (): void => {
+    this.lost = false;
+    this.onContextRestored();
+    for (const listener of [...this.contextListeners]) listener.restored();
   };
 
   size(): { width: number; height: number } {
@@ -175,13 +188,33 @@ export class GlobeOverlay implements ViewHost {
 
   captureOccluderDepth(target: WebGLRenderTarget, scene: Scene, hide: Object3D[]): void {
     this.resyncAfter(() => {
-      this.renderer.setRenderTarget(target);
-      this.renderer.clear(true, true, true);
-      // the proxy stands in for Cesium's terrain / ellipsoid (Cesium's own depth is not usable here)
-      this.renderer.render(this.proxyScene, this.camera);
-      withHidden(hide, () => this.renderer.render(scene, this.camera));
-      this.renderer.setRenderTarget(null);
+      withoutShadowPass(this.renderer, () => {
+        withColorWriteDisabled([this.proxyScene, scene], () => {
+          this.renderer.setRenderTarget(target);
+          this.renderer.clear(true, true, true);
+          // the proxy stands in for Cesium's terrain / ellipsoid (Cesium's own depth is not usable here)
+          this.renderer.render(this.proxyScene, this.camera);
+          withHidden(hide, () => this.renderer.render(scene, this.camera));
+          this.renderer.setRenderTarget(null);
+        });
+      });
     });
+  }
+
+  /** Cesium multisample count and terrain screen-space error. Both are runtime values and can rise again. */
+  applyGlobeCost(msaa: number, screenSpaceError: number): void {
+    const samples = Math.max(1, Math.round(msaa));
+    if (this.cesium.msaaSamples !== samples) this.cesium.msaaSamples = samples;
+    const error = Math.max(1, screenSpaceError);
+    if (this.cesium.globe.maximumScreenSpaceError !== error) this.cesium.globe.maximumScreenSpaceError = error;
+  }
+
+  addContextListener(listener: { lost: () => void; restored: () => void }): () => void {
+    this.contextListeners.push(listener);
+    return () => {
+      const index = this.contextListeners.indexOf(listener);
+      if (index >= 0) this.contextListeners.splice(index, 1);
+    };
   }
 
   raycaster(clientX: number, clientY: number): Raycaster {
@@ -287,6 +320,7 @@ export class GlobeOverlay implements ViewHost {
     this.removePre?.();
     this.removePost?.();
     this.element.removeEventListener("webglcontextlost", this.handleLost);
+    this.element.removeEventListener("webglcontextrestored", this.handleRestored);
     this.layers.traverse((o) => {
       if (!(o instanceof Mesh) && !("isLineSegments" in o)) return;
       const m = o as Mesh;

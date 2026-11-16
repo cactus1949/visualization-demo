@@ -26,6 +26,8 @@ import { FETCH_WINDOW_AHEAD, windowFrames } from "../state/fetchWindow";
 import { canShowFrames, planOf, type LayerNeed } from "../state/openVariables";
 import { HorizontalSlice, VerticalSection, type ScalarBinding } from "../render/slices";
 import { VolumeLayer, type CurvedVolumeOptions } from "../render/volume";
+import { FrameBudget, budgetText } from "../render/frameBudget";
+import { instantsMatch } from "../render/shownTarget";
 import { DEFAULT_CUTS, clampCuts, cutBounds, type CutState } from "../render/cuts";
 import { PolylineSection } from "../render/sections/polyline";
 import { AxisSection } from "../render/sections/planes";
@@ -203,6 +205,13 @@ const panelOpen = ref(props.showPanel && !embed);
 const status = ref("加载数据清单…");
 const gpu = ref("");
 const fps = ref(0);
+const budget = new FrameBudget({ now: performance.now() });
+const budgetLabelText = ref(budgetText(budget.knobs(), DEFAULT_PARTICLES.trailLength));
+const gpuNotice = ref("");
+let volumeStepsPin: number | null = null;
+let removeContextListener: (() => void) | null = null;
+let budgetApplied = false;
+let loseExt: { loseContext: () => void; restoreContext: () => void } | null = null;
 const drawCalls = ref(0);
 const loadMs = reactive<Record<string, number>>({});
 const uploadMs: Record<string, number> = {};
@@ -1132,6 +1141,7 @@ function updateGround(): void {
 function updateVolume(): void {
   if (!volume || !manifest.value) return;
   volume.mesh.visible = volumeWanted();
+  volume.present.visible = volume.mesh.visible;
   if (!volumeWanted()) {
     syncVolumeSlices();
     if (window.__atmosStatus) window.__atmosStatus.volume = null;
@@ -1140,6 +1150,7 @@ function updateVolume(): void {
   const b = binding(layers.volumeVar);
   if (!b) {
     volume.mesh.visible = false;
+    volume.present.visible = false;
     request(layers.volumeVar);
     syncVolumeSlices();
     return;
@@ -1305,6 +1316,7 @@ function ensureParticles(): void {
       { ...particleParams },
       gv ? { map: gv.map, geo: gv.geo } : null,
     );
+    particles?.setRenderTrailDivisor(budget.knobs().trailDivisor);
   });
   if (!particles) return;
   atmos.root.add((particles as WindParticles).object);
@@ -1316,7 +1328,7 @@ function ensureParticles(): void {
  * enough to occlude the volume; particles and visual helpers must never write occluder depth. */
 function updateDepthOccluders(): void {
   depthOccluders.length = 0;
-  if (volume) depthOccluders.push(volume.mesh);
+  if (volume) depthOccluders.push(volume.mesh, volume.present);
   if (particles) depthOccluders.push(particles.object);
   if (hslice) {
     depthOccluders.push(hslice.mesh, hslice.outline);
@@ -2342,6 +2354,8 @@ function toggleFullscreen(): void {
 }
 
 function setView(name: string): void {
+  budget.forceConservative(performance.now(), "camera");
+  applyBudget();
   const preset = VIEWS[name] ?? VIEWS.overview;
   host!.setView(preset.pos, preset.target);
   if (name === "slice") {
@@ -2364,7 +2378,34 @@ let fpsFrames = 0;
 let fpsTime = 0;
 let ready = false;
 
+function applyBudget(): void {
+  if (!host || !atmos) return;
+  const knobs = budget.knobs();
+  const steps = volumeStepsPin ?? knobs.volumeSteps;
+  volume?.setPresentation(knobs.volumeScale, steps);
+  if (volume?.mesh.visible) volume.resize(host.renderer);
+  particles?.setRenderTrailDivisor(knobs.trailDivisor);
+  atmos.setShadowMapSize(knobs.shadowMapSize);
+  host.setPixelRatioCap?.(knobs.pixelRatioCap);
+  host.applyGlobeCost?.(knobs.cesiumMsaa, knobs.cesiumScreenSpaceError);
+  budgetLabelText.value = budgetText({ ...knobs, volumeSteps: steps }, particleParams.trailLength);
+  budgetApplied = true;
+  budget.consumeChange();
+}
+
+function rebuildGpuAfterRestore(): void {
+  runLayerGl(() => {
+    particles?.rebuildGpu();
+    volume?.rebuildTargets();
+    timeFields?.dropGpuCopies();
+  });
+  store?.forceResend();
+  wantsDirty = true;
+  applyBudget();
+}
+
 function beforeCamera(now: number, dt: number, realDt: number): void {
+  if (budget.noteFrame(realDt * 1000, now) || !budgetApplied) applyBudget();
   fpsFrames += 1;
   fpsTime += realDt;
   if (fpsTime > 0.5) {
@@ -2399,12 +2440,15 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
     // globe k-slider: skip step while dragging so placeHistory does not replay every layer each frame
     if (layers.particles && !particlePlaceDeferred) runLayerGl(() => particles!.step(dt));
   }
+  if (volume) volume.present.visible = volume.mesh.visible;
   if (volume?.mesh.visible) {
     updateDepthOccluders();
     volume.resize(host!.renderer);
     host!.captureOccluderDepth(volume.depthTarget, atmos.scene, depthOccluders);
     volume.markDepthValid();
     volume.update(host!.camera, atmos.root, host!.renderer);
+    // Current view, every frame. The offscreen target is cleared inside renderOffscreen.
+    runLayerGl(() => volume!.renderOffscreen(host!.renderer, atmos.scene, host!.camera));
   }
 }
 
@@ -2630,9 +2674,64 @@ function exposeApi(): void {
       if (p.cutLowAlpha !== undefined) layers.cutLowAlpha = Boolean(p.cutLowAlpha);
       if (p.cutLowThreshold !== undefined) layers.cutLowThreshold = Number(p.cutLowThreshold);
     },
-    setVolumeSteps: (steps: number) => volume?.setSteps(Number(steps)),
+    setVolumeSteps: (steps: number) => {
+      volumeStepsPin = Number(steps);
+      applyBudget();
+    },
     setCamera: (pos: [number, number, number], target: [number, number, number]) => {
+      budget.forceConservative(performance.now(), "camera");
+      applyBudget();
       host!.setView(pos, target);
+    },
+    setTheme: (theme: "dark" | "light") => {
+      view.theme = theme;
+    },
+    noteCameraJump: () => {
+      budget.forceConservative(performance.now(), "camera");
+      applyBudget();
+    },
+    setBudgetLevel: (level: number) => {
+      budget.setLevel(level, performance.now());
+      applyBudget();
+    },
+    frameBudget: () => ({
+      level: budget.level,
+      knobs: budget.knobs(),
+      label: budgetLabelText.value,
+      stats: budget.stats(),
+      spikes: budget.recentSpikes().map((spike) => ({ ...spike })),
+      lossCount: budget.lossCount,
+      restoreCount: budget.restoreCount,
+      redrawsEveryFrame: true,
+      volume: volume
+        ? {
+            width: volume.bufferWidth,
+            height: volume.bufferHeight,
+            drawingWidth: volume.drawingWidth,
+            drawingHeight: volume.drawingHeight,
+            renders: volume.renderCount,
+            steps: volume.steps,
+            scale: volume.resolutionScale,
+            visible: volume.mesh.visible,
+          }
+        : null,
+      trail: { requested: particleParams.trailLength, divisor: budget.knobs().trailDivisor },
+      particles: { count: particleParams.count, trailLength: particleParams.trailLength },
+      instants: timeFields?.displayInstants() ?? [],
+      instantsMatch: instantsMatch(timeFields?.displayInstants() ?? []),
+      probe: { a: cur.a, b: cur.b, s: cur.s },
+      notice: gpuNotice.value,
+    }),
+    volumeFramebuffer: () => (volume && host ? volume.framebufferStatus(host.renderer) : null),
+    loseContextForTest: () => {
+      const gl = host!.renderer.getContext() as WebGL2RenderingContext;
+      loseExt = gl.getExtension("WEBGL_lose_context");
+      loseExt?.loseContext();
+      return Boolean(loseExt);
+    },
+    restoreContextForTest: () => {
+      loseExt?.restoreContext();
+      return Boolean(loseExt);
     },
     setExaggeration: (n: number) => {
       view.exaggeration = THREE.MathUtils.clamp(Number(n) || 1, 1, 10);
@@ -3178,10 +3277,11 @@ async function start(): Promise<void> {
   volume = new VolumeLayer(domain, props.globeVolume);
   volume.setDepthEncoding(host!.depthEncoding);
   // globe only: `?volSteps=` overrides the ray-march step count (box path keeps 128)
-  if (globeMode && query.get("volSteps")) volume.setSteps(Number(query.get("volSteps")));
+  if (globeMode && query.get("volSteps")) volumeStepsPin = Number(query.get("volSteps"));
   hslice.group.visible = false;
   vsection.group.visible = false;
   volume.mesh.visible = false;
+  volume.present.visible = false;
   polyline.group.visible = false;
   boxStack.group.visible = false;
   hslice.setAnnotationLayer(annotations);
@@ -3189,6 +3289,8 @@ async function start(): Promise<void> {
   polyline.setAnnotationLayer(annotations);
   boxStack.setAnnotationLayer(annotations);
   atmos.root.add(hslice.group, vsection.group, polyline.group, boxStack.group, volume.mesh);
+  atmos.scene.add(volume.present);
+  applyBudget();
   if (props.initialView) {
     if (props.createHost) host!.setView(props.initialView.camera, props.initialView.target);
     view.exaggeration = props.initialView.exaggeration;
@@ -3204,6 +3306,17 @@ async function start(): Promise<void> {
   exposeApi();
   updateGround();
   host!.start(atmos.scene, { beforeCamera, afterCamera, afterRender, resize });
+  removeContextListener = host.addContextListener?.({
+    lost: () => {
+      gpuNotice.value = "WebGL 上下文丢失。浏览器没有说明原因。";
+      budget.noteLost(performance.now());
+    },
+    restored: () => {
+      gpuNotice.value = "上下文已恢复。绘制先用较低预算，再按实测帧时间加回。这不表示已经达到 30 FPS。";
+      budget.noteRestored(performance.now());
+      rebuildGpuAfterRestore();
+    },
+  }) ?? null;
 
   const skipBuildings = new URLSearchParams(location.search).has("noBuildings");
   if (skipBuildings) {
@@ -3309,6 +3422,10 @@ watch(
 watch(
   () => layers.volume,
   (on) => {
+    if (on) {
+      budget.forceConservative(performance.now(), "volume");
+      applyBudget();
+    }
     if (on && !debugCoexist) section.enabled = false;
     updateVolume();
   },
@@ -3630,14 +3747,18 @@ onBeforeUnmount(() => {
   pointerTarget = null;
   window.removeEventListener("keydown", onDrawKey);
   window.removeEventListener("keydown", onTimeKey);
+  removeContextListener?.();
+  removeContextListener = null;
   store?.dispose();
   // GL deletes (render targets, buffers, programs) on Cesium's context: isolated like the other particle GL work
-  runLayerGl(() => particles?.dispose());
+  runLayerGl(() => {
+    particles?.dispose();
+    volume?.dispose();
+  });
   hslice?.dispose();
   vsection?.dispose();
   polyline?.dispose();
   runLayerGl(() => boxStack?.dispose());
-  volume?.dispose();
   buildings?.dispose();
   globeGround?.dispose();
   shellLabels?.dispose();
@@ -3705,6 +3826,8 @@ onBeforeUnmount(() => {
     />
     <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
 
+    <div class="budget-chip" :title="'当前绘制预算，滑条仍是你设的数值'">{{ budgetLabelText }}</div>
+    <p v-if="gpuNotice" class="gpu-notice">{{ gpuNotice }}</p>
     <div v-if="section.enabled && section.drawMode" class="draw-chip">
       <span class="dot" />{{ section.kind === "polyline" ? "绘制折线" : "绘制框选" }} · {{ drawHint }}
     </div>
@@ -4207,6 +4330,34 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .draw-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: #5ce1ff; box-shadow: 0 0 6px #5ce1ff; }
+.budget-chip {
+  position: absolute;
+  z-index: 6;
+  left: 16px;
+  bottom: 58px;
+  max-width: min(560px, calc(100% - 32px));
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12px;
+  pointer-events: none;
+}
+.gpu-notice {
+  position: absolute;
+  z-index: 7;
+  left: 16px;
+  right: 16px;
+  bottom: 92px;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 13px;
+}
 .panel {
   position: absolute;
   z-index: 6;

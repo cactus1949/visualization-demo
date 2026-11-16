@@ -4,6 +4,7 @@ import { colormapTexture } from "./colormaps";
 import type { Domain } from "./fields";
 import type { GeoMap } from "../geo/mapping";
 import { placementKey } from "../geo/particlePlace";
+import { drawnTrailLength } from "./frameBudget";
 import { colorRangeUniform, type ParticleColorMode } from "./particleRanges";
 import {
   LOGDEPTH_FRAGMENT,
@@ -449,6 +450,8 @@ export class WindParticles {
   private head = 0;
   private seed = 1;
   private needsReset = true;
+  /** Display divisor from the frame budget. 1 draws the slider length. Does not reallocate. */
+  private trailDivisor = 1;
   private state: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget] | null = null;
   private history: THREE.WebGLArrayRenderTarget | null = null;
   /** globe only: the history ring placed into centre-ENU (same layer index as `history`) */
@@ -581,6 +584,28 @@ export class WindParticles {
     this.needsReset = true;
   }
 
+  /**
+   * Shorten the ribbon that is drawn. The slider value and the GPU buffers stay as they are,
+   * so the budget can move every few seconds without reallocating the history targets.
+   */
+  setRenderTrailDivisor(divisor: number): void {
+    const next = Math.max(1, Math.round(divisor));
+    if (next === this.trailDivisor) return;
+    this.trailDivisor = next;
+    this.apply();
+  }
+
+  /** After a restored context the float targets are invalid. Count and slider values stay. */
+  rebuildGpu(): void {
+    const count = this.params.count;
+    this.disposeTargets();
+    this.size = 0;
+    this.layers = 0;
+    this.count = 0;
+    this.params.count = count;
+    this.allocate();
+  }
+
   /** Apply parameter changes; cheap (uniforms only) except when the count changes. */
   setParams(params: Partial<ParticleParams>): void {
     const before = this.params;
@@ -624,7 +649,7 @@ export class WindParticles {
     sim.uHeight.value.set(Math.max(0.005, lo), Math.min(this.domain.top - 0.005, hi));
     sim.uSize.value = this.size;
     const trail = this.trailMaterial.uniforms;
-    const trailLength = Math.max(2, Math.min(this.layers, Math.round(p.trailLength)));
+    const trailLength = drawnTrailLength(p.trailLength, this.trailDivisor, this.layers);
     trail.uTrail.value = trailLength;
     trail.uLayers.value = this.layers;
     trail.uWidth.value = p.lineWidth;
