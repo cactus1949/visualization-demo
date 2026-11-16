@@ -1,0 +1,7 @@
+numpy
+scipy
+rasterio
+pyproj
+xarray
+netCDF4
+brotli

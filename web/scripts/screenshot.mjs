@@ -1,0 +1,678 @@
+// Headless screenshots of the demo (software WebGL via SwiftShader — FPS is NOT representative).
+// usage: node scripts/screenshot.mjs [url] [overview|slice|section|close|embedded|filter|panel|probe-hover|probe-fixed|probe-panel] [out.png]
+import { chromium } from "playwright-core";
+
+const args = process.argv.slice(2);
+const VIEWS = [
+  "overview",
+  "slice",
+  "section",
+  "section-volume",
+  "section-volume-05",
+  "section-volume-02",
+  "hslice-volume-05",
+  "close",
+  "embedded",
+  "filter",
+  "panel",
+  "probe-hover",
+  "probe-fixed",
+  "probe-panel",
+  "v6-xcut-face",
+  "v6-xcut-open",
+  "v6-ycut",
+  "v6-lon-05",
+  "v6-lat-1",
+  "v6-polyline",
+  "v6-boxstack",
+  "v6_1-probe-hover",
+  "v6_1-probe-fixed",
+  "v6_1-probe-near",
+  "v6_1-probe-far",
+  "v6_1-polyline",
+  "v6_1-boxstack",
+  "v6_1-lon",
+  "v6_2-panel-section",
+  "v6_2-height-handle",
+  "v6_2-lon-handle",
+  "v6_2-polyline-1pt",
+  "v6_2-polyline-3pt",
+  "v6_2-box-empty",
+  "v6_2-box-40",
+  "v6_2-box-exag",
+  "v6_3-unfolded",
+  "v6_3-box-drag",
+  "v6_3-particles-1x",
+  "v6_3-particles-exag",
+  "v6_4-box-drag",
+  "v6_4-box-fixed",
+  "v6_7-box-front",
+  "v6_7-box-back",
+  "v6_7-box-particles",
+  "v6_4-panel-volume",
+  "v6_4-panel-section",
+  "v6_5-opacity-02",
+  "v6_5-opacity-10",
+  "v6_5-tint-off",
+  "v6_5-tint-50",
+  "v6_5-tint-100",
+  "v6_6-probe-speed",
+  "v6_6-probe-tke",
+  "v6_6-probe-w",
+  "v6_8-volume-icing",
+  "v6_8-volume-icing-boxcut",
+  "v6_8-box-icing-opaque",
+  "v6_8-box-icing-lowalpha",
+  "v6_8-hslice-icing",
+  "v6_8-box-drag-labels",
+  "v6_9-ground-range-full",
+  "v6_9-ground-range-narrow",
+  "v6_10-volume-cuts",
+  "v6_10-section-v",
+];
+const view = args.find((a) => VIEWS.includes(a)) ?? "overview";
+const output = args.find((a) => a.endsWith(".png")) ?? `/tmp/atmos-${view}.png`;
+const base = args.find((a) => a.startsWith("http")) ?? "http://localhost:4173/";
+const gpuFlags = process.env.ATMOS_GPU
+  ? ["--use-gl=angle", "--use-angle=vulkan", "--enable-gpu"]
+  : ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"];
+
+const browser = await chromium.launch({
+  headless: true,
+  executablePath: process.env.CHROME ?? "/usr/bin/google-chrome",
+  args: ["--headless=new", "--no-sandbox", "--ignore-gpu-blocklist", ...gpuFlags],
+});
+const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+const consoleErrors = [];
+page.on("console", (m) => {
+  if (m.type() === "error" || m.type() === "warning")
+    consoleErrors.push(`${m.type()}: ${m.text()}`);
+});
+page.on("pageerror", (e) => consoleErrors.push(String(e)));
+await page.goto(base, { waitUntil: "networkidle" });
+await page.waitForFunction(() => window.__atmosReady === true, null, { timeout: 90_000 });
+// wait for buildings
+await page
+  .waitForFunction(() => (window.__atmosStatus?.buildings ?? 0) > 0, null, { timeout: 60_000 })
+  .catch(() => {});
+
+await page.evaluate((v) => {
+  const api = window.__atmosApi;
+  if (v === "slice") {
+    api.setView("slice");
+    api.setSlice({ heightM: 120, variable: "speed" });
+    api.setLayer("particles", false);
+  } else if (v === "section") {
+    api.setView("section");
+    api.setSection({ variable: "speed", azimuthDeg: 75, offsetKm: -1.2 });
+    api.probeAt(150, 160);
+  } else if (["section-volume", "section-volume-05", "section-volume-02"].includes(v)) {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setSection({
+      variable: "speed",
+      azimuthDeg: 90,
+      offsetKm: -0.4,
+      opacity: v === "section-volume" ? 1 : v === "section-volume-05" ? 0.5 : 0.2,
+      contours: 12,
+    });
+    api.setVolume({
+      enabled: true,
+      variable: "tke",
+      opacity: 0.7,
+      threshold: 0.15,
+      filterSlices: false,
+    });
+    api.setCamera([-12.5, 7.2, 11.5], [0.4, 0.8, -0.4]);
+  } else if (v === "hslice-volume-05") {
+    api.setView("slice");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setSlice({ variable: "speed", heightM: 250, opacity: 0.5, contours: 12 });
+    api.setVolume({
+      enabled: true,
+      variable: "tke",
+      opacity: 0.7,
+      threshold: 0.15,
+      filterSlices: false,
+    });
+    api.setCamera([-12.5, 7.2, 11.5], [0.4, 0.8, -0.4]);
+  } else if (v === "close") {
+    api.setView("close");
+    api.setParticles({ paused: true });
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+  } else if (v === "embedded") {
+    api.setView("close");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    // slightly lower opacity so façades stay readable in the close view
+    api.setVolume({ enabled: true, variable: "tke", opacity: 0.4, filterSlices: false });
+  } else if (v === "filter") {
+    api.setView("close");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({
+      enabled: true,
+      variable: "tke",
+      filterMin: 8.5,
+      filterMax: 12.5,
+      filterSlices: false,
+    });
+  } else if (v === "panel") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+  } else if (v === "probe-hover") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setProbeEnabled(true);
+    api.probeHoverAt(190, 120);
+  } else if (v === "probe-fixed") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setProbeEnabled(true);
+    api.probeAt(140, 170);
+    api.probeHoverAt(200, 110);
+  } else if (v === "probe-panel") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+    api.setProbeEnabled(true);
+    api.probeAt(150, 160);
+  } else if (v === "v6-xcut-face" || v === "v6-xcut-open") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+    api.setCuts({ x: [0.2, 0.7], y: [0, 1], z: [0, 1], faces: v === "v6-xcut-face" });
+    api.setCamera([-16, 6.5, 4.5], [0.5, 0.5, 0]);
+  } else if (v === "v6-ycut") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke" });
+    api.setCuts({ y: [0.25, 0.75], faces: true });
+    api.setCamera([-12.5, 7.2, 11.5], [0.4, 0.6, -0.4]);
+  } else if (v === "v6-lon-05" || v === "v6-lat-1") {
+    api.setLayer("particles", false);
+    api.setSectionMode(v === "v6-lon-05" ? "lon" : "lat");
+    api.setSection({ variable: "speed", offsetKm: -1.0, opacity: v === "v6-lon-05" ? 0.5 : 1 });
+    api.setVolume({ enabled: true, variable: "tke" });
+    api.setCamera(v === "v6-lon-05" ? [-14, 5.5, 2] : [-2, 5.5, 15], [0.4, 0.7, -0.4]);
+  } else if (v === "v6-polyline") {
+    api.setLayer("particles", false);
+    api.setSectionMode("polyline");
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSection({ variable: "speed", opacity: 0.85 });
+    api.setCamera([-8, 5.2, 14], [0, 0.6, 0]);
+  } else if (v === "v6-boxstack") {
+    api.setLayer("particles", false);
+    api.setSectionMode("box");
+    api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 100, heightMaxM: 350, stepLevels: 2, stretch: 2.2, spacingKm: 0.22 });
+    api.setSection({ opacity: 0.75 });
+    api.setCamera([-13, 5.8, 10], [0, 0.8, 0]);
+  } else if (v === "v6_1-probe-hover") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setProbeEnabled(true);
+    api.probeHoverAt(190, 120);
+  } else if (v === "v6_1-probe-fixed" || v === "v6_1-probe-near" || v === "v6_1-probe-far") {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setProbeEnabled(true);
+    api.probeAt(140, 170);
+    if (v === "v6_1-probe-fixed") api.probeHoverAt(200, 110);
+    // cell (140,170) is about (-0.57, -1.23) km in root-local xz; stem goes to y=1 km * 3.
+    if (v === "v6_1-probe-near") api.setCamera([-2.6, 2.2, 1.4], [-0.57, 0.7, -1.23]);
+    if (v === "v6_1-probe-far") api.setCamera([-28, 18, 26], [0, 0.6, 0]);
+  } else if (v === "v6_1-polyline") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("polyline");
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSection({ variable: "speed", opacity: 0.85 });
+    api.selectPolylineVertex(1);
+    api.setCamera([-12, 7.2, 16], [-1.0, 0.5, -0.5]);
+  } else if (v === "v6_1-boxstack") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("box");
+    api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 100, heightMaxM: 350, stepLevels: 2, stretch: 2.2, spacingKm: 0.22 });
+    api.setSection({ opacity: 0.75 });
+    api.setCamera([-13, 5.8, 10], [0, 0.8, 0]);
+  } else if (v === "v6_1-lon") {
+    api.setLayer("particles", false);
+    api.setSectionMode("lon");
+    api.setSection({ variable: "speed", offsetKm: -1.0, opacity: 0.5 });
+    api.setVolume({ enabled: true, variable: "tke" });
+    api.setCamera([-14, 5.5, 2], [0.4, 0.7, -0.4]);
+  } else if (v === "v6_2-panel-section") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("polyline");
+  } else if (v === "v6_2-height-handle") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setSlice({ variable: "speed", heightM: 250, opacity: 0.85, contours: 12 });
+    api.setCamera([-8, 6.5, 12], [6, 0.8, 0]);
+  } else if (v === "v6_2-lon-handle") {
+    api.setLayer("particles", false);
+    api.setSectionMode("lon");
+    api.setSection({ variable: "speed", offsetKm: -1.0, opacity: 0.6, contours: 12 });
+    api.setVolume({ enabled: true, variable: "tke", opacity: 0.6 });
+    api.setExaggeration(3);
+    api.setCamera([-14, 5.5, 2], [0.4, 1.0, -0.4]);
+  } else if (v === "v6_2-polyline-1pt") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setPolyline([{ x: -2, z: 1 }]);
+    api.setSection({ variable: "speed" });
+    api.setCamera([-8, 5.5, 12], [-2, 0.3, 1]);
+  } else if (v === "v6_2-polyline-3pt") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSection({ variable: "speed", opacity: 0.85 });
+    api.selectPolylineVertex(1);
+    api.setCamera([-8, 5.2, 14], [0, 0.6, 0]);
+  } else if (v === "v6_2-box-empty") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke" });
+    api.setExaggeration(3);
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSectionMode("box");
+    api.setCamera([-13, 8, 12], [0, 0.4, 0]);
+  } else if (v === "v6_2-box-40" || v === "v6_2-box-exag") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke" });
+    api.setExaggeration(v === "v6_2-box-exag" ? 3 : 1);
+    api.setSectionMode("box");
+    api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 0, heightMaxM: 1000, stepLevels: 1, defined: true });
+    api.setSection({ variable: "speed", opacity: 0.75 });
+    api.setCamera(v === "v6_2-box-exag" ? [-7.5, 3.6, 9.5] : [-6.5, 1.7, 8.5], [0, v === "v6_2-box-exag" ? 1.2 : 0.45, 0]);
+  } else if (v === "v6_3-unfolded") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    api.setPolyline([{ x: -6, z: -5 }, { x: -1, z: 1 }, { x: 5, z: 4 }]);
+    api.setSection({ variable: "tke", opacity: 0.85 });
+    api.selectPolylineVertex(1);
+    api.setCamera([-8, 5.2, 14], [0, 0.6, 0]);
+  } else if (v === "v6_3-box-drag") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(3);
+    // Plant height + lon grips first, then switch to box: leftover grips must disappear.
+    api.setSlice({ variable: "speed", heightM: 250, opacity: 0.85, contours: 12 });
+    api.setSectionMode("lon");
+    api.setSection({ variable: "speed", offsetKm: -1.0, opacity: 0.6 });
+    api.setSectionMode("box");
+    api.setCamera([0, 18, 0.2], [0, 0, 0]);
+  } else if (["v6_4-box-drag", "v6_4-box-fixed"].includes(v)) {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setView("top");
+    api.setSectionMode("box");
+    if (v === "v6_4-box-fixed") {
+      api.setBox({ x0: -4, z0: -3, x1: 4, z1: 3, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
+    }
+    api.setCamera([0, 26, 0.01], [0, 0, 0]);
+  } else if (["v6_7-box-front", "v6_7-box-back", "v6_7-box-particles"].includes(v)) {
+    api.setLayer("particles", v === "v6_7-box-particles");
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("box");
+    api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
+    api.setSection({ variable: "speed", opacity: 0.55 });
+    api.setCamera(v === "v6_7-box-back" ? [9.5, 6.5, -11] : [-9.5, 6.5, 11], [0, 0.5, 0]);
+  } else if (v === "v6_10-volume-cuts") {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setExaggeration(3);
+    api.setSection({ enabled: false });
+    api.setVolume({ enabled: true, variable: "wind_shear", opacity: 2, threshold: 0, filterSlices: true });
+    api.setCuts({ y: [0.25, 0.75], z: [0.2, 0.8], faces: true });
+    api.setCamera([-12.5, 7.2, 11.5], [0.4, 0.6, -0.4]);
+  } else if (v === "v6_10-section-v") {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    // Reproduce the leftover-filter order: volume icing first, then a section of v.
+    api.setVolume({ enabled: true, variable: "icing_index", filterSlices: true });
+    api.setSectionMode("lon");
+    api.setSection({
+      variable: "v",
+      colormap: "glacier",
+      autoRange: false,
+      min: -15,
+      opacity: 1,
+      lowAlpha: false,
+      contours: 0,
+      offsetKm: -0.4,
+    });
+    api.setCamera([-14, 5.5, 2], [0.4, 0.7, -0.4]);
+  } else if (v.startsWith("v6_9-ground-range-")) {
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSection({ enabled: false });
+    api.setLayer("ground", true);
+    api.setGroundVar("t2m");
+    api.setBuildingOpacity(1);
+    api.setBuildingTint({ enabled: true, strength: 0.6 });
+    api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
+  } else if (v.startsWith("v6_8-")) {
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setExaggeration(3);
+    if (v === "v6_8-volume-icing" || v === "v6_8-volume-icing-boxcut") {
+      api.setSection({ enabled: false });
+      api.setVolume({ enabled: true, variable: "icing_index", opacity: 0.6, threshold: 0.2, filterSlices: false });
+      // same footprint as the box stack (x ±3.2 km, z ±2.4 km of a ~17.9 km domain)
+      if (v === "v6_8-volume-icing-boxcut") api.setCuts({ x: [0.322, 0.678], y: [0.366, 0.634], faces: false });
+    } else if (v === "v6_8-hslice-icing") {
+      api.setVolume({ enabled: false });
+      api.setSlice({ variable: "icing_index", heightM: 487.5, colormap: "magma", autoRange: true, opacity: 0.9, lowAlpha: true, lowThreshold: 0.15, contours: 0 });
+    } else {
+      api.setVolume({ enabled: false });
+      api.setSectionMode("box");
+      const drag = v === "v6_8-box-drag-labels";
+      api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: drag ? 1 : 4, defined: true });
+      api.setSection({
+        variable: "icing_index", colormap: "magma", autoRange: true, contours: 0,
+        opacity: v === "v6_8-box-icing-opaque" ? 1 : 0.9,
+        lowAlpha: v !== "v6_8-box-icing-opaque", lowThreshold: 0.15,
+      });
+    }
+    api.setCamera([-9.5, 6.5, 11], [0, 0.6, 0]);
+  } else if (v === "v6_4-panel-volume") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: true, variable: "tke", filterSlices: false });
+  } else if (v === "v6_4-panel-section") {
+    api.setLayer("particles", false);
+    api.setVolume({ enabled: false });
+    api.setSectionMode("polyline");
+  } else if (v === "v6_5-opacity-02" || v === "v6_5-opacity-10") {
+    api.setView("overview");
+    api.setLayer("particles", true);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSection({ enabled: false });
+    api.setBuildingOpacity(v === "v6_5-opacity-02" ? 0.2 : 1);
+    api.setBuildingTint({ enabled: false });
+    api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
+  } else if (v === "v6_5-tint-off" || v === "v6_5-tint-50" || v === "v6_5-tint-100") {
+    api.setView("overview");
+    api.setLayer("particles", true);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSection({ enabled: false });
+    api.setGroundVar("t2m");
+    api.setBuildingOpacity(1);
+    api.setBuildingTint({
+      enabled: v !== "v6_5-tint-off",
+      strength: v === "v6_5-tint-100" ? 100 : 50,
+    });
+    api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
+  } else if (v === "v6_6-probe-speed" || v === "v6_6-probe-tke" || v === "v6_6-probe-w") {
+    const name = v === "v6_6-probe-speed" ? "speed" : v === "v6_6-probe-tke" ? "tke" : "w";
+    api.setView("overview");
+    api.setLayer("particles", false);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setSection({ enabled: false });
+    api.setProbeEnabled(true);
+    api.probeAt(140, 170);
+    api.setProbeVariable(name);
+    api.setCamera([-14.5, 9, 13.5], [0.5, 0.3, -0.5]);
+  } else if (v === "v6_3-particles-1x" || v === "v6_3-particles-exag") {
+    const hi = v === "v6_3-particles-exag";
+    api.setLayer("particles", true);
+    api.setLayer("buildings", true);
+    api.setVolume({ enabled: false });
+    api.setExaggeration(hi ? 8 : 1);
+    api.setSectionMode("box");
+    api.setBox({ x0: -3.2, z0: -2.4, x1: 3.2, z1: 2.4, heightMinM: 0, heightMaxM: 1000, stepLevels: 4, defined: true });
+    api.setSection({ variable: "speed", opacity: 0.55 });
+    api.setCamera(hi ? [-8.5, 5.2, 11] : [-8.5, 2.2, 11], [0, hi ? 1.6 : 0.35, 0]);
+  } else {
+    api.setView("overview");
+  }
+}, view);
+if (view.startsWith("v6_5-tint")) {
+  await page.waitForFunction(() => window.__atmosApi.hasData("t2m") === true, null, { timeout: 90_000 });
+}
+if (view === "v6_10-volume-cuts") {
+  await page.waitForFunction(() => window.__atmosApi.hasData("wind_shear") === true, null, { timeout: 120_000 });
+  await page.waitForFunction(() => window.__atmosStatus?.volume === "wind_shear", null, { timeout: 120_000 });
+}
+if (view === "v6_10-section-v") {
+  await page.waitForFunction(() => window.__atmosApi.hasData("v") === true, null, { timeout: 120_000 });
+}
+if (view.startsWith("v6_9-ground-range-")) {
+  await page.waitForFunction(() => window.__atmosApi.hasData("t2m") === true, null, { timeout: 120_000 });
+  await page.waitForTimeout(500);
+  // ATMOS_GROUND_RANGE="lo,hi" overrides the narrow window (K) for quick checks.
+  const win = (process.env.ATMOS_GROUND_RANGE ?? "275,277").split(",").map(Number);
+  await page.evaluate(([narrow, lo, hi]) => {
+    const api = window.__atmosApi;
+    if (narrow) api.setGroundFilter({ min: lo, max: hi });
+    else api.setGroundFilter({ reset: true });
+  }, [view.endsWith("narrow"), win[0], win[1]]);
+}
+if (view.startsWith("v6_8-")) {
+  await page.waitForFunction(() => window.__atmosApi.hasData("icing_index") === true, null, { timeout: 120_000 });
+  if (view.startsWith("v6_8-volume-icing")) {
+    await page.waitForFunction(() => window.__atmosStatus?.volume === "icing_index", null, { timeout: 120_000 });
+  }
+  if (view === "v6_8-hslice-icing") {
+    // slice at the level holding the column maximum of icing_index
+    await page.evaluate(() => {
+      const api = window.__atmosApi;
+      const m = api.debugArgmax("icing_index");
+      api.setSlice({ heightM: 12.5 + 25 * m.k, lowAlpha: true, lowThreshold: 0.15, colormap: "magma", opacity: 0.9, contours: 0 });
+    });
+  }
+}
+if (view.startsWith("v6_6-probe-")) {
+  const name = view === "v6_6-probe-speed" ? "speed" : view === "v6_6-probe-tke" ? "tke" : "w";
+  if (name !== "speed") {
+    await page.waitForFunction((n) => window.__atmosApi.hasData(n) === true, name, { timeout: 90_000 });
+  }
+  await page.waitForFunction((n) => {
+    const title = document.querySelector(".profile .x-title")?.textContent ?? "";
+    const path = document.querySelector(".profile path.series");
+    if (!path) return false;
+    if (n === "speed") return title.includes("水平风速") || title.includes("m/s");
+    if (n === "tke") return title.toLowerCase().includes("tke") || title.includes("湍");
+    return title.includes("垂直") || /\bw\b/.test(title) || title.includes("w");
+  }, name, { timeout: 90_000 });
+}
+if (
+  [
+    "embedded",
+    "filter",
+    "panel",
+    "probe-panel",
+    "close",
+    "section-volume",
+    "section-volume-05",
+    "section-volume-02",
+    "hslice-volume-05",
+    "v6-xcut-face",
+    "v6-xcut-open",
+    "v6-ycut",
+    "v6-lon-05",
+    "v6-lat-1",
+    "v6_1-lon",
+    "v6_2-lon-handle",
+    "v6_4-panel-volume",
+  ].includes(view)
+) {
+  await page.waitForFunction(() => window.__atmosStatus?.volume === "tke", null, {
+    timeout: 90_000,
+  });
+}
+if (
+  [
+    "v6-boxstack",
+    "v6-polyline",
+    "v6_1-boxstack",
+    "v6_1-polyline",
+    "v6_2-panel-section",
+    "v6_2-polyline-1pt",
+    "v6_2-polyline-3pt",
+    "v6_2-box-empty",
+    "v6_2-box-40",
+    "v6_2-box-exag",
+    "v6_2-height-handle",
+    "v6_2-lon-handle",
+    "v6_3-unfolded",
+    "v6_3-box-drag",
+    "v6_3-particles-1x",
+    "v6_3-particles-exag",
+    "v6_4-box-drag",
+    "v6_4-box-fixed",
+    "v6_8-box-icing-opaque",
+    "v6_8-box-icing-lowalpha",
+    "v6_8-hslice-icing",
+    "v6_8-box-drag-labels",
+    "v6_7-box-front",
+    "v6_7-box-back",
+    "v6_4-panel-volume",
+    "v6_4-panel-section",
+  ].includes(view)
+) {
+  await page.evaluate(() => {
+    const details = [...document.querySelectorAll("details")].find((d) => {
+      const text = d.querySelector("summary")?.textContent ?? "";
+      return text.includes("剖面") || text.includes("垂直剖面") || text.includes("水平切片");
+    });
+    details?.setAttribute("open", "");
+    details?.scrollIntoView({ block: "start" });
+  });
+}
+await page.waitForTimeout(1500);
+// software GL renders ~1 fps: pre-run 40 simulation steps so trails are fully grown
+await page.evaluate(() => {
+  window.__atmosApi.advance(70, 1 / 60);
+  window.__atmosApi.setParticles({ paused: true }); // freeze at a representative 60 fps state
+});
+await page.waitForTimeout(1500);
+const before = await page.evaluate(() => window.__atmosApi.sampleParticle());
+await page.evaluate(() => window.__atmosApi.advance(3, 1 / 60));
+const after = await page.evaluate(() => window.__atmosApi.sampleParticle());
+await page.waitForTimeout(2500);
+const status = await page.evaluate(() => window.__atmosApi.status());
+let gripInfo = null;
+let debugCompare = null;
+let debugVisibility = null;
+if (view.startsWith("v6_10-")) {
+  debugVisibility = await page.evaluate(() => window.__atmosApi.debugVisibility());
+}
+let dragLabels = null;
+if (view.startsWith("v6_8-")) {
+  debugCompare = await page.evaluate(() => {
+    const api = window.__atmosApi;
+    const m = api.debugArgmax("icing_index");
+    // the max voxel plus a near-zero voxel at the same level (sparse low end)
+    return { argmax: m, max: api.debugCompare("icing_index", m.ix, m.iy, m.k), low: api.debugCompare("icing_index", 5, 5, m.k) };
+  });
+}
+if (view === "v6_8-box-drag-labels") {
+  const canvas = page.locator("canvas.canvas");
+  const cbox = await canvas.boundingBox();
+  // grab the visible corner handle closest to the bottom of the screen and drag it outward
+  const handle = await page.evaluate(() => {
+    const hs = [...document.querySelectorAll(".anno-dot.is-handle")].filter((el) => !el.classList.contains("anno-hidden"));
+    let best = null;
+    for (const el of hs) {
+      const r = el.getBoundingClientRect();
+      const c = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      if (!best || c.y > best.y) best = c;
+    }
+    return best;
+  });
+  if (handle && cbox) {
+    await page.mouse.move(handle.x, handle.y);
+    await page.waitForTimeout(200);
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i += 1) {
+      await page.mouse.move(handle.x + i * 9, handle.y + i * 5);
+      await page.waitForTimeout(250); // SwiftShader renders ~1–4 fps; let frames run mid-drag
+    }
+    await page.waitForTimeout(800);
+  }
+  dragLabels = await page.evaluate(() => {
+    const labels = [...document.querySelectorAll(".anno-label")];
+    const visible = labels.filter((el) => !el.classList.contains("anno-hidden"));
+    return { total: labels.length, visible: visible.length, texts: visible.map((el) => el.textContent) };
+  });
+}
+if (view === "v6_3-box-drag" || view === "v6_4-box-drag") {
+  const canvas = page.locator("canvas.canvas");
+  const box = await canvas.boundingBox();
+  if (box) {
+    const x0 = box.x + box.width * 0.38;
+    const y0 = box.y + box.height * 0.42;
+    const x1 = box.x + box.width * 0.62;
+    const y1 = box.y + box.height * 0.62;
+    await page.mouse.move(x0, y0);
+    await page.waitForTimeout(200);
+    await page.mouse.down();
+    await page.mouse.move(x1, y1, { steps: 12 });
+    await page.waitForTimeout(400);
+  }
+  gripInfo = await page.evaluate(() => {
+    const grips = [...document.querySelectorAll(".anno-grip")];
+    const visible = grips.filter((el) => !el.classList.contains("anno-hidden") && el.style.display !== "none");
+    return {
+      total: grips.length,
+      visible: visible.length,
+      icons: visible.map((el) => el.textContent?.trim() ?? ""),
+    };
+  });
+}
+if (["v6_2-panel-section", "v6_4-panel-volume", "v6_4-panel-section"].includes(view)) {
+  const panel = page.locator(".panel");
+  await panel.evaluate((el) => {
+    for (const d of el.querySelectorAll("details")) {
+      const text = d.querySelector("summary")?.textContent ?? "";
+      // Open 图层 (contains 体渲染) and 剖面 together so mutual exclusion is visible.
+      if (text.includes("图层") || (text.includes("剖面") && !text.includes("粒子"))) d.setAttribute("open", "");
+      else d.removeAttribute("open");
+    }
+    el.scrollTop = 0;
+  });
+  await page.waitForTimeout(400);
+  await panel.screenshot({ path: output, timeout: 120_000 });
+} else {
+  await page.screenshot({ path: output, timeout: 120_000 });
+}
+console.log(
+  JSON.stringify({
+    view,
+    output,
+    status,
+    particleMoved: before.some((v, i) => Math.abs(v - after[i]) > 1e-6),
+    particleSampleBefore: before,
+    particleSampleAfter: after,
+    gripInfo,
+    debugCompare,
+    debugVisibility,
+    dragLabels,
+    consoleErrors: consoleErrors.slice(0, 10),
+  }),
+);
+await browser.close();

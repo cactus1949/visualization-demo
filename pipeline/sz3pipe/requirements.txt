@@ -1,0 +1,2 @@
+# SZ3 export only (pysz bundles SZ3 3.4.0, the same version as web/src/data/codecs/sz3/sz3_O3.wasm)
+pysz==1.1.0

@@ -1,0 +1,695 @@
+import * as THREE from "three";
+import { colormapTexture } from "./colormaps";
+import { GLSL_DOMAIN, domainUniforms, type Domain } from "./fields";
+import { GLSL_LOW_ALPHA, type ScalarBinding } from "./slices";
+import type { CompositeSurface } from "./sections/composite";
+import { type CutState, cutBounds } from "./cuts";
+import { GEO_GROUND_GLSL, geoInverseGlsl, type GeoUniforms } from "../globe/geoShader";
+import { shellBounds, type GeoGrid, type GeoMap } from "../geo/mapping";
+import { groundSampler, type GridField } from "../geo/placement";
+
+const MAX_SURFACES = 16;
+
+/** Curved-shell (globe) mode: root-local space is centre-ENU in units of map.enu_unit_m. */
+export type CurvedVolumeOptions = {
+  map: GeoMap;
+  grid: GeoGrid;
+  ground: GridField;
+  /** shared with the other globe layers (terrain / k live here) */
+  geo: GeoUniforms;
+  /** DEM used by the ground / building overlays (⑥); the volume itself does not read it. */
+  dem?: import("../geo/geoData").Dem;
+};
+
+export type DepthEncoding = "linear" | "log";
+
+/** Section surfaces composited inside the raymarch (box tabs and, since ④, the globe). */
+const SURF_UNIFORMS_GLSL = /* glsl */ `uniform sampler3D uSliceField;
+uniform sampler2D uSliceColormap;
+uniform sampler3D uSectionField;
+uniform sampler2D uSectionColormap;
+uniform float uSurfEnabled[16];
+uniform float uSurfKind[16];
+uniform float uSurfBinding[16];
+uniform vec4 uSurfP0[16];
+uniform vec4 uSurfP1[16];
+uniform float uSurfOpacity[16];
+uniform float uSurfMin[16];
+uniform float uSurfMax[16];
+uniform float uSurfFilterMin[16];
+uniform float uSurfFilterMax[16];
+uniform float uSurfFilterEnable[16];
+uniform float uSurfContours[16];
+uniform float uSurfLowAlpha[16];
+uniform float uSurfLowThreshold[16];
+`;
+const SURF_SPAN_GLSL = /* glsl */ `bool insideAA(vec3 p, vec4 p0, vec4 p1) {
+  return p.x >= p0.w - 1e-5 && p.x <= p1.x + 1e-5 && p.z >= p1.y - 1e-5 && p.z <= p1.z + 1e-5;
+}
+
+bool onSegment(vec3 p, vec4 p0, vec4 p1) {
+  vec2 a = vec2(p0.w, p1.x);
+  vec2 b = vec2(p1.y, p1.z);
+  vec2 ab = b - a;
+  float denom = max(dot(ab, ab), 1e-8);
+  float t = dot(vec2(p.x, p.z) - a, ab) / denom;
+  return t >= -1e-4 && t <= 1.0 + 1e-4;
+}
+
+`;
+/** Needs uField / uColormap, localToTex (GLSL_DOMAIN) and lowAlphaFactor (GLSL_LOW_ALPHA). */
+const SURF_COLOR_GLSL = /* glsl */ `vec4 surfaceColor(int i, vec3 p) {
+  float v;
+  vec4 c;
+  if (uSurfBinding[i] < 0.5) {
+    v = texture(uSliceField, localToTex(p)).r;
+    if (isnan(v)) return vec4(0.0);
+    c = texture(uSliceColormap, vec2(clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0), 0.5));
+  } else if (uSurfBinding[i] < 1.5) {
+    v = texture(uSectionField, localToTex(p)).r;
+    if (isnan(v)) return vec4(0.0);
+    c = texture(uSectionColormap, vec2(clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0), 0.5));
+  } else {
+    v = texture(uField, localToTex(p)).r;
+    if (isnan(v)) return vec4(0.0);
+    c = texture(uColormap, vec2(clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0), 0.5));
+  }
+  if (uSurfFilterEnable[i] > 0.5 && (v < uSurfFilterMin[i] - 1e-6 || v > uSurfFilterMax[i] + 1e-6))
+    return vec4(0.0);
+  float n = clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0);
+  if (uSurfContours[i] > 0.5) {
+    float bands = n * uSurfContours[i];
+    float dd = abs(fract(bands - 0.5) - 0.5) / max(fwidth(bands), 1e-5);
+    c.rgb = mix(c.rgb, c.rgb * 0.35, (1.0 - smoothstep(0.0, 1.2, dd)) * 0.55);
+  }
+  c.a = uSurfOpacity[i] * lowAlphaFactor(n, uSurfLowAlpha[i], uSurfLowThreshold[i]);
+  return c;
+}
+
+`;
+
+const vertexShader = /* glsl */ `
+uniform mat4 uRootInverse;
+out vec3 vWorld;
+void main() {
+  vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const fragmentShader = /* glsl */ `
+precision highp float;
+precision highp sampler3D;
+${GLSL_DOMAIN}
+uniform sampler3D uField;
+uniform sampler2D uColormap;
+uniform vec3 uCameraLocal;
+uniform float uMin;
+uniform float uMax;
+uniform float uFilterMin;
+uniform float uFilterMax;
+uniform float uFilterEnable;
+uniform float uThreshold;
+uniform float uOpacity;
+uniform float uSteps;
+uniform vec3 uCutLo;
+uniform vec3 uCutHi;
+${SURF_UNIFORMS_GLSL}${GLSL_LOW_ALPHA}
+uniform sampler2D uDepth;
+uniform float uDepthValid;
+uniform vec2 uResolution;
+uniform mat4 uInvProjection;
+uniform mat4 uInvView;
+uniform mat4 uRootInverse;
+in vec3 vWorld;
+out vec4 outColor;
+
+vec2 hitBox(vec3 o, vec3 d, vec3 lo, vec3 hi) {
+  vec3 inv = 1.0 / d;
+  vec3 a = (lo - o) * inv, b = (hi - o) * inv;
+  vec3 mn = min(a, b), mx = max(a, b);
+  return vec2(max(max(mn.x, mn.y), mn.z), min(min(mx.x, mx.y), mx.z));
+}
+
+${SURF_SPAN_GLSL}float surfT(int i, vec3 o, vec3 d) {
+  float q = 1e30;
+  if (uSurfKind[i] < 0.5) {
+    if (abs(d.y) > 1e-7) {
+      q = (uSurfP0[i].x - o.y) / d.y;
+      vec3 p = o + d * q;
+      if (p.x < uSurfP0[i].y - 1e-5 || p.x > uSurfP0[i].z + 1e-5 || p.z < uSurfP0[i].w - 1e-5 || p.z > uSurfP1[i].x + 1e-5)
+        q = 1e30;
+    }
+  } else {
+    vec2 n = uSurfP0[i].xy;
+    float den = n.x * d.x + n.y * d.z;
+    if (abs(den) > 1e-7) {
+      q = (uSurfP0[i].z - n.x * o.x - n.y * o.z) / den;
+      vec3 p = o + d * q;
+      bool yOk;
+      if (uSurfBinding[i] > 1.5)
+        yOk = p.y >= uCutLo.y - 1e-5 && p.y <= uCutHi.y + 1e-5;
+      else
+        yOk = p.y >= 0.0 && p.y <= uDomain.z;
+      bool spanOk = uSurfP1[i].w > 0.5 ? onSegment(p, uSurfP0[i], uSurfP1[i]) : insideAA(p, uSurfP0[i], uSurfP1[i]);
+      if (!yOk || !spanOk) q = 1e30;
+    }
+  }
+  return q;
+}
+
+${SURF_COLOR_GLSL}void main() {
+  vec3 rayLocal = (uRootInverse * vec4(vWorld, 1.0)).xyz;
+  vec3 dir = normalize(rayLocal - uCameraLocal);
+  vec3 domainLo = vec3(-uDomain.x * 0.5, 0.0, -uDomain.y * 0.5);
+  vec3 domainHi = vec3(uDomain.x * 0.5, uDomain.z, uDomain.y * 0.5);
+  vec2 domainT = hitBox(uCameraLocal, dir, domainLo, domainHi);
+  vec2 volT = hitBox(uCameraLocal, dir, uCutLo, uCutHi);
+  float t0 = max(domainT.x, 0.0);
+  float tEnd = domainT.y;
+  if (uDepthValid > 0.5) {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    float dep = texture(uDepth, uv).r;
+    if (dep < 0.999999) {
+      vec4 ndc = vec4(uv * 2.0 - 1.0, dep * 2.0 - 1.0, 1.0);
+      vec4 vp = uInvProjection * ndc;
+      vp /= max(vp.w, 1e-8);
+      vec3 dl = (uRootInverse * (uInvView * vp)).xyz;
+      tEnd = min(tEnd, dot(dl - uCameraLocal, dir) - 1e-4);
+    }
+  }
+  if (t0 >= tEnd) discard;
+
+  float ts[16];
+  bool used[16];
+  for (int i = 0; i < 16; i++) {
+    ts[i] = 1e30;
+    used[i] = false;
+    if (uSurfEnabled[i] > 0.5) {
+      ts[i] = surfT(i, uCameraLocal, dir);
+      if (ts[i] < t0 - 1e-5 || ts[i] > tEnd + 1e-5) ts[i] = 1e30;
+    }
+  }
+
+  float dt = (tEnd - t0) / uSteps;
+  float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  vec4 acc = vec4(0.0);
+  bool contributed = false;
+
+  for (float k = 0.0; k < 256.0; k++) {
+    if (k >= uSteps || acc.a > 0.97) break;
+    float sampleT = t0 + (k + jit) * dt;
+    for (int pass = 0; pass < 16; pass++) {
+      int best = -1;
+      float bt = 1e30;
+      for (int i = 0; i < 16; i++) {
+        if (!used[i] && ts[i] < bt) { bt = ts[i]; best = i; }
+      }
+      if (best < 0 || bt > sampleT) break;
+      vec4 sc = surfaceColor(best, uCameraLocal + dir * bt);
+      used[best] = true;
+      if (sc.a > 0.0) {
+        acc.rgb += (1.0 - acc.a) * sc.a * sc.rgb;
+        acc.a += (1.0 - acc.a) * sc.a;
+        contributed = true;
+        if (sc.a >= 0.999) { tEnd = bt; break; }
+      }
+    }
+    if (acc.a > 0.97) break;
+    if (sampleT < volT.x || sampleT > volT.y) continue;
+    vec3 p = uCameraLocal + dir * sampleT;
+    if (p.x < uCutLo.x || p.x > uCutHi.x || p.y < uCutLo.y || p.y > uCutHi.y || p.z < uCutLo.z || p.z > uCutHi.z)
+      continue;
+    float v = texture(uField, localToTex(p)).r;
+    if (isnan(v)) continue;
+    if (uFilterEnable > 0.5 && (v < uFilterMin - 1e-6 || v > uFilterMax + 1e-6)) continue;
+    float n = clamp((v - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
+    if (n < uThreshold) continue;
+    vec3 c = texture(uColormap, vec2(n, 0.5)).rgb;
+    // Same onset as sections' low-value alpha: transparent below the threshold,
+    // fully "on" 0.25 above it; higher values stay somewhat denser.
+    float a = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * dt * 6.0;
+    acc.rgb += (1.0 - acc.a) * a * c;
+    acc.a += (1.0 - acc.a) * a;
+  }
+
+  for (int pass = 0; pass < 16; pass++) {
+    if (acc.a > 0.97) break;
+    int best = -1;
+    float bt = 1e30;
+    for (int i = 0; i < 16; i++) {
+      if (!used[i] && ts[i] < bt) { bt = ts[i]; best = i; }
+    }
+    if (best < 0 || bt > tEnd) break;
+    vec4 sc = surfaceColor(best, uCameraLocal + dir * bt);
+    used[best] = true;
+    if (sc.a > 0.0) {
+      acc.rgb += (1.0 - acc.a) * sc.a * sc.rgb;
+      acc.a += (1.0 - acc.a) * sc.a;
+      contributed = true;
+      if (sc.a >= 0.999) break;
+    }
+  }
+
+  if (acc.a < 0.003 && !contributed) discard;
+  outColor = vec4(acc.rgb / max(acc.a, 1e-8), acc.a);
+}
+`;
+
+/**
+ * Curved-shell variant (globe tab). The ray is straight in centre-ENU; each sample goes back to
+ * grid space with the inverse polynomial, AGL = (h - terrain * g(u, v)) / k, and is then sampled
+ * with the same node / cell convention, filter, threshold, low-alpha onset and colour map as the box.
+ * Per-step alpha uses the step length in un-exaggerated km (vertical part divided by k), matching
+ * the box path whose root-local km are also un-exaggerated.
+ */
+function curvedFragmentShader(map: GeoMap): string {
+  return /* glsl */ `
+precision highp float;
+precision highp sampler3D;
+${geoInverseGlsl(map)}
+${GEO_GROUND_GLSL}
+${GLSL_LOW_ALPHA}
+${GLSL_DOMAIN}
+uniform sampler3D uField;
+uniform sampler2D uColormap;
+${SURF_UNIFORMS_GLSL}
+uniform float uGeoTop;
+uniform vec3 uBoxLo;
+uniform vec3 uBoxHi;
+uniform vec3 uCameraLocal;
+uniform float uMin;
+uniform float uMax;
+uniform float uFilterMin;
+uniform float uFilterMax;
+uniform float uFilterEnable;
+uniform float uThreshold;
+uniform float uOpacity;
+uniform float uSteps;
+uniform vec3 uCutLo;
+uniform vec3 uCutHi;
+uniform sampler2D uDepth;
+uniform float uDepthValid;
+uniform float uDepthEncoding;
+uniform float uLogDepthBufFC;
+uniform vec2 uResolution;
+uniform mat4 uInvProjection;
+uniform mat4 uInvView;
+uniform mat4 uRootInverse;
+in vec3 vWorld;
+out vec4 outColor;
+
+vec2 hitBox(vec3 o, vec3 d, vec3 lo, vec3 hi) {
+  vec3 inv = 1.0 / d;
+  vec3 a = (lo - o) * inv, b = (hi - o) * inv;
+  vec3 mn = min(a, b), mx = max(a, b);
+  return vec2(max(max(mn.x, mn.y), mn.z), min(min(mx.x, mx.y), mx.z));
+}
+// (u, v) node coordinates and r = AGL / top, as localToTex in fields.ts
+vec3 shellToTex(vec2 uv, float r) {
+  return vec3((uv * (uGridN.xy - 1.0) + 0.5) / uGridN.xy, r);
+}
+${SURF_SPAN_GLSL}
+${SURF_COLOR_GLSL}
+// ④ sections on the globe: surfaces are planes in first-two-tab box km, so test every ray step
+// in box km. Ray position -> (u, v, h) -> AGL r -> box (x east, y = r * top km, z south).
+vec3 boxOfUvh(vec3 uvh) {
+  float r = (uvh.z * 1e4 - uGeoTerrain * geoGround(uvh.xy)) / (uGeoK * uGeoTop);
+  return vec3((uvh.x - 0.5) * uDomain.x, r * uDomain.z, (0.5 - uvh.y) * uDomain.y);
+}
+vec3 boxAt(vec3 o, vec3 dir, float t) {
+  return boxOfUvh(geoInverse(o + dir * t));
+}
+// signed distance-like value whose zero set is surface i (box km)
+float surfF(int i, vec3 p) {
+  if (uSurfKind[i] < 0.5) return p.y - uSurfP0[i].x;
+  return uSurfP0[i].x * p.x + uSurfP0[i].y * p.z - uSurfP0[i].z;
+}
+// same span tests as surfT() on the box tabs, at a point already on surface i
+bool surfSpan(int i, vec3 p) {
+  if (uSurfKind[i] < 0.5)
+    return !(p.x < uSurfP0[i].y - 1e-5 || p.x > uSurfP0[i].z + 1e-5 || p.z < uSurfP0[i].w - 1e-5 || p.z > uSurfP1[i].x + 1e-5);
+  bool yOk = uSurfBinding[i] > 1.5
+    ? p.y >= uCutLo.y * uDomain.z - 1e-5 && p.y <= uCutHi.y * uDomain.z + 1e-5
+    : p.y >= 0.0 && p.y <= uDomain.z;
+  bool spanOk = uSurfP1[i].w > 0.5 ? onSegment(p, uSurfP0[i], uSurfP1[i]) : insideAA(p, uSurfP0[i], uSurfP1[i]);
+  return yOk && spanOk;
+}
+// crossing of surface i between ray params a (value fa) and b (fb), two regula-falsi steps
+float surfCross(int i, vec3 o, vec3 dir, float a, float fa, float b, float fb) {
+  for (int k = 0; k < 2; k++) {
+    float t = a + (b - a) * fa / (fa - fb);
+    float ft = surfF(i, boxAt(o, dir, t));
+    if ((ft < 0.0) == (fa < 0.0)) { a = t; fa = ft; } else { b = t; fb = ft; }
+  }
+  return a + (b - a) * fa / (fa - fb);
+}
+// Occluder depth -> view-space point. linear: NDC z = d * 2 - 1. log: three's logdepthbuf,
+// gl_FragDepth = log2(1 + w) * FC / 2 with FC = 2 / log2(far + 1), so w = 2^(2 d / FC) - 1.
+vec3 depthToView(vec2 uv, float d) {
+  if (uDepthEncoding > 0.5) {
+    float w = exp2(2.0 * d / uLogDepthBufFC) - 1.0;
+    vec4 far = uInvProjection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+    vec3 dir = far.xyz / far.w;
+    return dir * (w / -dir.z);
+  }
+  vec4 p = uInvProjection * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  return p.xyz / p.w;
+}
+
+void main() {
+  vec3 o = uCameraLocal;
+  vec3 dir = normalize((uRootInverse * vec4(vWorld, 1.0)).xyz - o);
+  vec2 hit = hitBox(o, dir, uBoxLo, uBoxHi);
+  float t0 = max(hit.x, 0.0), tEnd = hit.y;
+  if (uDepthValid > 0.5) {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    float d = texture(uDepth, uv).r;
+    if (d < 1.0) {
+      vec3 hitLocal = (uRootInverse * (uInvView * vec4(depthToView(uv, d), 1.0))).xyz;
+      tEnd = min(tEnd, dot(hitLocal - o, dir));
+    }
+  }
+  if (t0 >= tEnd) discard;
+  float dt = (tEnd - t0) / max(uSteps, 1.0);
+  float stepKm = dt * length(vec3(dir.xy, dir.z / max(uGeoK, 1e-6))) * ${(map.enu_unit_m / 1000).toFixed(6)};
+  float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  vec4 acc = vec4(0.0);
+  bool contributed = false;
+  bool anySurf = false;
+  float fPrev[16];
+  vec3 pPrev = boxAt(o, dir, t0);
+  for (int j = 0; j < 16; j++) {
+    fPrev[j] = 0.0;
+    if (uSurfEnabled[j] > 0.5) { anySurf = true; fPrev[j] = surfF(j, pPrev); }
+  }
+  float tPrev = t0;
+  // i == uSteps is the closing interval up to tEnd (surfaces only, no volume sample)
+  for (int i = 0; i < 1025; i++) {
+    if (float(i) > uSteps || acc.a > 0.97) break;
+    bool closing = float(i) >= uSteps;
+    float sampleT = closing ? tEnd : t0 + (float(i) + jit) * dt;
+    vec3 uvh = geoInverse(o + dir * sampleT);
+    if (anySurf) {
+      // surfaces crossed in (tPrev, sampleT], composited in ray order before this volume sample
+      vec3 pNow = boxOfUvh(uvh);
+      float tc[16];
+      for (int j = 0; j < 16; j++) {
+        tc[j] = 1e30;
+        if (uSurfEnabled[j] < 0.5) continue;
+        float f = surfF(j, pNow);
+        if ((f < 0.0) != (fPrev[j] < 0.0) && fPrev[j] != f) tc[j] = surfCross(j, o, dir, tPrev, fPrev[j], sampleT, f);
+        fPrev[j] = f;
+      }
+      for (int pass = 0; pass < 16; pass++) {
+        int best = -1;
+        float bt = 1e30;
+        for (int j = 0; j < 16; j++) if (tc[j] < bt) { bt = tc[j]; best = j; }
+        if (best < 0) break;
+        tc[best] = 1e30;
+        vec3 ps = boxAt(o, dir, bt);
+        if (!surfSpan(best, ps)) continue;
+        vec4 sc = surfaceColor(best, ps);
+        if (sc.a > 0.0) {
+          acc.rgb += (1.0 - acc.a) * sc.a * sc.rgb;
+          acc.a += (1.0 - acc.a) * sc.a;
+          contributed = true;
+        }
+      }
+      tPrev = sampleT;
+    }
+    if (closing || acc.a > 0.97) break;
+    if (uvh.x < uCutLo.x || uvh.x > uCutHi.x || uvh.y < uCutLo.z || uvh.y > uCutHi.z) continue;
+    float r = (uvh.z * 1e4 - uGeoTerrain * geoGround(uvh.xy)) / (uGeoK * uGeoTop);
+    if (r < uCutLo.y || r > uCutHi.y) continue;
+    float v = texture(uField, shellToTex(uvh.xy, r)).r;
+    if (isnan(v)) continue;
+    if (uFilterEnable > 0.5 && (v < uFilterMin - 1e-6 || v > uFilterMax + 1e-6)) continue;
+    float n = clamp((v - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
+    if (n < uThreshold) continue;
+    vec3 c = texture(uColormap, vec2(n, 0.5)).rgb;
+    float a = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * stepKm * 6.0;
+    acc.rgb += (1.0 - acc.a) * a * c;
+    acc.a += (1.0 - acc.a) * a;
+  }
+  if (acc.a < 0.003 && !contributed) discard;
+  outColor = vec4(acc.rgb / max(acc.a, 1e-8), acc.a);
+}`;
+}
+
+export class VolumeLayer {
+  readonly mesh: THREE.Mesh;
+  readonly material: THREE.ShaderMaterial;
+  readonly depthTarget: THREE.WebGLRenderTarget;
+  private readonly inverse = new THREE.Matrix4();
+  private readonly invProjection = new THREE.Matrix4();
+  private readonly invView = new THREE.Matrix4();
+  private depthWidth = 1;
+  private depthHeight = 1;
+  private domain: Domain;
+  /** null = box mode (first two tabs) */
+  private readonly curved: CurvedVolumeOptions | null;
+  private groundStats: ReturnType<typeof groundSampler> | null = null;
+
+  constructor(domain: Domain, curved: CurvedVolumeOptions | null = null) {
+    this.domain = domain;
+    this.curved = curved;
+    const uniforms: Record<string, THREE.IUniform> = {
+      ...domainUniforms(domain),
+      uField: { value: null },
+      uColormap: { value: colormapTexture("magma") },
+      uCameraLocal: { value: new THREE.Vector3() },
+      uMin: { value: 0 },
+      uMax: { value: 1 },
+      uFilterMin: { value: 0 },
+      uFilterMax: { value: 1 },
+      uFilterEnable: { value: 0 },
+      uThreshold: { value: 0.15 },
+      uOpacity: { value: 0.6 },
+      uSteps: { value: 128 },
+      uCutLo: { value: new THREE.Vector3(-domain.sx / 2, 0, -domain.sz / 2) },
+      uCutHi: { value: new THREE.Vector3(domain.sx / 2, domain.top, domain.sz / 2) },
+      uSliceField: { value: null },
+      uSliceColormap: { value: colormapTexture("viridis") },
+      uSectionField: { value: null },
+      uSectionColormap: { value: colormapTexture("viridis") },
+      uDepth: { value: null },
+      uDepthValid: { value: 0 },
+      uResolution: { value: new THREE.Vector2(1, 1) },
+      uInvProjection: { value: new THREE.Matrix4() },
+      uInvView: { value: new THREE.Matrix4() },
+      uRootInverse: { value: new THREE.Matrix4() },
+      uDepthEncoding: { value: 0 },
+      uLogDepthBufFC: { value: 1 },
+    };
+    if (curved) {
+      // shared uniform objects: terrain / k written once by the globe reach every layer
+      Object.assign(uniforms, curved.geo, {
+        uGeoTop: { value: curved.grid.top_m },
+        uBoxLo: { value: new THREE.Vector3() },
+        uBoxHi: { value: new THREE.Vector3() },
+      });
+      uniforms.uCutLo.value.set(0, 0, 0);
+      uniforms.uCutHi.value.set(1, 1, 1);
+    }
+    for (const n of [
+      "Enabled",
+      "Kind",
+      "Binding",
+      "Opacity",
+      "Min",
+      "Max",
+      "FilterMin",
+      "FilterMax",
+      "FilterEnable",
+      "Contours",
+      "LowAlpha",
+      "LowThreshold",
+    ]) {
+      uniforms[`uSurf${n}`] = { value: new Array(MAX_SURFACES).fill(0) };
+    }
+    uniforms.uSurfP0 = { value: Array.from({ length: MAX_SURFACES }, () => new THREE.Vector4()) };
+    uniforms.uSurfP1 = { value: Array.from({ length: MAX_SURFACES }, () => new THREE.Vector4()) };
+
+    this.material = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader,
+      fragmentShader: curved ? curvedFragmentShader(curved.map) : fragmentShader,
+      uniforms,
+      transparent: true,
+      side: THREE.BackSide,
+      depthWrite: false,
+      depthTest: false,
+    });
+    const box = curved
+      ? new THREE.BoxGeometry(1, 1, 1)
+      : new THREE.BoxGeometry(domain.sx, domain.top, domain.sz).translate(0, domain.top / 2, 0);
+    this.mesh = new THREE.Mesh(box, this.material);
+    this.mesh.renderOrder = 5;
+    this.mesh.name = "volume";
+    this.depthTarget = new THREE.WebGLRenderTarget(1, 1, {
+      depthBuffer: true,
+      stencilBuffer: false,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+    });
+    this.depthTarget.depthTexture = new THREE.DepthTexture(1, 1, THREE.UnsignedIntType);
+    this.depthTarget.depthTexture.format = THREE.DepthFormat;
+    this.depthTarget.depthTexture.minFilter = THREE.NearestFilter;
+    this.depthTarget.depthTexture.magFilter = THREE.NearestFilter;
+    this.material.uniforms.uDepth.value = this.depthTarget.depthTexture;
+    if (curved) this.refreshShell();
+  }
+
+  /** Curved mode: rebuild the bounding box after a terrain or exaggeration change (uniforms are shared). */
+  refreshShell(): void {
+    const c = this.curved;
+    if (!c) return;
+    const terrain = c.geo.uGeoTerrain.value > 0.5;
+    const b = shellBounds(c.grid, c.map, terrain ? (this.groundStats ??= groundSampler(c.ground)) : null, c.geo.uGeoK.value);
+    const lo = new THREE.Vector3(...b.lo), hi = new THREE.Vector3(...b.hi);
+    const u = this.material.uniforms;
+    u.uBoxLo.value.copy(lo);
+    u.uBoxHi.value.copy(hi);
+    const size = hi.clone().sub(lo), mid = hi.clone().add(lo).multiplyScalar(0.5);
+    this.mesh.geometry.dispose();
+    this.mesh.geometry = new THREE.BoxGeometry(size.x, size.y, size.z).translate(mid.x, mid.y, mid.z);
+  }
+
+  /** Curved-mode box in ENU units (debug / measurements). */
+  shellBox(): { lo: number[]; hi: number[] } | null {
+    if (!this.curved) return null;
+    const u = this.material.uniforms;
+    return { lo: (u.uBoxLo.value as THREE.Vector3).toArray(), hi: (u.uBoxHi.value as THREE.Vector3).toArray() };
+  }
+
+  get steps(): number {
+    return this.material.uniforms.uSteps.value as number;
+  }
+
+  /** Last colour mapping handed to the raymarcher (for debug comparisons). */
+  bound: { colormap: string; min: number; max: number } | null = null;
+
+  bind(field: ScalarBinding, colormap: string, min: number, max: number): void {
+    this.bound = { colormap, min, max };
+    const u = this.material.uniforms;
+    u.uField.value = field.texture;
+    u.uColormap.value = colormapTexture(colormap);
+    u.uMin.value = min;
+    u.uMax.value = max;
+  }
+
+  setFilter(min: number, max: number, enabled: boolean): void {
+    const u = this.material.uniforms;
+    u.uFilterMin.value = Math.min(min, max);
+    u.uFilterMax.value = Math.max(min, max);
+    u.uFilterEnable.value = enabled ? 1 : 0;
+  }
+
+  /** Cuts shrink the raymarched volume only; the mesh stays the full domain so sections still composite outside the cut. */
+  setCuts(cuts: CutState): void {
+    if (this.curved) {
+      // (u, AGL fraction, v); box z runs north -> south, v runs south -> north
+      const x0 = Math.min(cuts.x[0], cuts.x[1]);
+      const x1 = Math.max(cuts.x[0], cuts.x[1]);
+      const y0 = Math.min(cuts.y[0], cuts.y[1]);
+      const y1 = Math.max(cuts.y[0], cuts.y[1]);
+      const z0 = 1 - Math.max(cuts.z[0], cuts.z[1]);
+      const z1 = 1 - Math.min(cuts.z[0], cuts.z[1]);
+      this.material.uniforms.uCutLo.value.set(x0, y0, z0);
+      this.material.uniforms.uCutHi.value.set(x1, y1, z1);
+      return;
+    }
+    const b = cutBounds(this.domain, cuts);
+    this.material.uniforms.uCutLo.value.copy(b.lo);
+    this.material.uniforms.uCutHi.value.copy(b.hi);
+  }
+
+  setSurfaces(surfaces: CompositeSurface[]): void {
+    const u = this.material.uniforms;
+    for (let i = 0; i < MAX_SURFACES; i++) u.uSurfEnabled.value[i] = 0;
+    for (let i = 0; i < Math.min(MAX_SURFACES, surfaces.length); i++) {
+      const s = surfaces[i];
+      u.uSurfEnabled.value[i] = s.field ? 1 : 0;
+      u.uSurfKind.value[i] = s.kind === "horizontal" ? 0 : 1;
+      u.uSurfBinding.value[i] = s.binding === "slice" ? 0 : s.binding === "section" ? 1 : 2;
+      u.uSurfOpacity.value[i] = s.opacity;
+      u.uSurfMin.value[i] = s.min;
+      u.uSurfMax.value[i] = s.max;
+      u.uSurfFilterMin.value[i] = s.filterMin;
+      u.uSurfFilterMax.value[i] = s.filterMax;
+      u.uSurfFilterEnable.value[i] = s.filterEnable ? 1 : 0;
+      u.uSurfContours.value[i] = s.contours;
+      u.uSurfLowAlpha.value[i] = s.lowAlpha ? 1 : 0;
+      u.uSurfLowThreshold.value[i] = s.lowThreshold ?? 0.15;
+      if (s.field) {
+        if (s.binding === "slice") {
+          u.uSliceField.value = s.field.texture;
+          u.uSliceColormap.value = colormapTexture(s.colormap);
+        } else if (s.binding === "section") {
+          u.uSectionField.value = s.field.texture;
+          u.uSectionColormap.value = colormapTexture(s.colormap);
+        }
+      }
+      const p0 = u.uSurfP0.value[i] as THREE.Vector4;
+      const p1 = u.uSurfP1.value[i] as THREE.Vector4;
+      if (s.kind === "horizontal") {
+        p0.set(s.height ?? 0, s.clipX0 ?? -this.domain.sx / 2, s.clipX1 ?? this.domain.sx / 2, s.clipZ0 ?? -this.domain.sz / 2);
+        p1.set(s.clipZ1 ?? this.domain.sz / 2, 0, 0, 0);
+      } else if (s.ax !== undefined && s.az !== undefined && s.bx !== undefined && s.bz !== undefined) {
+        p0.set(s.normalX ?? 1, s.normalZ ?? 0, s.offset ?? 0, s.ax);
+        p1.set(s.az, s.bx, s.bz, 1);
+      } else {
+        p0.set(s.normalX ?? 1, s.normalZ ?? 0, s.offset ?? 0, s.clipX0 ?? -this.domain.sx / 2);
+        p1.set(s.clipX1 ?? this.domain.sx / 2, s.clipZ0 ?? -this.domain.sz / 2, s.clipZ1 ?? this.domain.sz / 2, 0);
+      }
+    }
+  }
+
+  resize(renderer: THREE.WebGLRenderer): void {
+    const w = Math.max(1, renderer.domElement.width);
+    const h = Math.max(1, renderer.domElement.height);
+    if (w !== this.depthWidth || h !== this.depthHeight) {
+      this.depthTarget.setSize(w, h);
+      this.depthWidth = w;
+      this.depthHeight = h;
+    }
+    this.material.uniforms.uResolution.value.set(w, h);
+  }
+
+  setSteps(steps: number): void {
+    this.material.uniforms.uSteps.value = THREE.MathUtils.clamp(Math.round(steps), 1, 512);
+  }
+
+  setDepthEncoding(mode: DepthEncoding): void {
+    this.material.uniforms.uDepthEncoding.value = mode === "log" ? 1 : 0;
+  }
+
+  markDepthValid(): void {
+    this.material.uniforms.uDepthValid.value = 1;
+  }
+
+  update(camera: THREE.Camera, root: THREE.Object3D, renderer: THREE.WebGLRenderer): void {
+    this.inverse.copy(root.matrixWorld).invert();
+    const u = this.material.uniforms;
+    u.uCameraLocal.value.copy(camera.position).applyMatrix4(this.inverse);
+    u.uRootInverse.value.copy(this.inverse);
+    this.invProjection.copy(camera.projectionMatrix).invert();
+    this.invView.copy(camera.matrixWorld);
+    u.uInvProjection.value.copy(this.invProjection);
+    u.uInvView.value.copy(this.invView);
+    u.uResolution.value.set(renderer.domElement.width, renderer.domElement.height);
+    u.uDepth.value = this.depthTarget.depthTexture;
+    // three's logdepthbuf constant for the current far plane (only read when uDepthEncoding = log)
+    if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
+      u.uLogDepthBufFC.value = 2 / Math.log2((camera as THREE.PerspectiveCamera).far + 1);
+    }
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    this.material.dispose();
+    this.depthTarget.depthTexture?.dispose();
+    this.depthTarget.dispose();
+  }
+}

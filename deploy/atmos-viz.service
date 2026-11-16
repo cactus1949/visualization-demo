@@ -1,0 +1,11 @@
+[Unit]
+Description=atmos visualization data API
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/atmos-viz
+ExecStart=/opt/atmos-viz/bin/serve.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

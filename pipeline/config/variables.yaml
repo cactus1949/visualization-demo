@@ -1,0 +1,23 @@
+u: {label_zh: 东向风速, colormap: rdbu, range: [-20, 20]}
+v: {label_zh: 北向风速, colormap: rdbu, range: [-20, 20]}
+w: {label_zh: 垂直风速, colormap: rdbu, range: [-1, 1]}
+u_gust: {label_zh: 阵风, colormap: turbo, range: [0, 30]}
+tke: {label_zh: 湍动能, colormap: viridis, range: [0, 15]}
+sigma_u: {label_zh: 东向脉动, colormap: magma, range: [0, 5]}
+sigma_v: {label_zh: 北向脉动, colormap: magma, range: [0, 5]}
+sigma_w: {label_zh: 垂直脉动, colormap: magma, range: [0, 5]}
+wind_shear: {label_zh: 风切变, colormap: magma, range: [0, 0.25]}
+dirdz: {label_zh: 风向垂直切变, colormap: rdbu, range: [-0.5, 0.5]}
+icing_index: {label_zh: 结冰指数, colormap: magma, range: [0, 1]}
+icing_accum: {label_zh: 累积覆冰, colormap: blues, range: [0, 600]}
+t2m: {label_zh: 2米气温, colormap: turbo, range: [260, 300]}
+q2m: {label_zh: 2米比湿, colormap: viridis, range: [0, 0.02]}
+u10m: {label_zh: 10米东向风, colormap: rdbu, range: [-20, 20]}
+v10m: {label_zh: 10米北向风, colormap: rdbu, range: [-20, 20]}
+ustar: {label_zh: 摩擦速度, colormap: viridis, range: [0, 3]}
+precip: {label_zh: 降水率, colormap: blues, range: [0, 5]}
+cloud: {label_zh: 云量, colormap: blues, range: [0, 100]}
+cloud_low: {label_zh: 低云量, colormap: blues, range: [0, 100]}
+visibility: {label_zh: 能见度, colormap: viridis, transform: log10, range: [2, 4.5]}
+risk_level: {label_zh: 风险等级, colormap: magma, range: [0, 4]}
+p: {label_zh: 地面气压, colormap: viridis, range: [90000, 110000]}
