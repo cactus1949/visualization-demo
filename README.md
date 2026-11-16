@@ -160,6 +160,14 @@ location /viz/api/ {
 
 如果 `/viz/data/` 不经接口、直接由 nginx 提供静态文件，`.bin.br` 和 `.glb` 的写法和上面根路径的例子一样，只是把 `location /data/` 换成 `location /viz/data/`，`root` 换成 `alias`。漏配 `/viz/data/` 或 `/viz/api/` 时，`try_files` 会把请求回落到 index.html（200 text/html），页面不报错，但拿不到数据。
 
+打成可上传的目录（前端 dist、接口、管线、`data/web` 分开；原始 nc 不进包。说明在包内 `README.md`）：
+
+```bash
+scripts/pack-release.sh
+```
+
+产物在 `release/atmos-viz-YYYYMMDD/`，以及同名 `.tar.gz`。按站点根路径构建。
+
 ## 分支规划
 
 `main` 保留原始数据，`three` 是本方案。`cesium` 等其他方案的分支可以复用 `pipeline/` 和 `data/web/`，只替换 `web/`。
