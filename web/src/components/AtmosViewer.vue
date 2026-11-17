@@ -2355,7 +2355,7 @@ function toggleFullscreen(): void {
 }
 
 function setView(name: string): void {
-  budget.forceConservative(performance.now(), "camera");
+  budget.noteTransition(performance.now(), "camera");
   applyBudget();
   const preset = VIEWS[name] ?? VIEWS.overview;
   host!.setView(preset.pos, preset.target);
@@ -2407,7 +2407,8 @@ function rebuildGpuAfterRestore(): void {
 }
 
 function beforeCamera(now: number, dt: number, realDt: number): void {
-  if (budget.noteFrame(realDt * 1000, now) || !budgetApplied) applyBudget();
+  budget.setVolumeWanted(layers.volume, now);
+  if (budget.noteFrame(realDt * 1000, now) || !budgetApplied || budget.consumeChange()) applyBudget();
   fpsFrames += 1;
   fpsTime += realDt;
   if (fpsTime > 0.5) {
@@ -2601,7 +2602,7 @@ function diagnosticReport(): Record<string, unknown> {
   return {
     sha: __APP_GIT_SHA__,
     exportedAt: new Date().toISOString(),
-    note: "文件只留在本机，不上传。cpuSubmitMs 是主线程提交耗时：体积通道接近 0 且 volume.renders 很大，只说明绘制已经提交，GPU 时间在 rAF 间隔里，不是这一步免费。p50/p95 是间隔分布，不要用 1000/p50 当成帧率。callbackHz 和 histogram 描述这段窗口里的回调间隔，也不是显示帧率。spikes[].kind 是那 500ms 抑制窗的原因（例如刚打开体渲染），不是每一帧都重新重置。levelHistory 才是档位变化。buildingTriangles 为 0 表示白膜网格还没进场景。depthReused 是相机和遮挡物都没变时跳过的深度预通道次数，体颜色仍然每帧重画。resources.transferSize 为 0 通常是跨域没有 Timing-Allow-Origin，不能当成没下载。",
+    note: "文件只留在本机，不上传。cpuSubmitMs 是主线程提交耗时：体积通道接近 0 且 volume.renders 很大，只说明绘制已经提交，GPU 时间在 rAF 间隔里，不是这一步免费。p50/p95 是间隔分布，不要用 1000/p50 当成帧率。callbackHz 和 histogram 描述这段窗口里的回调间隔，也不是显示帧率。spikes[].kind 为 hitch 的是孤立长帧，不进百分位；其它 kind 是抑制窗的原因，不是反复重置。budgetProbe.reason 是当前为什么没升，lastProbe 是最近一次升或降。levelHistory 才是档位变化。buildingTriangles 为 0 表示白膜网格还没进场景。depthReused 是相机和遮挡物都没变时跳过的深度预通道次数，体颜色仍然每帧重画。resources.transferSize 为 0 通常是跨域没有 Timing-Allow-Origin，不能当成没下载。",
     renderer: debugInfo && gl ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : "",
     vendor: debugInfo && gl ? String(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL)) : "",
     limits: gl
@@ -2634,6 +2635,7 @@ function diagnosticReport(): Record<string, unknown> {
       levelHistory: budget.levelHistory.map((entry) => ({ ...entry })),
       lossCount: budget.lossCount,
       restoreCount: budget.restoreCount,
+      budgetProbe: budget.report(),
     },
     volume: volume
       ? {
@@ -2820,16 +2822,14 @@ function exposeApi(): void {
       applyBudget();
     },
     setCamera: (pos: [number, number, number], target: [number, number, number]) => {
-      budget.forceConservative(performance.now(), "camera");
-      applyBudget();
+      budget.noteTransition(performance.now(), "camera");
       host!.setView(pos, target);
     },
     setTheme: (theme: "dark" | "light") => {
       view.theme = theme;
     },
     noteCameraJump: () => {
-      budget.forceConservative(performance.now(), "camera");
-      applyBudget();
+      budget.noteTransition(performance.now(), "camera");
     },
     setBudgetLevel: (level: number) => {
       budget.setLevel(level, performance.now());
@@ -2844,6 +2844,7 @@ function exposeApi(): void {
       spikes: budget.recentSpikes().map((spike) => ({ ...spike })),
       lossCount: budget.lossCount,
       restoreCount: budget.restoreCount,
+      budgetProbe: budget.report(),
       redrawsEveryFrame: true,
       volume: volume
         ? {
@@ -3562,10 +3563,8 @@ watch(
 watch(
   () => layers.volume,
   (on) => {
-    if (on) {
-      budget.forceConservative(performance.now(), "volume");
-      applyBudget();
-    }
+    budget.setVolumeWanted(on, performance.now());
+    if (budget.consumeChange()) applyBudget();
     if (on && !debugCoexist) section.enabled = false;
     updateVolume();
   },

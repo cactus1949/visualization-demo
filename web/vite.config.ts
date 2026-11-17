@@ -63,9 +63,11 @@ export function dataProxy(base: string | undefined, target: string): Record<stri
     for (const route of ["api", "data"]) {
       const from = `${prefix}${route}`;
       const strip = prefix.slice(0, -1);
-      proxy[from] = strip
-        ? { target, changeOrigin: true, rewrite: (p) => (p.startsWith(strip) ? p.slice(strip.length) : p) }
-        : { target, changeOrigin: true };
+      const entry: ProxyOptions = { target, changeOrigin: true };
+      // The data host may present a private certificate. This only affects the dev proxy.
+      if (target.startsWith("https:")) entry.secure = false;
+      if (strip) entry.rewrite = (p) => (p.startsWith(strip) ? p.slice(strip.length) : p);
+      proxy[from] = entry;
     }
   }
   return proxy;

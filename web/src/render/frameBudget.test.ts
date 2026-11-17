@@ -57,7 +57,7 @@ describe("frame budget hysteresis", () => {
     for (let at = start; at <= start + span; at += step) budget.noteFrame(frameMs, at);
   };
 
-  it("starts conservative and climbs to full detail when frames stay fast", () => {
+  it("starts conservative and raises volume to full before multisampling, then reaches the product ceiling", () => {
     const budget = new FrameBudget({ now: 0, startupSuppressMs: 0 });
     assert.equal(budget.level, 0);
     assert.equal(budget.knobs().volumeSteps, 24);
@@ -68,28 +68,40 @@ describe("frame budget hysteresis", () => {
     drive(budget, CLIMB_WINDOW_MS, 0, 16);
     assert.equal(budget.level, 1);
     let cursor = 20_000;
-    for (let level = 1; level < BUDGET_LEVELS.length - 1; level += 1) {
+    let guard = 0;
+    while (budget.knobs().volumeSteps < 128 && guard < 8) {
       drive(budget, cursor, CLIMB_WINDOW_MS, 16);
-      assert.equal(budget.level, level + 1);
       cursor += 20_000;
+      guard += 1;
     }
-    assert.equal(budget.level, BUDGET_LEVELS.length - 1);
+    assert.equal(budget.knobs().volumeSteps, 128);
+    assert.equal(budget.knobs().cesiumMsaa, 1);
+    guard = 0;
+    while ((budget.knobs().cesiumMsaa < 4 || budget.knobs().pixelRatioCap < 2) && guard < 24) {
+      drive(budget, cursor, CLIMB_WINDOW_MS, 16);
+      cursor += 20_000;
+      guard += 1;
+    }
     assert.equal(budget.knobs().cesiumMsaa, 4);
     assert.equal(budget.knobs().pixelRatioCap, 2);
+    assert.equal(budget.knobs().shadowMapSize, 4096);
     assert.equal(VOLUME_REDRAWS_EVERY_FRAME, true);
   });
 
-  it("drops one level after a slow half-second, then refuses to climb back for five seconds", () => {
+  it("drops pixel ratio before volume steps, and the drop lock lasts five seconds", () => {
     const budget = new FrameBudget({ now: 0, startupSuppressMs: 0 });
     budget.setLevel(3, 0);
     const afterLock = DROP_LOCK_AFTER_CLIMB_MS + 50;
     drive(budget, afterLock, DROP_WINDOW_MS, 50);
-    assert.equal(budget.level, 2);
+    assert.equal(budget.level, 3);
+    assert.equal(budget.channels().pixel, 2);
     drive(budget, afterLock + 1_000, CLIMB_WINDOW_MS, 16);
-    assert.equal(budget.level, 2);
+    assert.equal(budget.level, 3);
+    assert.equal(budget.channels().pixel, 2);
     const climbAt = afterLock + CLIMB_LOCK_AFTER_DROP_MS + 2_000;
     drive(budget, climbAt, CLIMB_WINDOW_MS, 16);
-    assert.equal(budget.level, 3);
+    assert.equal(budget.knobs().volumeSteps, 128);
+    assert.equal(budget.channels().pixel, 2);
   });
 
   it("a forced volume-on drop records the transition as spikes, not as the steady p95", () => {
@@ -124,5 +136,77 @@ describe("frame budget hysteresis", () => {
     assert.equal(budget.level, 0);
     assert.equal(budget.knobs().shadowMapSize, 0);
     assert.equal(budget.levelHistory.at(-1)?.reason, "context-restored");
+  });
+
+  it("treats a steady 30 Hz cadence as fast enough to probe, and a sustained 50 ms cadence as not", () => {
+    const refresh = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    drive(refresh, 0, CLIMB_WINDOW_MS, 1000 / 30);
+    assert.equal(refresh.knobs().volumeSteps, 32);
+    const slow = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    drive(slow, 0, CLIMB_WINDOW_MS, 50);
+    assert.equal(slow.knobs().volumeSteps, 24);
+    assert.equal(slow.report().reason.includes("30"), true);
+  });
+
+  it("recovers after the startup suppress once frames stay on the target", () => {
+    const budget = new FrameBudget({ now: 0 });
+    drive(budget, 0, 400, 16);
+    assert.equal(budget.level, 0);
+    assert.equal(budget.stats().n, 0);
+    drive(budget, 500, CLIMB_WINDOW_MS, 16);
+    assert.equal(budget.knobs().volumeSteps, 32);
+  });
+
+  it("keeps a short hitch out of the window so it neither drops nor blocks the next climb", () => {
+    const budget = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    budget.setLevel(3, 0);
+    drive(budget, DROP_LOCK_AFTER_CLIMB_MS + 100, 1_000, 16);
+    const before = budget.channels();
+    budget.noteFrame(400, DROP_LOCK_AFTER_CLIMB_MS + 2_000);
+    assert.equal(budget.recentSpikes().at(-1)?.kind, "hitch");
+    assert.equal(budget.stats().p95 <= 34, true);
+    assert.deepEqual(budget.channels(), before);
+    drive(budget, DROP_LOCK_AFTER_CLIMB_MS + 3_000, CLIMB_WINDOW_MS, 16);
+    assert.equal(budget.knobs().volumeSteps, 128);
+  });
+
+  it("a camera or layer transition does not throw away a recovered rung", () => {
+    const budget = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    budget.setLevel(3, 0);
+    budget.noteTransition(2_000, "camera");
+    budget.noteFrame(180, 2_100);
+    assert.equal(budget.level, 3);
+    assert.equal(budget.recentSpikes().at(-1)?.kind, "camera");
+    assert.equal(budget.knobs().volumeSteps, 80);
+  });
+
+  it("a failed volume probe holds that rung, and a later fast window may still raise a cheaper channel", () => {
+    const budget = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    drive(budget, 0, CLIMB_WINDOW_MS, 16);
+    assert.equal(budget.knobs().volumeSteps, 32);
+    const failedAt = CLIMB_WINDOW_MS + DROP_LOCK_AFTER_CLIMB_MS + 100;
+    drive(budget, failedAt, DROP_WINDOW_MS, 50);
+    assert.equal(budget.knobs().volumeSteps, 24);
+    const report = budget.report(failedAt + DROP_WINDOW_MS);
+    assert.equal(report.lastProbe?.decision, "drop");
+    assert.equal(report.lastProbe?.channel, "volume");
+    const duringHold = failedAt + CLIMB_LOCK_AFTER_DROP_MS + 500;
+    drive(budget, duringHold, CLIMB_WINDOW_MS, 16);
+    assert.equal(budget.knobs().volumeSteps, 24);
+    assert.equal(budget.knobs().trailDivisor, 2);
+    assert.ok(budget.report().reason.length > 0);
+  });
+
+  it("does not bank volume steps while the layer is off, and caps them when it is turned back on", () => {
+    const budget = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    budget.setVolumeWanted(false, 0);
+    drive(budget, 0, CLIMB_WINDOW_MS, 16);
+    assert.equal(budget.knobs().volumeSteps, 24);
+    assert.ok(budget.channels().trail > 0);
+    budget.setLevel(4, 10_000);
+    budget.setVolumeWanted(false, 11_000);
+    budget.setVolumeWanted(true, 12_000);
+    assert.equal(budget.knobs().volumeSteps, 32);
+    assert.equal(budget.channels().globe, 4);
   });
 });

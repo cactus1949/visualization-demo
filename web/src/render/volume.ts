@@ -231,7 +231,11 @@ ${SURF_COLOR_GLSL}void main() {
     vec3 c = texture(uColormap, vec2(n, 0.5)).rgb;
     // Same onset as sections' low-value alpha: transparent below the threshold,
     // fully "on" 0.25 above it; higher values stay somewhat denser.
-    float a = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * dt * 6.0;
+    // Beer-Lambert of this step. The linear form a = sigma * dt exceeds 1 at a coarse
+    // step count and the first sample becomes an opaque wall. exp keeps the same
+    // density the opacity slider asked for when the step is small.
+    float sigma = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * 6.0;
+    float a = 1.0 - exp(-sigma * dt);
     acc.rgb += (1.0 - acc.a) * a * c;
     acc.a += (1.0 - acc.a) * a;
   }
@@ -434,7 +438,8 @@ void main() {
     float n = clamp((v - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
     if (n < uThreshold) continue;
     vec3 c = texture(uColormap, vec2(n, 0.5)).rgb;
-    float a = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * stepKm * 6.0;
+    float sigma = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * 6.0;
+    float a = 1.0 - exp(-sigma * stepKm);
     acc.rgb += (1.0 - acc.a) * a * c;
     acc.a += (1.0 - acc.a) * a;
   }
