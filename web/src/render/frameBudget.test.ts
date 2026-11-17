@@ -24,6 +24,9 @@ describe("percentile and window stats", () => {
     const stats = windowStats(samples);
     assert.equal(stats.n, 100);
     assert.equal(stats.overTarget, 0.67);
+    assert.equal(stats.spanMs, 99);
+    assert.ok(Math.abs(stats.mean - 50.5) < 1e-9);
+    assert.deepEqual(stats.histogram, { le16: 16, le33: 17, le50: 17, gt50: 50 });
   });
 });
 

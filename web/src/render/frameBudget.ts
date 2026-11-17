@@ -61,6 +61,14 @@ export interface FrameWindowStats {
   p50: number;
   p95: number;
   p99: number;
+  /** Mean interval in the window, ms. */
+  mean: number;
+  /** Last sample time minus first, ms. */
+  spanMs: number;
+  /** Callbacks per second of this window. Not a displayed frame rate. */
+  callbackHz: number;
+  /** Counts of intervals in (0, 16.7], (16.7, 33.3], (33.3, 50], (50, ∞). */
+  histogram: { le16: number; le33: number; le50: number; gt50: number };
   /** Fraction of samples strictly slower than 33.3 ms. */
   overTarget: number;
 }
@@ -75,11 +83,24 @@ export function percentile(values: readonly number[], p: number): number {
 export function windowStats(samples: readonly FrameSample[], targetMs = FRAME_BUDGET_TARGET_MS): FrameWindowStats {
   const values = samples.map((s) => s.ms);
   const over = values.filter((ms) => ms > targetMs).length;
+  const mean = values.length === 0 ? 0 : values.reduce((sum, ms) => sum + ms, 0) / values.length;
+  const spanMs = samples.length >= 2 ? samples[samples.length - 1]!.at - samples[0]!.at : 0;
+  const histogram = { le16: 0, le33: 0, le50: 0, gt50: 0 };
+  for (const ms of values) {
+    if (ms <= 16.7) histogram.le16 += 1;
+    else if (ms <= 33.3) histogram.le33 += 1;
+    else if (ms <= 50) histogram.le50 += 1;
+    else histogram.gt50 += 1;
+  }
   return {
     n: values.length,
     p50: percentile(values, 0.5),
     p95: percentile(values, 0.95),
     p99: percentile(values, 0.99),
+    mean,
+    spanMs,
+    callbackHz: spanMs > 0 ? ((values.length - 1) * 1000) / spanMs : 0,
+    histogram,
     overTarget: values.length === 0 ? 0 : over / values.length,
   };
 }

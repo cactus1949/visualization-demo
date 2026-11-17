@@ -212,7 +212,7 @@ let volumeStepsPin: number | null = null;
 let removeContextListener: (() => void) | null = null;
 let budgetApplied = false;
 let loseExt: { loseContext: () => void; restoreContext: () => void } | null = null;
-const passCpu = { depthMs: 0, volumeMs: 0, particlesMs: 0 };
+const passCpu = { depthMs: 0, volumeMs: 0, particlesMs: 0, depthRedraws: 0, depthReused: 0 };
 const drawCalls = ref(0);
 const loadMs = reactive<Record<string, number>>({});
 const uploadMs: Record<string, number> = {};
@@ -2450,9 +2450,17 @@ function afterCamera(_now: number, dt: number, _realDt: number): void {
   if (volume?.mesh.visible) {
     updateDepthOccluders();
     volume.resize(host!.renderer);
-    const depthT = performance.now();
-    host!.captureOccluderDepth(volume.depthTarget, atmos.scene, depthOccluders);
-    passCpu.depthMs = performance.now() - depthT;
+    const generation = occluderGeneration();
+    if (volume.occluderDepthMatches(host!.camera, generation)) {
+      passCpu.depthMs = 0;
+      passCpu.depthReused += 1;
+    } else {
+      const depthT = performance.now();
+      host!.captureOccluderDepth(volume.depthTarget, atmos.scene, depthOccluders);
+      passCpu.depthMs = performance.now() - depthT;
+      volume.rememberOccluderDepth(host!.camera, generation);
+      passCpu.depthRedraws += 1;
+    }
     volume.markDepthValid();
     volume.update(host!.camera, atmos.root, host!.renderer);
     // Current view, every frame. The offscreen target is cleared inside renderOffscreen.
@@ -2556,6 +2564,24 @@ function resize(width: number, height: number): void {
   volume?.resize(host!.renderer);
 }
 
+/** Buildings, ground and exaggeration. Camera matrices are compared separately. */
+function occluderGeneration(): string {
+  let geometry = "";
+  buildings?.group.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (mesh.isMesh && geometry === "") geometry = mesh.geometry.uuid;
+  });
+  return [
+    layers.buildings ? "1" : "0",
+    layers.ground ? "1" : "0",
+    buildings?.group.visible ? "1" : "0",
+    geometry,
+    globeGround?.mesh.geometry.uuid ?? "",
+    globeMode ? (globeTerrainOn() ? "1" : "0") : "box",
+    globeMode ? globeK().toFixed(2) : atmos.root.scale.y.toFixed(3),
+  ].join("|");
+}
+
 function buildingTriangles(): number {
   let triangles = 0;
   buildings?.group.traverse((obj) => {
@@ -2575,7 +2601,7 @@ function diagnosticReport(): Record<string, unknown> {
   return {
     sha: __APP_GIT_SHA__,
     exportedAt: new Date().toISOString(),
-    note: "文件只留在本机。cpuSubmitMs 是主线程提交耗时，不是 GPU 计时。p95 来自 rAF 间隔，含上一帧等待。不能据此宣称已达到 30 FPS。",
+    note: "文件只留在本机，不上传。cpuSubmitMs 是主线程提交耗时：体积通道接近 0 且 volume.renders 很大，只说明绘制已经提交，GPU 时间在 rAF 间隔里，不是这一步免费。p50/p95 是间隔分布，不要用 1000/p50 当成帧率。callbackHz 和 histogram 描述这段窗口里的回调间隔，也不是显示帧率。spikes[].kind 是那 500ms 抑制窗的原因（例如刚打开体渲染），不是每一帧都重新重置。levelHistory 才是档位变化。buildingTriangles 为 0 表示白膜网格还没进场景。depthReused 是相机和遮挡物都没变时跳过的深度预通道次数，体颜色仍然每帧重画。resources.transferSize 为 0 通常是跨域没有 Timing-Allow-Origin，不能当成没下载。",
     renderer: debugInfo && gl ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)) : "",
     vendor: debugInfo && gl ? String(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL)) : "",
     limits: gl
@@ -2629,8 +2655,25 @@ function diagnosticReport(): Record<string, unknown> {
     shadowCasting: Boolean(atmos?.sun.castShadow),
     shadowMap: atmos ? { x: atmos.sun.shadow.mapSize.x, y: atmos.sun.shadow.mapSize.y } : null,
     buildingTriangles: buildingTriangles(),
+    buildingMeshReady: buildingTriangles() > 0,
     cpuSubmitMs: { ...passCpu },
+    terrain: typeof window.__globeApi?.status === "function" ? window.__globeApi.status() : null,
+    resources: resourceTimings(),
   };
+}
+
+function resourceTimings(): { name: string; startMs: number; durationMs: number; transferSize: number; encodedBodySize: number; decodedBodySize: number }[] {
+  const entries = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
+  return entries
+    .filter((entry) => /dem\.u16|ground\.u16|buildings\.glb|sz3_O3|\.wasm|GlobeViewer|geo\.json/.test(entry.name))
+    .map((entry) => ({
+      name: entry.name.replace(/^https?:\/\/[^/]+/, ""),
+      startMs: Math.round(entry.startTime),
+      durationMs: Math.round(entry.duration),
+      transferSize: entry.transferSize,
+      encodedBodySize: entry.encodedBodySize,
+      decodedBodySize: entry.decodedBodySize,
+    }));
 }
 
 function exportDiagnostic(): void {
@@ -3350,11 +3393,9 @@ async function start(): Promise<void> {
     globeFrame = frameOf(gv.map);
     annotations.setCoordinateFrame("enu");
     annotations.setOcclusionAdapter(globeOccluded);
-    if (gv.dem) {
-      globeGround = new GlobeGround(gv.grid, gv.map, gv.dem);
-      globeGround.setTerrain(globeTerrainOn());
-      atmos.root.add(globeGround.mesh);
-    }
+    globeGround = new GlobeGround(gv.grid, gv.map, gv.dem ?? null);
+    globeGround.setTerrain(globeTerrainOn());
+    atmos.root.add(globeGround.mesh);
     shellLabels = new ShellHeightLabels(annotations, gv.grid, gv.map, globeFrame);
     shellLabels.setHeights(shellLabelHeights(gv.grid.top_m, domain.levels));
     shellLabels.update(globeK(), globeGroundField());
@@ -3832,7 +3873,16 @@ function setParticlePlaceDeferred(on: boolean): void {
   particlePlaceDeferred = on;
 }
 
-defineExpose({ snapshot, refreshShell, globeVolumeInfo, setParticlePlaceDeferred, theme: computed(() => view.theme) });
+function setGlobeDem(dem: import("../geo/geoGrid").Dem | null): void {
+  const gv = globeOpt();
+  if (!gv || !dem) return;
+  gv.dem = dem;
+  globeGround?.setDem(gv.grid, gv.map, dem);
+  globeGround?.setTerrain(globeTerrainOn());
+  volume?.refreshShell();
+}
+
+defineExpose({ snapshot, refreshShell, globeVolumeInfo, setParticlePlaceDeferred, setGlobeDem, theme: computed(() => view.theme) });
 
 onMounted(() => {
   document.addEventListener("fullscreenchange", syncFullscreen);

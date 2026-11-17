@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { colormapTexture } from "./colormaps";
 import { volumeBufferSize } from "./frameBudget";
 import { withoutShadowPass } from "./depthPrepass";
+import { OccluderDepthCache } from "./occluderDepth";
 import { GLSL_DOMAIN, domainUniforms, type Domain } from "./fields";
 import { GLSL_LOW_ALPHA, type ScalarBinding } from "./slices";
 import type { CompositeSurface } from "./sections/composite";
@@ -387,7 +388,10 @@ void main() {
   }
   float tPrev = t0;
   // i == uSteps is the closing interval up to tEnd (surfaces only, no volume sample)
-  for (int i = 0; i < 1025; i++) {
+  // Bound matches the highest step count this curved shader is asked for (128).
+  // A 1025-iteration fragment loop still breaks at uSteps, but D3D11/ANGLE can
+  // spend as if the bound were live. The image at a given uSteps is unchanged.
+  for (int i = 0; i < 129; i++) {
     if (float(i) > uSteps || acc.a > 0.97) break;
     bool closing = float(i) >= uSteps;
     float sampleT = closing ? tEnd : t0 + (float(i) + jit) * dt;
@@ -500,6 +504,8 @@ export class VolumeLayer {
   drawingHeight = 1;
   /** Times the current view was raymarched. Increases every visible frame; frames are not reused. */
   renderCount = 0;
+  /** Static occluder depth. The colour target is still redrawn every visible frame. */
+  private readonly occluderDepth = new OccluderDepthCache();
   resolutionScale = 1;
   colorTarget: THREE.WebGLRenderTarget;
   readonly present: THREE.Mesh;
@@ -828,6 +834,7 @@ export class VolumeLayer {
     this.colorTarget = color;
     this.depthWidth = 1;
     this.depthHeight = 1;
+    this.occluderDepth.invalidate();
     this.material.uniforms.uDepth.value = depth.depthTexture;
     this.presentMaterial.uniforms.uColor.value = color.texture;
     this.presentMaterial.uniforms.uDepth.value = depth.depthTexture;
@@ -845,7 +852,8 @@ export class VolumeLayer {
   }
 
   setSteps(steps: number): void {
-    this.material.uniforms.uSteps.value = THREE.MathUtils.clamp(Math.round(steps), 1, 512);
+    const max = this.curved ? 128 : 512;
+    this.material.uniforms.uSteps.value = THREE.MathUtils.clamp(Math.round(steps), 1, max);
   }
 
   setDepthEncoding(mode: DepthEncoding): void {
@@ -854,6 +862,15 @@ export class VolumeLayer {
 
   markDepthValid(): void {
     this.material.uniforms.uDepthValid.value = 1;
+  }
+
+  /** True when the last occluder pass still matches this camera and scene generation. */
+  occluderDepthMatches(camera: THREE.Camera, generation: string): boolean {
+    return this.occluderDepth.matches(camera.matrixWorld.elements, camera.projectionMatrix.elements, this.depthWidth, this.depthHeight, generation);
+  }
+
+  rememberOccluderDepth(camera: THREE.Camera, generation: string): void {
+    this.occluderDepth.remember(camera.matrixWorld.elements, camera.projectionMatrix.elements, this.depthWidth, this.depthHeight, generation);
   }
 
   update(camera: THREE.Camera, root: THREE.Object3D, renderer: THREE.WebGLRenderer): void {

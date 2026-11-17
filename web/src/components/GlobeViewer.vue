@@ -11,7 +11,7 @@ import "cesium/Build/Cesium/Widgets/widgets.css";
 import AtmosViewer from "./AtmosViewer.vue";
 import type { FormatDef } from "../formats/types";
 import type { CurvedVolumeOptions } from "../render/volume";
-import { GeoDecodeError, geoBaseUrl, lastDecodeMs, lastDecodeWhere, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
+import { GeoDecodeError, geoBaseUrl, lastDecodeMs, lastDecodeWhere, loadDem, loadGeoFoundation, type GeoFoundation } from "../geo/geoData";
 import { applyBasemap } from "../globe/basemap";
 import { pickBasemapSource, type BasemapStyle } from "../globe/basemapChoice";
 import { terrainSwitch, type TerrainSwitch } from "../globe/terrain";
@@ -117,6 +117,7 @@ watch(themeClass, (theme) => applySky(theme));
 
 let viewer: Viewer | null = null;
 let terrains: TerrainSwitch | null = null;
+let demLoading: Promise<void> | null = null;
 let removeAtmosphereTick: (() => void) | undefined;
 let removeSkyDebug: (() => void) | undefined;
 let outline: PolylineCollection | null = null;
@@ -170,14 +171,42 @@ function updateSphere(): void {
   overlay.value.sphere = { center, radius: Math.hypot(...b.hi.map((x, i) => x - b.lo[i]!)) / 2 };
 }
 
-/** Terrain and k only touch uniforms, the proxy, Cesium's terrain provider and the volume's box: no data reload. */
-function setTerrain(on: boolean): void {
-  ui.terrain = on;
+/** Apply an already-decoded DEM, or the ellipsoid when `on` is false. Does not fetch. */
+function applyTerrain(on: boolean): void {
   if (!viewer || !terrains || !overlay.value || !geoUniforms) return;
   viewer.terrainProvider = terrains.provider(on);
   overlay.value.proxy.setTerrain(on);
   geoUniforms.uGeoTerrain.value = on ? 1 : 0;
+  atmos.value?.setGlobeDem?.(geo.value?.dem ?? null);
   shapeChanged();
+}
+
+function setTerrain(on: boolean): void {
+  ui.terrain = on;
+  if (!on) {
+    applyTerrain(false);
+    return;
+  }
+  if (geo.value?.dem && terrains) {
+    applyTerrain(true);
+    return;
+  }
+  if (!demLoading && geo.value) {
+    const foundation = geo.value;
+    demLoading = loadDem(foundation.meta)
+      .then((dem) => {
+        foundation.dem = dem;
+        terrains = terrainSwitch(dem);
+        overlay.value?.proxy.setDem(foundation.meta.grid, foundation.meta.map, dem);
+        if (volumeOptions.value) volumeOptions.value = { ...volumeOptions.value, dem };
+        if (ui.terrain) applyTerrain(true);
+      })
+      .catch((e) => {
+        demLoading = null;
+        ui.terrain = false;
+        error.value = `地形数据没有载入：${String(e)}`;
+      });
+  }
 }
 
 function clampK(k: number): number {
@@ -332,7 +361,7 @@ function start({ meta, dem, ground }: GeoFoundation): void {
   overlay.value.layers.add(createTestLayer(meta.map, geoUniforms, meta.grid.top_m, debug ? depthFaceAglParam(query.get("depthFaceAgl")) : 50));
   overlay.value.layers.visible = ui.testLayer;
   outline = viewer.scene.primitives.add(new PolylineCollection());
-  volumeOptions.value = { map: meta.map, grid: meta.grid, ground, geo: geoUniforms, dem };
+  volumeOptions.value = { map: meta.map, grid: meta.grid, ground, geo: geoUniforms, dem: dem ?? undefined };
   setExaggeration(ui.k);
   setTerrain(ui.terrain);
   setView("overview");
@@ -357,7 +386,20 @@ function exposeApi(meta: GeoFoundation["meta"], ground: GeoFoundation["ground"])
     tilesLoaded: () => viewer!.scene.globe.tilesLoaded,
     measureAlignment: () => measureAlignment(viewer!.scene, o.camera, o.sync, meta.grid, meta.map, ui.terrain ? ground : null, ui.k),
     camera: () => ({ near: o.camera.near, far: o.camera.far, fov: o.camera.fov, aspect: o.camera.aspect, sphere: o.sphere, box: o.box, camEnu: o.sync.cameraEnu(viewer!.camera) }),
-    status: () => ({ ...ui, source, depthMode, depthEncoding: o.depthEncoding, decodeMs: lastDecodeMs, decodeWhere: lastDecodeWhere, tileErrors: tileErrors.value, drawCalls: o.drawCalls, residualFromPipeline: meta.map.residual_m }),
+    status: () => ({
+      ...ui,
+      demLoaded: Boolean(geo.value?.dem),
+      demFile: meta.dem.file,
+      groundStats: meta.ground.stats ?? null,
+      source,
+      depthMode,
+      depthEncoding: o.depthEncoding,
+      decodeMs: lastDecodeMs,
+      decodeWhere: lastDecodeWhere,
+      tileErrors: tileErrors.value,
+      drawCalls: o.drawCalls,
+      residualFromPipeline: meta.map.residual_m,
+    }),
   };
   if (!debug) return;
   Object.assign(window.__globeApi, {

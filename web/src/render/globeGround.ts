@@ -67,7 +67,7 @@ export function buildGlobeGroundGeometry(
 export class GlobeGround {
   readonly mesh: Mesh;
   private readonly flat: BufferGeometry;
-  private readonly terrain: BufferGeometry;
+  private terrain: BufferGeometry | null;
   private readonly fieldMaterial: MeshStandardMaterial;
   private readonly shadowMaterial: ShadowMaterial;
   private readonly pickMaterial: MeshBasicMaterial;
@@ -75,9 +75,9 @@ export class GlobeGround {
   private shadowsOn = false;
   private hasMap = false;
 
-  constructor(grid: GeoGrid, map: GeoMap, dem: Dem) {
+  constructor(grid: GeoGrid, map: GeoMap, dem: Dem | null = null) {
     this.flat = buildGlobeGroundGeometry(grid, map, null);
-    this.terrain = buildGlobeGroundGeometry(grid, map, dem);
+    this.terrain = dem ? buildGlobeGroundGeometry(grid, map, dem) : null;
     this.fieldMaterial = new MeshStandardMaterial({
       color: 0xffffff,
       roughness: 1,
@@ -115,7 +115,15 @@ export class GlobeGround {
   }
 
   setTerrain(on: boolean): void {
-    this.mesh.geometry = on ? this.terrain : this.flat;
+    this.mesh.geometry = on && this.terrain ? this.terrain : this.flat;
+  }
+
+  setDem(grid: GeoGrid, map: GeoMap, dem: Dem): void {
+    const next = buildGlobeGroundGeometry(grid, map, dem);
+    const showing = this.mesh.geometry === this.terrain;
+    this.terrain?.dispose();
+    this.terrain = next;
+    if (showing) this.mesh.geometry = next;
   }
 
   /** Show the 2D field (or hide it). The mesh stays pickable either way. */
@@ -144,7 +152,7 @@ export class GlobeGround {
 
   dispose(): void {
     this.flat.dispose();
-    this.terrain.dispose();
+    this.terrain?.dispose();
     this.fieldMaterial.dispose();
     this.shadowMaterial.dispose();
     this.pickMaterial.dispose();

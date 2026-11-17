@@ -1,7 +1,7 @@
 /**
  * Loads the geo foundation written by `python -m geopipe` ($WEB_ROOT/geo/): geo.json plus the
- * smoothed ellipsoidal DEM and the per-column ground height on the nc grid (u16 + Brotli; the
- * server sends Content-Encoding: br so fetch already returns raw little-endian u16).
+ * per-column ground height on the nc grid. The DEM raster stays out until `loadDem`.
+ * u16 + Brotli; the server sends Content-Encoding: br so fetch already returns raw little-endian u16.
  */
 import type { GeoGrid, GeoMap } from "./mapping";
 import type { GridField } from "./placement";
@@ -21,8 +21,9 @@ export interface GeoJson {
 
 export interface GeoFoundation {
   meta: GeoJson;
-  dem: Dem;
-  /** ground ellipsoid height per nc column (row 0 = south) */
+  /** Null until `loadDem` — the globe can start on the ellipsoid without the DEM file. */
+  dem: Dem | null;
+  /** ground ellipsoid height per nc column (row 0 = south). This is not the DEM. */
   ground: GridField;
 }
 
@@ -50,20 +51,28 @@ async function fetchOk(url: string): Promise<Response> {
   return r;
 }
 
-export async function loadGeoFoundation(base = geoBaseUrl()): Promise<GeoFoundation> {
+export async function loadGeoFoundation(base = geoBaseUrl(), includeDem = false): Promise<GeoFoundation> {
   const meta = (await (await fetchOk(`${base}geo.json`)).json()) as GeoJson;
+  const groundRaw = await fetchOk(base + meta.ground.file).then((r) => r.arrayBuffer());
+  const groundValues = dequantize(groundRaw, meta.ground);
+  const dem = includeDem ? await loadDem(meta, base) : null;
+  return {
+    meta,
+    dem,
+    ground: { nx: meta.ground.nx, ny: meta.ground.ny, values: groundValues },
+  };
+}
+
+/** The full DEM raster. Called the first time the terrain checkbox is turned on, not at page start. */
+export async function loadDem(meta: GeoJson, base = geoBaseUrl()): Promise<Dem> {
   const [demRaw, groundRaw] = await Promise.all([
     fetchOk(base + meta.dem.file).then((r) => r.arrayBuffer()),
     fetchOk(base + meta.ground.file).then((r) => r.arrayBuffer()),
   ]);
-  const d = meta.dem;
-  const decoded = await decodeGeo(demRaw, groundRaw, d, meta.ground);
+  const decoded = await decodeGeo(demRaw, groundRaw, meta.dem, meta.ground);
   lastDecodeMs = decoded.ms;
-  return {
-    meta,
-    dem: { nx: d.nx, ny: d.ny, west: d.west, east: d.east, south: d.south, north: d.north, values: decoded.dem },
-    ground: { nx: meta.ground.nx, ny: meta.ground.ny, values: decoded.ground },
-  };
+  const d = meta.dem;
+  return { nx: d.nx, ny: d.ny, west: d.west, east: d.east, south: d.south, north: d.north, values: decoded.dem };
 }
 
 function decodeOnMain(dem: ArrayBuffer, ground: ArrayBuffer, demMeta: QuantizedMeta, groundMeta: QuantizedMeta): DecodeReply {

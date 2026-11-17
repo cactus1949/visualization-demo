@@ -30,8 +30,8 @@ export interface TerrainSwitch {
   provider(on: boolean): TerrainProvider;
 }
 
-export function terrainSwitch(dem: Dem): TerrainSwitch {
+export function terrainSwitch(dem: Dem | null): TerrainSwitch {
   const flat = new EllipsoidTerrainProvider();
-  const real = demTerrainProvider(dem);
-  return { provider: (on) => (on ? real : flat) };
+  const real = dem ? demTerrainProvider(dem) : null;
+  return { provider: (on) => (on && real ? real : flat) };
 }

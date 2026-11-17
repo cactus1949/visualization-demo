@@ -54,23 +54,30 @@ export function buildDepthProxyGeometry(grid: GeoGrid, map: GeoMap, dem: Dem | n
 export class DepthProxy {
   readonly mesh: Mesh;
   private readonly flat: BufferGeometry;
-  private readonly terrain: BufferGeometry;
+  private terrain: BufferGeometry | null;
 
-  constructor(grid: GeoGrid, map: GeoMap, dem: Dem) {
+  constructor(grid: GeoGrid, map: GeoMap, dem: Dem | null = null) {
     this.flat = buildDepthProxyGeometry(grid, map, null);
-    this.terrain = buildDepthProxyGeometry(grid, map, dem);
+    this.terrain = dem ? buildDepthProxyGeometry(grid, map, dem) : null;
     this.mesh = new Mesh(this.flat, new MeshBasicMaterial({ colorWrite: false, depthWrite: true, side: DoubleSide }));
     this.mesh.renderOrder = -1000;
     this.mesh.frustumCulled = false;
   }
 
   setTerrain(on: boolean): void {
-    this.mesh.geometry = on ? this.terrain : this.flat;
+    this.mesh.geometry = on && this.terrain ? this.terrain : this.flat;
+  }
+
+  /** Build the DEM mesh the first time the file has been decoded. */
+  setDem(grid: GeoGrid, map: GeoMap, dem: Dem): void {
+    const next = buildDepthProxyGeometry(grid, map, dem);
+    this.terrain?.dispose();
+    this.terrain = next;
   }
 
   dispose(): void {
     this.flat.dispose();
-    this.terrain.dispose();
+    this.terrain?.dispose();
     (this.mesh.material as MeshBasicMaterial).dispose();
   }
 }

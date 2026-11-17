@@ -70,3 +70,7 @@
 体渲染画进与预算同分辨率的离屏目标，再合成到主画面。相机每一帧都重画当前视角，不复用上一帧。遮挡预通道用同一分辨率，材质仍是原来的（地球放置和对数深度不变），只关掉颜色写出，阴影留到主通道。尾迹用 `setRenderTrailDivisor` 少画段数，不重新分配历史缓冲。盒体像素比从 1 起，测得快可以回到 2；抗锯齿仍在创建上下文时打开。地球 `msaaSamples` 从 1 起、屏幕空间误差从 6 起，都可以加回去。OIT 保持关闭。
 
 30 FPS 是验收线，不是这一档算通过。`web/scripts/frame-budget-check.mjs` 在指定页面上采样 p50/p95/p99、超过 33.3 ms 的比例、尖峰和上下文丢失次数，并写明浏览器渲染器。软件渲染的结果不能当成 GT730。
+
+诊断里的 `p50` 是 rAF 间隔，不是帧率；`callbackHz` 是窗口内回调次数。`cpuSubmitMs` 在 GPU 完成前就返回，体积通道接近 0 不表示体渲染免费。`spikes[].kind` 是抑制窗原因，`levelHistory` 才是档位变化。`buildingTriangles` 为 0 表示白膜还没进场景。相机和遮挡物都没变时跳过遮挡深度预通道（`depthReused`），体颜色仍每帧按当前视角重画。`resources` 记录 dem、白膜、GlobeViewer 和 wasm 的 Resource Timing；`transferSize` 为 0 多半是跨域没给 Timing-Allow-Origin。
+
+`dem.u16.bin.br` 在勾选「地形（自建 DEM）」之前不下载。风速「地面」和这张 DEM 不是同一层。线上静态资源的 Cache-Control 和 wasm 的 Content-Type 仍是部署配置，这一版没有改服务器。
