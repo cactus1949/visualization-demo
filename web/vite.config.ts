@@ -9,6 +9,7 @@ import { viteStaticCopy } from "vite-plugin-static-copy";
 // (the dated exports in $WEB_ROOT/<format>/yyyymm/yyyymmdd/) is proxied to the FastAPI service.
 const dataRoot = path.resolve(import.meta.dirname, "../data/web");
 const dataApi = process.env.DATA_API ?? "http://127.0.0.1:8000";
+const dataApiInsecure = process.env.DATA_API_INSECURE === "1";
 
 /** Same rule as services/cache_headers.py: frame payloads and t000/*.json index files only. */
 function cacheControlFor(file: string): string | undefined {
@@ -57,15 +58,16 @@ export function routePrefixes(base: string | undefined): string[] {
 }
 
 /** dev / preview proxy for /api and /data under every prefix; the sub-path copies strip their prefix. */
-export function dataProxy(base: string | undefined, target: string): Record<string, ProxyOptions> {
+export function dataProxy(base: string | undefined, target: string, insecure = false): Record<string, ProxyOptions> {
   const proxy: Record<string, ProxyOptions> = {};
   for (const prefix of routePrefixes(base)) {
     for (const route of ["api", "data"]) {
       const from = `${prefix}${route}`;
       const strip = prefix.slice(0, -1);
       const entry: ProxyOptions = { target, changeOrigin: true };
-      // The data host may present a private certificate. This only affects the dev proxy.
-      if (target.startsWith("https:")) entry.secure = false;
+      // Certificate checks stay on. DATA_API_INSECURE=1 is an explicit dev opt-in
+      // for a private certificate; production builds do not read this flag.
+      if (insecure) entry.secure = false;
       if (strip) entry.rewrite = (p) => (p.startsWith(strip) ? p.slice(strip.length) : p);
       proxy[from] = entry;
     }
@@ -79,7 +81,7 @@ function dataPlugin(): Plugin {
     name: "serve-external-data",
     // proxy follows the merged config, CLI --base included
     config(config) {
-      const proxy = dataProxy(config.base, dataApi);
+      const proxy = dataProxy(config.base, dataApi, dataApiInsecure);
       return { server: { proxy }, preview: { proxy } };
     },
     configResolved(config) {

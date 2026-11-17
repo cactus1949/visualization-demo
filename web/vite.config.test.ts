@@ -50,4 +50,11 @@ describe("dataProxy", () => {
     assert.deepEqual(Object.keys(dataProxy("./", target)).sort(), ["/api", "/data"]);
     assert.deepEqual(Object.keys(dataProxy("", target)).sort(), ["/api", "/data"]);
   });
+
+  it("keeps TLS verification on for an https target unless insecure is explicit", () => {
+    const https = "https://data.example";
+    assert.equal(dataProxy("/", https)["/data"]?.secure, undefined);
+    assert.equal(dataProxy("/", https, true)["/data"]?.secure, false);
+    assert.equal(dataProxy("/", target, true)["/data"]?.secure, false);
+  });
 });
