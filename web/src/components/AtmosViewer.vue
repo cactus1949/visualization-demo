@@ -4085,10 +4085,10 @@ onBeforeUnmount(() => {
     />
     <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
 
-    <div class="budget-row">
+    <!-- <div class="budget-row">
       <div class="budget-chip" title="当前绘制预算。滑条、色标和图层勾选没有被改。">{{ budgetLabelText }}</div>
       <button type="button" class="budget-export" @click="exportDiagnostic">导出诊断</button>
-    </div>
+    </div> -->
     <p v-if="gpuNotice" class="gpu-notice">{{ gpuNotice }}</p>
     <div v-if="section.enabled && section.drawMode" class="draw-chip">
       <span class="dot" />{{ section.kind === "polyline" ? "绘制折线" : "绘制框选" }} · {{ drawHint }}
