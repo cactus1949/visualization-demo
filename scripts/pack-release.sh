@@ -27,8 +27,8 @@ fi
 
 cd "$ROOT/web"
 echo "node $(node -v)"
-# package.json 的 build 会先跑 vue-tsc。当前 vue-tsc 3.3 读不了 TypeScript 7，类型检查过不去。
-# 线上包只需要 vite 的生产构建。
+# 不走 pnpm run build：换 Node 版本时 pnpm 会想删掉 node_modules。类型检查和 vite 分开调。
+"$ROOT/web/node_modules/.bin/vue-tsc" --noEmit
 "$ROOT/web/node_modules/.bin/vite" build
 
 rm -rf "$DEST"

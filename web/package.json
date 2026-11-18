@@ -16,10 +16,10 @@
     "@vitejs/plugin-vue": "latest",
     "cesium": "1.147.0",
     "three": "0.187.0",
-    "typescript": "latest",
+    "typescript": "6.0.3",
     "vite": "latest",
     "vue": "^3.5.0",
-    "vue-tsc": "latest"
+    "vue-tsc": "3.3.14"
   },
   "devDependencies": {
     "@types/three": "^0.187.0",
