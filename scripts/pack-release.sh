@@ -62,6 +62,7 @@ rsync -a --exclude '.DS_Store' --exclude '.*tmp*' "$ROOT/data/web/" "$DEST/data/
 
 cp "$ROOT/deploy/README.md" "$DEST/README.md"
 cp "$ROOT/deploy/nginx.conf" "$DEST/nginx.conf"
+cp "$ROOT/deploy/nginx.https.conf" "$DEST/nginx.https.conf"
 cp "$ROOT/deploy/atmos-viz.service" "$DEST/atmos-viz.service"
 cp "$ROOT/deploy/requirements-server.txt" "$DEST/requirements-server.txt"
 cp "$ROOT/deploy/requirements-pipeline.txt" "$DEST/requirements-pipeline.txt"
@@ -69,7 +70,7 @@ cp "$ROOT/pipeline/requirements-geo.txt" "$DEST/requirements-geo.txt"
 cp "$ROOT/pipeline/requirements-buildings.txt" "$DEST/requirements-buildings.txt"
 cp "$ROOT/deploy/env.example" "$DEST/.env"
 cp "$ROOT/deploy/env.example" "$DEST/env.example"
-cp "$ROOT/deploy/bin/common.sh" "$ROOT/deploy/bin/install.sh" "$ROOT/deploy/bin/serve.sh" "$ROOT/deploy/bin/export-day.sh" "$DEST/bin/"
+cp "$ROOT/deploy/bin/common.sh" "$ROOT/deploy/bin/install.sh" "$ROOT/deploy/bin/serve.sh" "$ROOT/deploy/bin/export-day.sh" "$ROOT/deploy/bin/self-signed.sh" "$DEST/bin/"
 chmod +x "$DEST/bin/"*.sh
 
 tar -C "$ROOT/release" -czf "$ROOT/release/${NAME}.tar.gz" "$NAME"

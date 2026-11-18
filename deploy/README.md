@@ -24,9 +24,22 @@ bin/install.sh
 bin/serve.sh          # 或装 systemd：见文末
 ```
 
-nginx 使用旁边的 `nginx.conf`：页面走 `frontend/`，`/api/` 和 `/data/` 反代到 `127.0.0.1:8000`。`.br` 的 `Content-Encoding` 由接口加，不要改成 nginx 直接读 `data/web`。
+nginx 使用旁边的 `nginx.conf`：页面走 `frontend/`，`/api/` 和 `/data/` 反代到 `127.0.0.1:8000`。`.br` 的 `Content-Encoding` 由接口加，不要改成 nginx 直接读 `data/web`。用 IP 走 HTTP 时浏览器通常只声明 `gzip, deflate`，接口把 `.br` 解开后再用 gzip 返回。
 
 打开 `http://服务器/?format=sz3`。`data/web` 里已经有导出时，不带日期会打开最新一天。
+
+## 自签 HTTPS
+
+证书按浏览器地址栏里的 IP 或域名来签。私钥留在服务器的 `certs/`，不要拷进仓库。
+
+```bash
+cd /opt/atmos-viz
+bin/self-signed.sh 203.0.113.10
+# 用 nginx.https.conf 换掉正在生效的站点配置，不要和原来的 80 配置并存
+nginx -t && systemctl reload nginx
+```
+
+把 `203.0.113.10` 换成浏览器地址栏里的 IP。然后打开 `https://这个地址/?format=sz3`。浏览器会警告证书不受信任，选继续访问。这条连接是 HTTPS 之后，浏览器会声明 `br`，接口直接回 Brotli。80 端口仍然可用，那种请求走 gzip。安装目录不是 `/opt/atmos-viz` 时，同时改 `nginx.https.conf` 里的证书路径和 `root`。
 
 ## 再导一天
 

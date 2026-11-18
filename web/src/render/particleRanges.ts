@@ -14,6 +14,16 @@ export interface ParticleRangeInputs {
   wDisplay: [number, number] | null;
   /** manifest variables.w all-frame data_min / data_max */
   wData: { data_min: number; data_max: number };
+  /**
+   * One frame's range. When a component is finite and increasing it replaces
+   * the display_range / all-frame scale for that component only. Omit to keep
+   * the fixed scale.
+   */
+  frame?: {
+    speed: [number, number] | null;
+    /** max(|w_min|, |w_max|) of that frame; the w shader stays symmetric about 0 */
+    wAbs: number | null;
+  } | null;
 }
 
 export interface ParticleRanges {
@@ -21,15 +31,27 @@ export interface ParticleRanges {
   wRange: number;
 }
 
+function increasing(lo: number, hi: number): [number, number] | null {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo)) return null;
+  return [lo, hi];
+}
+
 /** Colour ranges for speed / w particle colouring, from the open encoding's manifest. */
 export function particleRanges(inputs: ParticleRangeInputs): ParticleRanges {
-  const speedRange: [number, number] = inputs.speedDisplay
-    ? [inputs.speedDisplay[0], inputs.speedDisplay[1]]
-    : inputs.speedFallback();
+  const frameSpeed = inputs.frame?.speed;
+  const speedFromFrame = frameSpeed ? increasing(frameSpeed[0], frameSpeed[1]) : null;
+  const speedRange: [number, number] = speedFromFrame
+    ?? (inputs.speedDisplay
+      ? [inputs.speedDisplay[0], inputs.speedDisplay[1]]
+      : inputs.speedFallback());
   const wAbs = Math.max(Math.abs(inputs.wData.data_min), Math.abs(inputs.wData.data_max));
-  const wRange = inputs.wDisplay
+  const wFromDisplay = inputs.wDisplay
     ? Math.max(Math.abs(inputs.wDisplay[0]), Math.abs(inputs.wDisplay[1]))
     : Math.max(0.05, wAbs * 0.6);
+  const wFrame = inputs.frame?.wAbs;
+  const wRange = wFrame !== undefined && wFrame !== null && Number.isFinite(wFrame) && wFrame > 0
+    ? wFrame
+    : wFromDisplay;
   return { speedRange, wRange };
 }
 

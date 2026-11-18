@@ -39,9 +39,10 @@ export const FRAME_BUDGET_TARGET_MS = 1000 / 30;
 /**
  * Climb when the steady p95 still meets the 30 fps target. 26 ms was stricter than the
  * target, so a device already holding ~30 fps never left the middle rung.
- * 34 ms still accepts a 30 Hz vsync (intervals sit on 33.3 ms) and rejects a 40 ms run.
+ * A 30 Hz vsync sits on 33.3 ms and rAF timestamps jitter by a millisecond or two
+ * (a measured p95 of 34.3 is still that cadence). Stay under the 36 ms drop line.
  */
-export const CLIMB_P95_MS = 34;
+export const CLIMB_P95_MS = FRAME_BUDGET_TARGET_MS + 2;
 export const DROP_P95_MS = 36;
 export const CLIMB_WINDOW_MS = 2000;
 export const DROP_WINDOW_MS = 500;
@@ -87,6 +88,18 @@ export function percentile(values: readonly number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
   return sorted[index]!;
+}
+
+/**
+ * `samples` are already those with `at >= now - needMs`. A steady cadence never
+ * stamps a sample exactly on that cutoff, so `now - oldest` is short by up to one
+ * interval and a `>= needMs` test never passes. The window is full once the oldest
+ * kept sample is within one 30 Hz frame of the cutoff.
+ */
+export function coversWindow(samples: readonly FrameSample[], now: number, needMs: number): boolean {
+  if (samples.length < 2) return false;
+  const oldest = samples[0]!.at;
+  return oldest <= now - needMs + FRAME_BUDGET_TARGET_MS;
 }
 
 export function windowStats(samples: readonly FrameSample[], targetMs = FRAME_BUDGET_TARGET_MS): FrameWindowStats {
@@ -403,12 +416,11 @@ export class FrameBudget {
       return;
     }
     const climbSamples = this.steady.filter((sample) => sample.at >= now - CLIMB_WINDOW_MS);
-    const oldest = climbSamples[0]?.at ?? now;
     const climbStats = windowStats(climbSamples);
-    const span = climbSamples.length >= 2 ? now - oldest : 0;
+    const span = climbSamples.length >= 2 ? now - climbSamples[0]!.at : 0;
     if (
       climbSamples.length >= 12 &&
-      span >= CLIMB_WINDOW_MS &&
+      coversWindow(climbSamples, now, CLIMB_WINDOW_MS) &&
       now - this.lastDownAt >= CLIMB_LOCK_AFTER_DROP_MS &&
       climbStats.p95 <= CLIMB_P95_MS
     ) {
@@ -426,15 +438,18 @@ export class FrameBudget {
       this.noteProbe(now, name, "climb", climbStats.p95, `升 ${name}`);
       return;
     }
-    this.holdText = this.holdReason(now, climbSamples.length, span, climbStats.p95);
+    this.holdText = this.holdReason(now, climbSamples, span, climbStats.p95);
   }
 
-  private holdReason(now: number, n: number, span: number, p95: number): string {
+  private holdReason(now: number, samples: readonly FrameSample[], span: number, p95: number): string {
     if (now < this.suppressUntil) return `抑制中（${this.suppressKind}）`;
     if (now - this.lastDownAt < CLIMB_LOCK_AFTER_DROP_MS) return "降档滞回";
     const held = this.heldChannel(now);
     if (held && this.nextClimb(now) === null) return `${held} 探测失败，暂不回升`;
-    if (n < 12 || span < CLIMB_WINDOW_MS) return `采样窗口未满 ${Math.round(span)}/${CLIMB_WINDOW_MS} ms，n=${n}`;
+    const n = samples.length;
+    if (n < 12 || !coversWindow(samples, now, CLIMB_WINDOW_MS)) {
+      return `采样窗口未满 ${Math.round(span)}/${CLIMB_WINDOW_MS} ms，n=${n}`;
+    }
     if (p95 > CLIMB_P95_MS) return `p95 ${p95.toFixed(1)} ms 高于 30 帧目标`;
     return "稳态";
   }

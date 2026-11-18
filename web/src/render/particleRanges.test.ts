@@ -37,6 +37,46 @@ describe("particleRanges", () => {
     assert.deepEqual(b, { speedRange: [0, 18], wRange: 0.4 });
   });
 
+  it("prefers one frame's range when that override is set", () => {
+    const r = particleRanges({
+      speedDisplay: [0, 20],
+      speedFallback: never,
+      wDisplay: [-0.25, 0.25],
+      wData: { data_min: -1, data_max: 1 },
+      frame: { speed: [4, 9], wAbs: 0.08 },
+    });
+    assert.deepEqual(r, { speedRange: [4, 9], wRange: 0.08 });
+    const speed: [number, number] = [4, 9];
+    const copied = particleRanges({
+      speedDisplay: [0, 20],
+      speedFallback: never,
+      wDisplay: null,
+      wData: { data_min: 0, data_max: 0 },
+      frame: { speed, wAbs: null },
+    });
+    speed[1] = 99;
+    assert.deepEqual(copied.speedRange, [4, 9]);
+  });
+
+  it("keeps the display scale when the frame override is missing or flat", () => {
+    const r = particleRanges({
+      speedDisplay: [0, 20],
+      speedFallback: never,
+      wDisplay: [-0.25, 0.25],
+      wData: { data_min: -1, data_max: 1 },
+      frame: { speed: null, wAbs: 0 },
+    });
+    assert.deepEqual(r, { speedRange: [0, 20], wRange: 0.25 });
+    const flat = particleRanges({
+      speedDisplay: [0, 20],
+      speedFallback: never,
+      wDisplay: [-0.25, 0.25],
+      wData: { data_min: -1, data_max: 1 },
+      frame: { speed: [3, 3], wAbs: Number.NaN },
+    });
+    assert.deepEqual(flat, { speedRange: [0, 20], wRange: 0.25 });
+  });
+
   it("does not alias the manifest array", () => {
     const disp: [number, number] = [0, 20];
     const r = particleRanges({ speedDisplay: disp, speedFallback: never, wDisplay: null, wData: { data_min: 0, data_max: 0 } });

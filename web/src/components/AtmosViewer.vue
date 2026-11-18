@@ -12,6 +12,7 @@ import { AtmosScene, field2D, type Theme } from "../render/scene";
 import { floatRange, domainOf, textureUploadMs, type Domain } from "../render/fields";
 import { TimeFields, type TimeResource } from "../render/timeFields";
 import { particleRanges, type ParticleRanges } from "../render/particleRanges";
+import { colorScaleEnds, colorScaleModeOf, type ColorScaleMode } from "../state/colorScale";
 import { timesOf } from "../data/manifest";
 import {
   advance as advanceTimeline,
@@ -253,6 +254,8 @@ const buildingsInfo = ref("加载中…");
 const speedRange = ref<[number, number]>([0, 15]);
 
 const view = reactive({ exaggeration: 3, theme: "dark" as Theme, shadows: true });
+/** Colour bar: one frame's min/max, or the fixed display_range. `?colorscale=display` starts on the fixed scale. */
+const colorScaleMode = ref<ColorScaleMode>(colorScaleModeOf(query.get("colorscale")));
 const layers = reactive({
   buildings: true,
   buildingOpacity: 1,
@@ -652,6 +655,33 @@ function frameRange(name: string, frame: number, level?: number): DataRange | nu
   return legendRanges.get(`${name}@${frame}@k${level}`, () => rangeOfArray(data, level * n, (level + 1) * n));
 }
 
+/**
+ * Min/max of the frame on screen (⌊t⌋). The whole field uses manifest
+ * `frames[a]`; a height level scans that level once the CPU copy is here.
+ */
+function oneFrameRange(name: string, level?: number): DataRange | null {
+  if (name === SPEED) {
+    if (!domain) return null;
+    return speedRangeAt(cur.a, level);
+  }
+  if (level !== undefined) return frameRange(name, cur.a, level);
+  const meta = manifest.value?.variables[name];
+  const stats = meta?.frames?.[cur.a];
+  if (stats && Number.isFinite(stats.data_min) && Number.isFinite(stats.data_max) && stats.data_max > stats.data_min) {
+    return { min: stats.data_min, max: stats.data_max };
+  }
+  if (meta?.frames?.length) return null;
+  return manifestRangeAt(name, cur.a);
+}
+
+function heightLevel(heightM?: number): number | undefined {
+  if (heightM === undefined || !manifest.value) return undefined;
+  const levels = manifest.value.grid.levels_m;
+  const dz = levels[1]! - levels[0]!;
+  if (!Number.isFinite(dz) || dz === 0) return undefined;
+  return THREE.MathUtils.clamp(Math.round((heightM - levels[0]!) / dz), 0, manifest.value.grid.nz - 1);
+}
+
 function currentDataRange(name: string, level?: number): DataRange | null {
   void legendDataTick.value;
   const { a, b, s } = bracket(tl);
@@ -661,12 +691,24 @@ function currentDataRange(name: string, level?: number): DataRange | null {
   return blendRange(first, second, s);
 }
 
-function groundStyle(name: string): { colormap: string; range: [number, number] } {
+/** Fixed ground colour scale (display_range, else the file range). */
+function groundFixedStyle(name: string): { colormap: string; range: [number, number] } {
   if (name === "speed0") return { colormap: "viridis", range: displayRange("speed0") ?? displayRange(SPEED) ?? [0, 20] };
   const meta = manifest.value?.variables[name];
   return {
     colormap: meta?.colormap === "rdbu" ? "rdbu" : (meta?.colormap ?? "viridis"),
     range: displayRange(name) ?? (meta ? [meta.data_min, meta.data_max] : [0, 1]),
+  };
+}
+
+function groundStyle(name: string): { colormap: string; range: [number, number] } {
+  const fixed = groundFixedStyle(name);
+  if (colorScaleMode.value !== "frame") return fixed;
+  const dataName = name === "speed0" ? SPEED : name;
+  const level = name === "speed0" ? 0 : undefined;
+  return {
+    colormap: fixed.colormap,
+    range: colorScaleEnds("frame", fixed.range, oneFrameRange(dataName, level), fixed.range),
   };
 }
 
@@ -735,11 +777,11 @@ function binding(name: string): ScalarBinding | null {
 }
 
 /**
- * Colour range for a layer. "自动范围" uses the configured `display_range` so later
- * time steps share one scale. Manual min/max still override this. The 2–98%
- * percentile path is only a fallback for older manifests without display_range.
+ * Fixed colour range. "自动范围" in display mode uses the configured `display_range`
+ * so later time steps share one scale. Manual min/max still override this. The
+ * full-data path is only a fallback for older manifests without display_range.
  */
-function autoRange(name: string, colormap: string, heightM?: number): [number, number] {
+function displayAutoRange(name: string, colormap: string, heightM?: number): [number, number] {
   const configured = displayRange(name);
   if (configured) return configured;
   const g = manifest.value!.grid;
@@ -768,6 +810,19 @@ function autoRange(name: string, colormap: string, heightM?: number): [number, n
     return [-m, m];
   }
   return [lo, hi];
+}
+
+/**
+ * Colour range actually applied. Frame mode uses ⌊t⌋'s min/max; otherwise the
+ * fixed display_range path above. A flat or missing frame keeps that path.
+ */
+function autoRange(name: string, colormap: string, heightM?: number): [number, number] {
+  if (colorScaleMode.value !== "frame") return displayAutoRange(name, colormap, heightM);
+  const frame = oneFrameRange(name, heightLevel(heightM));
+  if (frame && Number.isFinite(frame.min) && frame.max > frame.min) {
+    return colorScaleEnds("frame", displayRange(name), frame, [frame.min, frame.max]);
+  }
+  return displayAutoRange(name, colormap, heightM);
 }
 
 function volumeWanted(): boolean {
@@ -1283,14 +1338,51 @@ function runLayerGl(work: () => void): void {
   else work();
 }
 
-/** Particle speed / w colour scales from the open encoding's manifest. */
+/** Particle speed / w colour scales. Frame mode overrides the fixed display_range per component. */
 function currentParticleRanges(wMeta: { data_min: number; data_max: number }): ParticleRanges {
-  return particleRanges({
+  const base = {
     speedDisplay: displayRange(SPEED),
     speedFallback: speedRangeA,
     wDisplay: displayRange("w"),
     wData: wMeta,
+  };
+  if (colorScaleMode.value !== "frame") return particleRanges(base);
+  const speed = oneFrameRange(SPEED);
+  const w = oneFrameRange("w");
+  const wAbs = w && Number.isFinite(w.min) && Number.isFinite(w.max)
+    ? Math.max(Math.abs(w.min), Math.abs(w.max))
+    : null;
+  return particleRanges({
+    ...base,
+    frame: {
+      speed: speed && Number.isFinite(speed.min) && speed.max > speed.min ? [speed.min, speed.max] : null,
+      wAbs,
+    },
   });
+}
+
+function particleLegendRange(name: string): [number, number] {
+  if (name === "height") return [0, 1000];
+  const wMeta = manifest.value?.variables.w ?? { data_min: -0.2, data_max: 0.2 };
+  const ranges = currentParticleRanges(wMeta);
+  return name === "w" ? [-ranges.wRange, ranges.wRange] : ranges.speedRange;
+}
+
+function syncParticleColorScale(): void {
+  const wMeta = manifest.value?.variables.w;
+  if (!wMeta || !particles) return;
+  const ranges = currentParticleRanges(wMeta);
+  runLayerGl(() => particles?.setRanges(ranges.speedRange, ranges.wRange));
+  speedRange.value = ranges.speedRange;
+}
+
+/** Re-apply colour bars after the frame index or the scale mode changes. */
+function refreshColorScale(): void {
+  if (section.enabled && section.autoRange) updateSection();
+  if (volumeWanted()) updateVolume();
+  if (layers.ground && layers.groundVar !== "none") updateGround();
+  syncParticleColorScale();
+  legendDataTick.value += 1;
 }
 
 function ensureParticles(): void {
@@ -1368,6 +1460,14 @@ function onData(name: string, frame: number): void {
     updateSlice();
     updateSection();
     updateVolume();
+  }
+  if (
+    colorScaleMode.value === "frame" &&
+    frame === cur.a &&
+    (name === "u" || name === "v" || name === "w")
+  ) {
+    syncParticleColorScale();
+    legendDataTick.value += 1;
   }
 }
 
@@ -1528,9 +1628,10 @@ function stepTime(now: number, dt: number): void {
   if (!timeFields) return;
   advanceTimeline(tl, dt, canShow);
   const br = bracket(tl);
-  const changed = br.a !== cur.a || br.b !== cur.b || br.s !== cur.s;
-  if (br.a !== cur.a || br.b !== cur.b) wantsDirty = true;
-  if (br.a !== cur.a || br.b !== cur.b) legendRanges.retainFrames(windowNow());
+  const frameAdvanced = br.a !== cur.a;
+  const changed = frameAdvanced || br.b !== cur.b || br.s !== cur.s;
+  if (frameAdvanced || br.b !== cur.b) wantsDirty = true;
+  if (frameAdvanced || br.b !== cur.b) legendRanges.retainFrames(windowNow());
   cur.a = br.a;
   cur.b = br.b;
   cur.s = br.s;
@@ -1567,6 +1668,7 @@ function stepTime(now: number, dt: number): void {
     updateVolume();
     if (globeMode) markReadyStatus();
   }
+  if (frameAdvanced && colorScaleMode.value === "frame") refreshColorScale();
   syncWants(now);
   // CPU readers follow the displayed instant: 10 Hz probe, 4 Hz ground / unfolded while
   // moving; immediately once playback / scrubbing stops.
@@ -2828,6 +2930,10 @@ function exposeApi(): void {
     setTheme: (theme: "dark" | "light") => {
       view.theme = theme;
     },
+    setColorScale: (mode: string) => {
+      colorScaleMode.value = colorScaleModeOf(mode);
+    },
+    colorScale: () => colorScaleMode.value,
     noteCameraJump: () => {
       budget.noteTransition(performance.now(), "camera");
     },
@@ -3656,6 +3762,7 @@ watch(
     updateGround();
   },
 );
+watch(colorScaleMode, () => refreshColorScale());
 watch(
   [() => section.enabled, () => slice.enabled, () => section.variable, () => slice.variable],
   () => {
@@ -3682,6 +3789,8 @@ watch(
 );
 
 const legends = computed(() => {
+  void legendDataTick.value;
+  void colorScaleMode.value;
   const out: {
     key: string;
     title: string;
@@ -3723,11 +3832,13 @@ const legends = computed(() => {
           ? "height"
           : SPEED;
     const range: [number, number] =
-      name === SPEED
-        ? (displayRange(SPEED) ?? speedRange.value)
-        : name === "w"
-          ? (displayRange("w") ?? [-0.2, 0.2])
-          : [0, 1000];
+      colorScaleMode.value === "frame"
+        ? particleLegendRange(name)
+        : name === SPEED
+          ? (displayRange(SPEED) ?? speedRange.value)
+          : name === "w"
+            ? (displayRange("w") ?? [-0.2, 0.2])
+            : [0, 1000];
     out.push({
       key: "particles",
       title: `粒子 · ${name === "height" ? "高度" : labelOf(name)}`,
@@ -3994,6 +4105,15 @@ onBeforeUnmount(() => {
 
       <details open>
         <summary>图层</summary>
+        <label
+          class="row"
+          title="本帧：色标两端用当前时次的最小和最大，换整点会变。固定范围：用配置里的 display_range，各时次同一套颜色。剖面关掉「自动范围」后仍用手填值域。数值窗口不跟着变。"
+          >色标
+          <select v-model="colorScaleMode">
+            <option value="frame">本帧最小–最大</option>
+            <option value="display">固定范围</option>
+          </select></label
+        >
         <label class="row"
           ><input
             type="checkbox"
@@ -4253,7 +4373,7 @@ onBeforeUnmount(() => {
             </option>
           </select></label
         >
-        <label class="row" title="自动范围使用变量的 display_range，不随时次变化。手填时若某一端为空或非数字，会回退到该变量的默认范围。">
+        <label class="row" title="跟着面板「色标」：本帧时用当前时次的最小/最大，固定范围时用 display_range。手填时若某一端为空或非数字，会回退到该变量的默认范围。">
           <input v-model="section.autoRange" type="checkbox" />自动范围
           <input
             v-model.number="section.min"

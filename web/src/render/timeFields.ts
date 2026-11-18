@@ -406,7 +406,7 @@ export class TimeFields {
     return rows;
   }
 
-  /** Force the next blend of every target (e.g. after the smoothing switch). */
+  /** Force the next blend of every target (format switch, or the displayed hour changed). */
   invalidate(): void {
     invalidateShown(this.wind.shown);
     for (const r of this.scalars.values()) invalidateShown(r.shown);

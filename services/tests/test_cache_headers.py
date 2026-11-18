@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import os
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from fastapi.testclient import TestClient
 
 import brotli
 
-from services.api import PayloadFiles, accepts_brotli
+from services.api import PayloadFiles, accepts_brotli, accepts_gzip
 from services.cache_headers import IMMUTABLE_CACHE, MANIFEST_CACHE, cache_control_for
 
 
@@ -95,6 +96,13 @@ def test_accepts_brotli_ignores_zero_quality():
     assert accepts_brotli("br;q=0, gzip") is False
 
 
+def test_accepts_gzip_ignores_zero_quality():
+    assert accepts_gzip(None) is False
+    assert accepts_gzip("gzip, deflate") is True
+    assert accepts_gzip("br") is False
+    assert accepts_gzip("gzip;q=0, deflate") is False
+
+
 def test_brotli_file_is_decompressed_when_client_does_not_accept_br():
     import tempfile
 
@@ -108,10 +116,19 @@ def test_brotli_file_is_decompressed_when_client_does_not_accept_br():
         app.mount("/data", PayloadFiles(directory=str(root), html=False))
         client = TestClient(app)
 
-        plain = client.get("/data/geo/dem.u16.bin.br", headers={"Accept-Encoding": "gzip, deflate"})
+        plain = client.get("/data/geo/dem.u16.bin.br", headers={"Accept-Encoding": "identity"})
         assert plain.status_code == 200
         assert "content-encoding" not in plain.headers
         assert plain.content == payload
+
+        gzipped = client.get("/data/geo/dem.u16.bin.br", headers={"Accept-Encoding": "gzip, deflate"})
+        assert gzipped.status_code == 200
+        assert gzipped.headers["content-encoding"] == "gzip"
+        assert gzipped.headers["vary"] == "Accept-Encoding"
+        wire = gzipped.content
+        if wire[:2] == b"\x1f\x8b":
+            wire = gzip.decompress(wire)
+        assert wire == payload
 
         encoded = client.get(
             "/data/geo/dem.u16.bin.br",

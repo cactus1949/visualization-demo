@@ -15,7 +15,7 @@
 | `VITE_TIANDITU_TK` | 空 | 地球页天地图 key，写在 `web/.env.local`（不提交） |
 | `VITE_DEV_BASEMAP` | 空 | 设为 `esri` 时地球页在 `npm run dev` 下改用 Esri 影像；生产构建忽略 |
 
-地球页的地理底座放在 `$WEB_ROOT/geo/`（`python -m geopipe` 生成，见 `pipeline/README.md`），接口按静态文件提供，`.br` 文件带 `Content-Encoding: br`。
+地球页的地理底座放在 `$WEB_ROOT/geo/`（`python -m geopipe` 生成，见 `pipeline/README.md`），接口按静态文件提供。`.br` 按请求的 `Accept-Encoding` 返回 `br`、gzip 或解开后的字节。
 
 `/data/nc`、`/data/web` 不在仓库里，要自己建好目录，或者把这两个变量改到别的路径。
 
@@ -58,7 +58,7 @@ uvicorn services.api:app --host 0.0.0.0 --port 8000
 
 - `GET /api/health`
 - `GET /api/days`：列出每天有哪些格式（`days[].formats`），以及每种格式的最新一天（`latest`）。`?format=sz3` 只看一种格式。
-- `GET /data/<格式>/yyyymm/yyyymmdd/manifest.json`，以及同目录下的帧文件。`.br` 文件在请求的 `Accept-Encoding` 含 `br` 时带 `Content-Encoding: br`；不含时接口先解开再返回原始字节（浏览器走代理时往往不声明 `br`，硬发 `Content-Encoding: br` 会得到 `ERR_CONTENT_DECODING_FAILED`）。帧文件（`.bin.br`、`.sz3pack`、按帧的 index json）带 `Cache-Control: public, max-age=31536000, immutable`；`manifest.json` 用 `no-cache`，因为可能被重新导出。没导出的日期返回 404。`.br` 不按 Range 分段。
+- `GET /data/<格式>/yyyymm/yyyymmdd/manifest.json`，以及同目录下的帧文件。`.br` 文件在请求的 `Accept-Encoding` 含 `br` 时带 `Content-Encoding: br`；不含 `br` 但含 `gzip` 时先解开再用 gzip 压回去（用 IP 走 HTTP 时浏览器通常只声明 `gzip, deflate`）；两种都不含时返回解开后的原始字节。硬发 `Content-Encoding: br` 给不接受 `br` 的浏览器会得到 `ERR_CONTENT_DECODING_FAILED`。帧文件（`.bin.br`、`.sz3pack`、按帧的 index json）带 `Cache-Control: public, max-age=31536000, immutable`；`manifest.json` 用 `no-cache`，因为可能被重新导出。没导出的日期返回 404。`.br` 不按 Range 分段。
 
 接口按目录发现格式，代码里没有写死格式名。
 

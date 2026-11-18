@@ -9,6 +9,7 @@ import {
   FrameBudget,
   VOLUME_REDRAWS_EVERY_FRAME,
   budgetText,
+  coversWindow,
   drawnTrailLength,
   percentile,
   volumeBufferSize,
@@ -146,6 +147,20 @@ describe("frame budget hysteresis", () => {
     drive(slow, 0, CLIMB_WINDOW_MS, 50);
     assert.equal(slow.knobs().volumeSteps, 24);
     assert.equal(slow.report().reason.includes("30"), true);
+  });
+
+  it("climbs when 30 Hz timestamps miss the window edge, including a millisecond of jitter", () => {
+    const step = 33.4;
+    const steady = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    for (let i = 0; i < 80; i += 1) steady.noteFrame(step, 10 + i * step);
+    assert.equal(steady.knobs().volumeSteps, 32);
+    const jitter = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    for (let i = 0; i < 80; i += 1) jitter.noteFrame(34.2, 10 + i * step);
+    assert.equal(jitter.knobs().volumeSteps, 32);
+    const early = new FrameBudget({ now: 0, startupSuppressMs: 0 });
+    for (let i = 0; i < 20; i += 1) early.noteFrame(step, 10 + i * step);
+    assert.equal(early.knobs().volumeSteps, 24);
+    assert.equal(coversWindow([{ ms: step, at: 10 }, { ms: step, at: 10 + step }], 10 + 19 * step, CLIMB_WINDOW_MS), false);
   });
 
   it("recovers after the startup suppress once frames stay on the target", () => {
