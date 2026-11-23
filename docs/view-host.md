@@ -53,6 +53,10 @@
 - `setCameraControl` 对应 `screenSpaceCameraController.enableInputs`；`setDrawMode` 为空操作；`getView / setView` 在 ENU 单位和 Cesium 相机之间换算。`zoomBy` 用 `camera.zoomIn / zoomOut`；`faceNorth` 对屏幕中心的地表交点 `lookAt` 到航向 0，再 `lookAtTransform(IDENTITY)` 解开锁定。
 - `dispose` 只释放宿主自己的对象和 three 渲染器，Viewer 由 `GlobeViewer.vue` 在图层卸载之后销毁。
 
+## 界面分区
+
+桌面是三列：左侧气象要素、中间画布、右侧视觉设置。右侧默认关掉，右上齿轮打开后画布让出宽度，不盖住左侧。要素行来自清单，图标只表示已经实现的地面色斑、体渲染，以及风场这一行的粒子。同一形式同时只保留一个变量；剖面和体仍然互斥。剖面在右上工具条，配置是可拖的浮窗，关掉浮窗不关剖面。视觉设置的「保存」写入 `localStorage` 键 `atmos.visualPrefs`，不上传，也不记录剖面位置、绘制点、探针或预算档。
+
 ## 图层怎么挂
 
 所有图层都是 `AtmosScene.root`（`web/src/render/scene.ts`）下的 `Object3D`，宿主只渲染 `scene`，不认识具体图层：

@@ -568,37 +568,9 @@ onUnmounted(teardown);
       @set-format="emit('set-format', $event)"
       @set-cesium="emit('set-cesium', $event)"
     />
-    <aside class="globe-panel">
-      <!-- Geo failed before AtmosViewer mounted: keep the same switches so this page can be left. -->
-      <template v-if="error">
-        <label class="row"><input type="checkbox" :checked="props.format?.id === 'sz3'" @change="emit('set-format', ($event.target as HTMLInputElement).checked ? 'sz3' : 'current')" /> SZ3</label>
-        <label class="row"><input type="checkbox" checked @change="emit('set-cesium', ($event.target as HTMLInputElement).checked)" /> Cesium</label>
-      </template>
-      <div class="row">
-        <span>底图</span>
-        <button type="button" :class="{ on: ui.style === 'img' }" @click="setBasemap('img')">影像</button>
-        <button type="button" :class="{ on: ui.style === 'vec' }" @click="setBasemap('vec')">矢量</button>
-      </div>
-      <label class="row"><input type="checkbox" :checked="ui.terrain" @change="setTerrain(($event.target as HTMLInputElement).checked)" /> 地形（自建 DEM）</label>
-      <label class="exag">
-        垂直夸张 {{ ui.k.toFixed(1) }}×
-        <input
-          type="range"
-          min="1"
-          max="10"
-          step="0.1"
-          :value="ui.k"
-          @input="onExagInput"
-          @pointerup="onExagCommit"
-          @pointercancel="onExagCommit"
-          @change="onExagCommit"
-        />
-      </label>
-      <div class="row">
-        <span>视角</span>
-        <button type="button" @click="setView('overview')">总览</button>
-        <button type="button" @click="setView('top')">俯视</button>
-      </div>
+    <aside v-if="error" class="globe-panel">
+      <label class="row"><input type="checkbox" :checked="props.format?.id === 'sz3'" @change="emit('set-format', ($event.target as HTMLInputElement).checked ? 'sz3' : 'current')" /> SZ3</label>
+      <label class="row"><input type="checkbox" checked @change="emit('set-cesium', ($event.target as HTMLInputElement).checked)" /> Cesium</label>
     </aside>
     <p v-if="error" class="globe-error">{{ error }}</p>
   </div>
@@ -612,7 +584,10 @@ onUnmounted(teardown);
 }
 .globe-host {
   position: absolute;
-  inset: 0;
+  top: 0;
+  bottom: 0;
+  left: var(--chrome-left, 0px);
+  right: var(--chrome-right, 0px);
 }
 .globe-host :deep(.cesium-credit-logoContainer) {
   display: none !important;

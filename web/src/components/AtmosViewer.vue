@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import * as THREE from "three";
 import type { ViewHost } from "../host/types";
 import { createThreeHost } from "../host/threeHost";
@@ -13,6 +13,15 @@ import { floatRange, domainOf, textureUploadMs, type Domain } from "../render/fi
 import { TimeFields, type TimeResource } from "../render/timeFields";
 import { particleRanges, type ParticleRanges } from "../render/particleRanges";
 import { colorScaleEnds, colorScaleModeOf, type ColorScaleMode } from "../state/colorScale";
+import { elementRows, toggleMode } from "../state/elementMode";
+import { reduceSectionChrome, sectionChromeWhenEnabled } from "../state/sectionChrome";
+import { clampFloatBox } from "../state/floatFrame";
+import {
+  clearVisualPrefs,
+  loadVisualPrefs,
+  saveVisualPrefs,
+  type VisualPrefs,
+} from "../state/visualPrefs";
 import { timesOf } from "../data/manifest";
 import {
   advance as advanceTimeline,
@@ -159,6 +168,301 @@ function onCesiumToggle(on: boolean, event: Event): void {
   emit("set-cesium", on);
 }
 
+function onGroundIcon(name: string): void {
+  const next = toggleMode({ on: layers.ground, variable: layers.groundVar }, name);
+  layers.groundVar = next.variable;
+  layers.ground = next.on;
+}
+
+function onVolumeIcon(name: string): void {
+  const next = toggleMode({ on: layers.volume, variable: layers.volumeVar }, name);
+  layers.volumeVar = next.variable;
+  layers.volume = next.on;
+}
+
+function globeStatus(): { terrain?: boolean; style?: string; k?: number } | null {
+  const status = window.__globeApi?.status;
+  if (typeof status !== "function") return null;
+  const value = status();
+  if (!value || typeof value !== "object") return null;
+  return value as { terrain?: boolean; style?: string; k?: number };
+}
+
+function syncGlobeChrome(): void {
+  const globe = globeStatus();
+  if (!globe) return;
+  if (typeof globe.terrain === "boolean") globeTerrain.value = globe.terrain;
+  if (globe.style === "img" || globe.style === "vec") globeBasemap.value = globe.style;
+  if (typeof globe.k === "number") chromeK.value = globe.k;
+}
+
+function setGlobeBasemap(style: "img" | "vec"): void {
+  globeBasemap.value = style;
+  const setBasemap = window.__globeApi?.setBasemap;
+  if (typeof setBasemap === "function") setBasemap(style);
+}
+
+function setGlobeK(k: number): void {
+  chromeK.value = k;
+  const setExaggeration = window.__globeApi?.setExaggeration;
+  if (typeof setExaggeration === "function") setExaggeration(k);
+}
+
+function setGlobeTerrain(on: boolean): void {
+  globeTerrain.value = on;
+  const setTerrain = window.__globeApi?.setTerrain;
+  if (typeof setTerrain === "function") setTerrain(on);
+}
+
+function setGlobeView(name: string): void {
+  const setView = window.__globeApi?.setView;
+  if (typeof setView === "function") setView(name);
+}
+
+function chromeLeft(): number {
+  if (!props.showPanel || embed) return 0;
+  return elementRailOpen.value ? 252 : 36;
+}
+
+function publishChrome(): void {
+  const root = viewerRoot.value;
+  const globe = root?.parentElement?.classList.contains("globe") ? root.parentElement : null;
+  if (!globe || !root) return;
+  const left = root.querySelector(".element-rail")?.getBoundingClientRect().width ?? chromeLeft();
+  const right = root.querySelector(".settings-rail")?.getBoundingClientRect().width ?? 0;
+  globe.style.setProperty("--chrome-left", `${Math.round(left)}px`);
+  globe.style.setProperty("--chrome-right", `${Math.round(right)}px`);
+}
+
+function fitNarrowChrome(): void {
+  if (window.innerWidth < 1100 && settingsOpen.value) elementRailOpen.value = false;
+  void nextTick().then(() => publishChrome());
+  clampSectionFloat();
+}
+
+function collectVisualPrefs(): VisualPrefs {
+  return {
+    v: 1,
+    theme: view.theme,
+    shadows: view.shadows,
+    exaggeration: view.exaggeration,
+    colorScaleMode: colorScaleMode.value,
+    particles: {
+      count: particleParams.count,
+      trailLength: particleParams.trailLength,
+      speed: particleParams.speed,
+      lineWidth: particleParams.lineWidth,
+      lifetime: particleParams.lifetime,
+      opacity: particleParams.opacity,
+      colorMode: particleParams.colorMode,
+      colormap: particleParams.colormap,
+      color: particleParams.color,
+      heightMin: particleParams.heightMin,
+      heightMax: particleParams.heightMax,
+      wExaggeration: particleParams.wExaggeration,
+      additive: particleParams.additive,
+      taper: particleParams.taper,
+    },
+    buildingOpacity: layers.buildingOpacity,
+    buildingTintEnabled: layers.buildingTintEnabled,
+    buildingTintStrength: layers.buildingTintStrength,
+    volumeOpacity: layers.volumeOpacity,
+    volumeThreshold: layers.volumeThreshold,
+    cutLowAlpha: layers.cutLowAlpha,
+    cutLowThreshold: layers.cutLowThreshold,
+    filterSlices: layers.filterSlices,
+    cuts: {
+      x: [...cuts.x] as [number, number],
+      y: [...cuts.y] as [number, number],
+      z: [...cuts.z] as [number, number],
+      faces: cuts.faces,
+    },
+    sectionStyle: {
+      colormap: section.colormap,
+      autoRange: section.autoRange,
+      min: section.min,
+      max: section.max,
+      opacity: section.opacity,
+      lowAlpha: section.lowAlpha,
+      lowThreshold: section.lowThreshold,
+      contours: section.contours,
+      heightM: slice.heightM,
+      offsetKm: section.offsetKm,
+      boxHeightMinM: section.box.heightMinM,
+      boxHeightMaxM: section.box.heightMaxM,
+      stepLevels: section.box.stepLevels === 2 || section.box.stepLevels === 5 ? section.box.stepLevels : 1,
+    },
+    globe: { k: chromeK.value, basemap: globeBasemap.value },
+  };
+}
+
+function applyVisualPrefs(prefs: VisualPrefs): void {
+  if (prefs.theme) view.theme = prefs.theme;
+  if (prefs.shadows !== undefined) view.shadows = prefs.shadows;
+  if (prefs.exaggeration !== undefined) view.exaggeration = prefs.exaggeration;
+  if (prefs.colorScaleMode) colorScaleMode.value = prefs.colorScaleMode;
+  if (prefs.particles) Object.assign(particleParams, prefs.particles);
+  if (prefs.buildingOpacity !== undefined) layers.buildingOpacity = prefs.buildingOpacity;
+  if (prefs.buildingTintEnabled !== undefined) layers.buildingTintEnabled = prefs.buildingTintEnabled;
+  if (prefs.buildingTintStrength !== undefined) layers.buildingTintStrength = prefs.buildingTintStrength;
+  if (prefs.volumeOpacity !== undefined) layers.volumeOpacity = prefs.volumeOpacity;
+  if (prefs.volumeThreshold !== undefined) layers.volumeThreshold = prefs.volumeThreshold;
+  if (prefs.cutLowAlpha !== undefined) layers.cutLowAlpha = prefs.cutLowAlpha;
+  if (prefs.cutLowThreshold !== undefined) layers.cutLowThreshold = prefs.cutLowThreshold;
+  if (prefs.filterSlices !== undefined) layers.filterSlices = prefs.filterSlices;
+  if (prefs.cuts) {
+    cuts.x = [...prefs.cuts.x];
+    cuts.y = [...prefs.cuts.y];
+    cuts.z = [...prefs.cuts.z];
+    cuts.faces = prefs.cuts.faces;
+  }
+  const style = prefs.sectionStyle;
+  if (style) {
+    if (style.colormap) section.colormap = style.colormap;
+    if (style.autoRange !== undefined) section.autoRange = style.autoRange;
+    if (style.min !== undefined) section.min = style.min;
+    if (style.max !== undefined) section.max = style.max;
+    if (style.opacity !== undefined) section.opacity = style.opacity;
+    if (style.lowAlpha !== undefined) section.lowAlpha = style.lowAlpha;
+    if (style.lowThreshold !== undefined) section.lowThreshold = style.lowThreshold;
+    if (style.contours !== undefined) section.contours = style.contours;
+    if (style.heightM !== undefined) slice.heightM = style.heightM;
+    if (style.offsetKm !== undefined) section.offsetKm = style.offsetKm;
+    if (style.boxHeightMinM !== undefined) section.box.heightMinM = style.boxHeightMinM;
+    if (style.boxHeightMaxM !== undefined) section.box.heightMaxM = style.boxHeightMaxM;
+    if (style.stepLevels) section.box.stepLevels = style.stepLevels;
+  }
+  if (prefs.globe?.k !== undefined) setGlobeK(prefs.globe.k);
+  if (prefs.globe?.basemap) setGlobeBasemap(prefs.globe.basemap);
+}
+
+function readSavedVisualPrefs(): void {
+  const read = loadVisualPrefs(localStorage, COLORMAPS);
+  prefsMessage.value = read.message;
+  if (read.prefs) applyVisualPrefs(read.prefs);
+}
+
+function saveVisualSettings(): void {
+  const result = saveVisualPrefs(localStorage, collectVisualPrefs());
+  prefsMessage.value = result.message;
+}
+
+function restoreVisualDefaults(): void {
+  view.theme = "dark";
+  view.shadows = true;
+  view.exaggeration = globeMode ? 1 : 3;
+  colorScaleMode.value = colorScaleModeOf(query.get("colorscale"));
+  Object.assign(particleParams, { ...DEFAULT_PARTICLES, paused: particleParams.paused });
+  layers.buildingOpacity = 1;
+  layers.buildingTintEnabled = false;
+  layers.buildingTintStrength = 0.6;
+  layers.volumeOpacity = 0.6;
+  layers.volumeThreshold = 0.2;
+  layers.cutLowAlpha = false;
+  layers.cutLowThreshold = 0.15;
+  layers.filterSlices = true;
+  cuts.x = [...DEFAULT_CUTS.x];
+  cuts.y = [...DEFAULT_CUTS.y];
+  cuts.z = [...DEFAULT_CUTS.z];
+  cuts.faces = DEFAULT_CUTS.faces;
+  section.colormap = "viridis";
+  section.autoRange = true;
+  section.min = 0;
+  section.max = 15;
+  section.opacity = 0.85;
+  section.contours = 12;
+  section.lowAlpha = false;
+  section.lowThreshold = 0.15;
+  slice.heightM = 150;
+  section.offsetKm = 0;
+  section.box.heightMinM = 0;
+  section.box.heightMaxM = 1000;
+  section.box.stepLevels = 1;
+  const cleared = clearVisualPrefs(localStorage);
+  prefsMessage.value = cleared.message;
+}
+
+function openSettings(): void {
+  settingsOpen.value = !settingsOpen.value;
+  fitNarrowChrome();
+  syncGlobeChrome();
+}
+
+function onSectionMain(): void {
+  const next = reduceSectionChrome(
+    { enabled: section.enabled, floatOpen: sectionFloatOpen.value, collapsed: sectionFloatCollapsed.value, kind: section.kind },
+    "main",
+  );
+  if (next.enabled && !section.enabled) {
+    selectKind("lon");
+    sectionFloatOpen.value = true;
+    sectionFloatCollapsed.value = false;
+    return;
+  }
+  sectionFloatOpen.value = next.floatOpen;
+  if (!next.enabled) section.enabled = false;
+}
+
+function onSectionSettings(): void {
+  const next = reduceSectionChrome(
+    { enabled: section.enabled, floatOpen: sectionFloatOpen.value, collapsed: sectionFloatCollapsed.value, kind: section.kind },
+    "settings",
+  );
+  sectionFloatOpen.value = next.floatOpen;
+  sectionFloatCollapsed.value = next.collapsed;
+}
+
+function onSectionFloatClose(): void {
+  sectionFloatOpen.value = reduceSectionChrome(
+    { enabled: section.enabled, floatOpen: sectionFloatOpen.value, collapsed: sectionFloatCollapsed.value, kind: section.kind },
+    "close",
+  ).floatOpen;
+}
+
+function onSectionFloatCollapse(): void {
+  const action = sectionFloatCollapsed.value ? "expand" : "collapse";
+  sectionFloatCollapsed.value = reduceSectionChrome(
+    { enabled: section.enabled, floatOpen: sectionFloatOpen.value, collapsed: sectionFloatCollapsed.value, kind: section.kind },
+    action,
+  ).collapsed;
+}
+
+function clampSectionFloat(): void {
+  const stage = stageEl.value;
+  const frame = stage?.querySelector(".section-float") as HTMLElement | null;
+  if (!stage || !frame || !sectionFloatPos.value) return;
+  sectionFloatPos.value = clampFloatBox(
+    { ...sectionFloatPos.value, width: frame.offsetWidth, height: frame.offsetHeight },
+    { width: stage.clientWidth, height: stage.clientHeight },
+  );
+}
+
+function onSectionFloatDrag(event: PointerEvent): void {
+  if ((event.target as HTMLElement).closest("button, input, select, label, a")) return;
+  const stage = stageEl.value;
+  const frame = (event.currentTarget as HTMLElement).parentElement;
+  if (!stage || !frame) return;
+  const stageRect = stage.getBoundingClientRect();
+  const frameRect = frame.getBoundingClientRect();
+  const origin = sectionFloatPos.value ?? { x: frameRect.left - stageRect.left, y: frameRect.top - stageRect.top };
+  sectionFloatPos.value = origin;
+  const startX = event.clientX;
+  const startY = event.clientY;
+  frame.setPointerCapture(event.pointerId);
+  const move = (ev: PointerEvent) => {
+    sectionFloatPos.value = clampFloatBox(
+      { x: origin.x + ev.clientX - startX, y: origin.y + ev.clientY - startY, width: frameRect.width, height: frameRect.height },
+      { width: stage.clientWidth, height: stage.clientHeight },
+    );
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
 const query = new URLSearchParams(location.search);
 const embed = query.has("embed") && query.get("embed") !== "0";
 /**
@@ -202,7 +506,18 @@ const SPEED = "speed";
 // ---------------------------------------------------------------- reactive UI state
 const canvas = ref<HTMLCanvasElement>();
 const manifest = shallowRef<Manifest>();
-const panelOpen = ref(props.showPanel && !embed);
+const elementRailOpen = ref(props.showPanel && !embed);
+const settingsOpen = ref(false);
+const settingsTab = ref<"particles" | "look" | "view">("particles");
+const prefsMessage = ref<string | null>(null);
+const sectionFloatOpen = ref(false);
+const sectionFloatCollapsed = ref(false);
+const sectionFloatPos = ref<{ x: number; y: number } | null>(null);
+const stageEl = ref<HTMLDivElement | null>(null);
+const globeBasemap = ref<"img" | "vec">("img");
+const chromeK = ref(3);
+const globeTerrain = ref(false);
+if (typeof window !== "undefined" && window.matchMedia("(max-width: 1100px)").matches) elementRailOpen.value = false;
 const status = ref("加载数据清单…");
 const gpu = ref("");
 const fps = ref(0);
@@ -388,6 +703,7 @@ const variables2D = computed(() => {
   }
   return list;
 });
+const rows = computed(() => elementRows(variables2D.value, variables3D.value));
 
 function labelOf(name: string): string {
   if (name === SPEED) return "水平风速";
@@ -3451,6 +3767,8 @@ async function start(): Promise<void> {
   }
   loadMs.manifest = Math.round(performance.now() - t0);
   manifest.value = store.manifest;
+  readSavedVisualPrefs();
+  syncGlobeChrome();
   domain = domainOf(store.manifest);
   tl.times = timesOf(store.manifest);
   tl.frames = tl.times.length;
@@ -3662,6 +3980,11 @@ watch(
       unfoldedVisible.value = false;
       updateSection();
     }
+    const chrome = sectionChromeWhenEnabled(
+      { enabled: was ?? false, floatOpen: sectionFloatOpen.value, collapsed: sectionFloatCollapsed.value, kind: section.kind },
+      on,
+    );
+    if (!chrome.floatOpen) sectionFloatOpen.value = false;
   },
   { flush: "sync" },
 );
@@ -3945,6 +4268,7 @@ async function reloadFormat(): Promise<void> {
     return;
   }
   manifest.value = store.manifest;
+  readSavedVisualPrefs();
   tl.times = timesOf(store.manifest);
   tl.frames = tl.times.length;
   tl.ready = Array.from({ length: tl.frames }, () => false);
@@ -3994,13 +4318,21 @@ function setGlobeDem(dem: import("../geo/geoGrid").Dem | null): void {
 
 defineExpose({ snapshot, refreshShell, globeVolumeInfo, setParticlePlaceDeferred, setGlobeDem, theme: computed(() => view.theme) });
 
+watch([elementRailOpen, settingsOpen], () => {
+  void nextTick().then(() => publishChrome());
+});
+const narrowMedia = typeof window === "undefined" ? null : window.matchMedia("(max-width: 1100px)");
 onMounted(() => {
   document.addEventListener("fullscreenchange", syncFullscreen);
+  window.addEventListener("resize", fitNarrowChrome);
+  narrowMedia?.addEventListener("change", fitNarrowChrome);
   void start();
 });
 onBeforeUnmount(() => {
   disposed = true;
   document.removeEventListener("fullscreenchange", syncFullscreen);
+  window.removeEventListener("resize", fitNarrowChrome);
+  narrowMedia?.removeEventListener("change", fitNarrowChrome);
   // the Cesium canvas outlives this component: remove exactly what start() added
   if (pointerTarget) for (const [name, listener] of pointerListeners()) pointerTarget.removeEventListener(name, listener);
   pointerTarget = null;
@@ -4030,6 +4362,58 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="viewerRoot" class="viewer" :class="[view.theme, { globe: globeMode }]">
+    <aside v-if="showPanel && !embed" class="element-rail" :class="{ collapsed: !elementRailOpen }">
+      <div class="rail-head">
+        <strong v-if="elementRailOpen">气象要素</strong>
+        <button type="button" class="rail-fold" :aria-expanded="elementRailOpen" :aria-label="elementRailOpen ? '收起要素列表' : '展开要素列表'" @click="elementRailOpen = !elementRailOpen">{{ elementRailOpen ? "‹" : "›" }}</button>
+      </div>
+      <div v-show="elementRailOpen" class="rail-body">
+        <ul class="element-list">
+          <li v-for="row in rows" :key="row.id" class="element-row">
+            <span class="element-name">{{ row.label }}</span>
+            <span class="element-modes">
+              <button
+                v-if="row.ground"
+                type="button"
+                class="mode-icon"
+                :class="{ on: layers.ground && layers.groundVar === row.ground }"
+                :aria-pressed="layers.ground && layers.groundVar === row.ground"
+                :aria-label="`${row.label} 地面色斑`"
+                title="地面色斑：把这一要素铺在地面。再点关闭。同一时间地面只显示一个要素。"
+                @click="onGroundIcon(row.ground!)"
+              >斑</button>
+              <button
+                v-if="row.volume"
+                type="button"
+                class="mode-icon"
+                :class="{ on: layers.volume && layers.volumeVar === row.volume }"
+                :aria-pressed="layers.volume && layers.volumeVar === row.volume"
+                :aria-label="`${row.label} 体渲染`"
+                title="体渲染：用三维体显示这一要素。再点关闭。同一时间体只显示一个要素，并会关掉剖面。"
+                @click="onVolumeIcon(row.volume!)"
+              >体</button>
+              <button
+                v-if="row.particles"
+                type="button"
+                class="mode-icon"
+                :class="{ on: layers.particles }"
+                :aria-pressed="layers.particles"
+                aria-label="风粒子"
+                title="风粒子：沿三维风移动的流线。只属于风场，再点关闭。"
+                @click="layers.particles = !layers.particles"
+              >粒</button>
+            </span>
+          </li>
+        </ul>
+        <div class="scene-group">
+          <div class="scene-title">场景</div>
+          <label class="row"><input type="checkbox" :checked="globeMode" @change="onCesiumToggle(($event.target as HTMLInputElement).checked, $event)" /> Cesium 地球</label>
+          <label class="row"><input v-model="layers.buildings" type="checkbox" /> 建筑白膜</label>
+          <label v-if="globeMode" class="row"><input type="checkbox" :checked="globeTerrain" @change="setGlobeTerrain(($event.target as HTMLInputElement).checked)" /> 地形（自建 DEM）</label>
+        </div>
+      </div>
+    </aside>
+    <div ref="stageEl" class="stage">
     <canvas v-if="!globeMode" ref="canvas" class="canvas" />
 
     <div class="legends" :class="{ raised: cursor }">
@@ -4057,7 +4441,7 @@ onBeforeUnmount(() => {
     <TimelineBar v-if="showTimeline" :tl="tl" :theme="view.theme" @change="onTimelineChange" />
 
     <ViewTools
-      :class="{ 'panel-open': panelOpen, raised: showTimeline }"
+      :class="{ raised: showTimeline }"
       :compass-deg="compassDeg"
       :fullscreen="fullscreen"
       @reset="resetHomeView"
@@ -4094,44 +4478,142 @@ onBeforeUnmount(() => {
       <span class="dot" />{{ section.kind === "polyline" ? "绘制折线" : "绘制框选" }} · {{ drawHint }}
     </div>
 
-    <aside v-if="panelOpen" class="panel">
+    <div v-if="showPanel && !embed" class="stage-tools">
+      <button
+        type="button"
+        class="tool-icon"
+        :class="{ on: section.enabled }"
+        :aria-pressed="section.enabled"
+        aria-label="剖面"
+        title="剖面：打开经度剖面和配置。再点关闭剖面。"
+        @click="onSectionMain"
+      >剖</button>
+      <button
+        type="button"
+        class="tool-icon"
+        :aria-pressed="sectionFloatOpen"
+        aria-label="剖面设置"
+        title="剖面设置：只打开配置，不改变剖面是否显示。"
+        @click="onSectionSettings"
+      >设</button>
+      <button
+        type="button"
+        class="tool-icon"
+        :class="{ on: layers.probe }"
+        :aria-pressed="layers.probe"
+        aria-label="探针"
+        title="探针：单击固定一点并看垂直廓线。再点关闭。"
+        @click="layers.probe = !layers.probe"
+      >针</button>
+      <button
+        type="button"
+        class="tool-icon gear"
+        :aria-pressed="settingsOpen"
+        aria-label="视觉设置"
+        title="视觉设置：粒子、外观和视图。改动立即生效。"
+        @click="openSettings"
+      >⚙</button>
+    </div>
+    <div
+      v-if="sectionFloatOpen"
+      class="section-float"
+      :class="{ collapsed: sectionFloatCollapsed }"
+      :style="sectionFloatPos ? { left: sectionFloatPos.x + 'px', top: sectionFloatPos.y + 'px', right: 'auto' } : undefined"
+      @pointerdown.stop
+      @wheel.stop
+    >
+      <div class="float-head" @pointerdown="onSectionFloatDrag">
+        <strong>剖面配置</strong>
+        <span class="float-actions">
+          <button type="button" :aria-expanded="!sectionFloatCollapsed" aria-label="收起剖面配置" title="收起配置，剖面继续显示" @click="onSectionFloatCollapse">{{ sectionFloatCollapsed ? "展" : "—" }}</button>
+          <button type="button" aria-label="关闭剖面配置" title="关闭配置，剖面继续显示" @click="onSectionFloatClose">×</button>
+        </span>
+      </div>
+      <div v-show="!sectionFloatCollapsed" class="float-body">
+        <span class="mode-picks">
+          <button type="button" :class="{ on: section.enabled && section.kind === 'height' }" :aria-pressed="section.enabled && section.kind === 'height'" @click="selectKind('height')">高度</button>
+          <button type="button" :class="{ on: section.enabled && section.kind === 'lon' }" :aria-pressed="section.enabled && section.kind === 'lon'" @click="selectKind('lon')">经度</button>
+          <button type="button" :class="{ on: section.enabled && section.kind === 'lat' }" :aria-pressed="section.enabled && section.kind === 'lat'" @click="selectKind('lat')">纬度</button>
+          <button type="button" :class="{ on: section.enabled && section.kind === 'polyline' }" :aria-pressed="section.enabled && section.kind === 'polyline'" @click="selectKind('polyline')">折线</button>
+          <button type="button" :class="{ on: section.enabled && section.kind === 'box' }" :aria-pressed="section.enabled && section.kind === 'box'" @click="selectKind('box')">框选</button>
+        </span>
+        <label class="row">变量
+          <select v-model="section.variable">
+            <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
+          </select></label>
+        <label class="row">色带
+          <select v-model="section.colormap">
+            <option v-for="c in COLORMAPS" :key="c" :value="c">{{ COLORMAP_LABELS[c] ?? c }}</option>
+          </select></label>
+        <label class="row" title="跟着「色标」：本帧用当前时次的最小/最大，固定范围用 display_range。手填时若某一端无效，会回退到默认范围。">
+          <input v-model="section.autoRange" type="checkbox" />自动范围
+          <input v-model.number="section.min" class="num" type="number" step="any" :disabled="section.autoRange" @blur="commitSectionRange" />–
+          <input v-model.number="section.max" class="num" type="number" step="any" :disabled="section.autoRange" @blur="commitSectionRange" />
+        </label>
+        <label class="slider">不透明度 {{ section.opacity.toFixed(2) }}<input v-model.number="section.opacity" type="range" min="0.1" max="1" step="0.01" /></label>
+        <label class="row" title="按数值淡出低端：低于阈值完全透明，其上 25% 区间渐显"><input v-model="section.lowAlpha" type="checkbox" />低值透明</label>
+        <label v-if="section.lowAlpha" class="slider">透明阈值 {{ (section.lowThreshold * 100).toFixed(0) }}%<input v-model.number="section.lowThreshold" type="range" min="0" max="0.6" step="0.01" /></label>
+        <label class="slider">等值线 {{ section.contours || "关" }}<input v-model.number="section.contours" type="range" min="0" max="30" step="1" /></label>
+        <label v-if="section.kind === 'height'" class="slider">高度 {{ slice.heightM.toFixed(1) }} m<input v-model.number="slice.heightM" type="range" min="12.5" max="987.5" step="0.5" /></label>
+        <label v-if="section.kind === 'lon' || section.kind === 'lat'" class="slider">位置偏移 {{ section.offsetKm.toFixed(2) }} km<input v-model.number="section.offsetKm" type="range" min="-12" max="12" step="0.01" /></label>
+        <div v-if="section.enabled && (section.kind === 'polyline' || section.kind === 'box')" class="section-tools">
+          <div class="mode-picks draw-actions">
+            <template v-if="section.drawMode">
+              <button v-if="section.kind === 'polyline'" type="button" class="on" :disabled="section.points.length < 2" @click="finishDrawing()">完成</button>
+              <button type="button" @click="cancelDrawing()">取消</button>
+            </template>
+            <template v-else>
+              <button type="button" :disabled="!hasGeometry()" @click="startDrawing(false)">编辑</button>
+              <button type="button" @click="startDrawing(true)">重画</button>
+              <button type="button" :disabled="!hasGeometry()" @click="clearDrawn()">清除</button>
+            </template>
+            <button v-if="section.kind === 'polyline'" type="button" :class="{ on: unfoldedVisible }" @click="unfoldedVisible = !unfoldedVisible">{{ unfoldedVisible ? "隐藏展开图" : "显示展开图" }}</button>
+          </div>
+          <div class="hint-line">{{ drawHint }}</div>
+        </div>
+        <template v-if="section.kind === 'box'">
+          <div class="slider range-label">
+            <span>高度范围 {{ section.box.heightMinM.toFixed(0) }}–{{ section.box.heightMaxM.toFixed(0) }} m</span>
+            <RangeSlider :min="0" :max="1000" :min-value="section.box.heightMinM" :max-value="section.box.heightMaxM" :step="12.5" @update:min-value="section.box.heightMinM = $event" @update:max-value="section.box.heightMaxM = $event" />
+          </div>
+          <label class="row">间隔
+            <select v-model.number="section.box.stepLevels">
+              <option :value="1">每 1 层</option>
+              <option :value="2">每 2 层</option>
+              <option :value="5">每 5 层</option>
+            </select>
+          </label>
+        </template>
+      </div>
+    </div>
+    </div>
+
+    <aside v-if="settingsOpen && showPanel && !embed" class="settings-rail">
       <div class="panel-head">
         <div>
-          <div class="eyebrow">THREE.JS · WEBGL2 GPGPU</div>
+          <div class="eyebrow">视觉设置</div>
           <h1>低空风场可视化</h1>
         </div>
-        <button class="icon" title="收起" @click="panelOpen = false">×</button>
+        <button class="icon" type="button" title="关闭设置" aria-label="关闭设置" @click="settingsOpen = false">×</button>
+      </div>
+      <p class="prefs-note">改动立即生效，左侧开关会一起变。保存只留在这台浏览器。</p>
+      <div class="prefs-actions">
+        <button type="button" @click="saveVisualSettings">保存</button>
+        <button type="button" @click="restoreVisualDefaults">恢复默认</button>
+      </div>
+      <p v-if="prefsMessage" class="prefs-message">{{ prefsMessage }}</p>
+      <div class="mode-picks" role="tablist" aria-label="设置分类">
+        <button type="button" role="tab" :aria-selected="settingsTab === 'particles'" :class="{ on: settingsTab === 'particles' }" @click="settingsTab = 'particles'">粒子展示</button>
+        <button type="button" role="tab" :aria-selected="settingsTab === 'look'" :class="{ on: settingsTab === 'look' }" @click="settingsTab = 'look'">图层外观</button>
+        <button type="button" role="tab" :aria-selected="settingsTab === 'view'" :class="{ on: settingsTab === 'view' }" @click="settingsTab = 'view'">视图</button>
       </div>
 
-      <details open>
-        <summary>图层</summary>
-        <label
-          class="row"
-          title="本帧：色标两端用当前时次的最小和最大，换整点会变。固定范围：用配置里的 display_range，各时次同一套颜色。剖面关掉「自动范围」后仍用手填值域。数值窗口不跟着变。"
-          >色标
+      <div v-show="settingsTab === 'look'">
+        <label class="row" title="本帧：色标两端用当前时次的最小和最大。固定范围：用 display_range。">色标
           <select v-model="colorScaleMode">
             <option value="frame">本帧最小–最大</option>
             <option value="display">固定范围</option>
-          </select></label
-        >
-        <label class="row"
-          ><input
-            type="checkbox"
-            :checked="format.id === 'sz3'"
-            @change="onSz3Toggle(($event.target as HTMLInputElement).checked, $event)"
-          />SZ3</label
-        >
-        <label class="row"
-          ><input
-            type="checkbox"
-            :checked="globeMode"
-            @change="onCesiumToggle(($event.target as HTMLInputElement).checked, $event)"
-          />Cesium</label
-        >
-        <label class="row"
-          ><input v-model="layers.buildings" type="checkbox" />建筑白膜
-          <small>{{ buildingsInfo }}</small></label
-        >
+          </select></label>
         <label v-if="layers.buildings" class="slider"
           >建筑不透明度 {{ layers.buildingOpacity.toFixed(2) }}
           <input v-model.number="layers.buildingOpacity" type="range" min="0" max="1" step="0.05"
@@ -4150,12 +4632,6 @@ onBeforeUnmount(() => {
             :disabled="!layers.ground || layers.groundVar === 'none'"
           />
         </label>
-        <label class="row"
-          ><input v-model="layers.ground" type="checkbox" />地面
-          <select v-model="layers.groundVar">
-            <option v-for="v in variables2D" :key="v.name" :value="v.name">{{ v.label }}</option>
-          </select></label
-        >
         <div
           v-if="layers.ground && layers.groundVar !== 'none' && Number.isFinite(layers.groundFilterMin)"
           class="slider range-label"
@@ -4173,18 +4649,8 @@ onBeforeUnmount(() => {
             @update:max-value="layers.groundFilterMax = $event"
           />
         </div>
-        <label class="row"
-          ><input v-model="layers.particles" type="checkbox" />风粒子（GPGPU 流线）</label
-        >
-        <label class="row"><input v-model="layers.probe" type="checkbox" />探针</label>
         <label v-if="layers.probe" class="row"
           ><input v-model="layers.probeFollowMouse" type="checkbox" />跟随鼠标</label
-        >
-        <label class="row"
-          ><input v-model="layers.volume" type="checkbox" />体渲染
-          <select v-model="layers.volumeVar" :disabled="!layers.volume">
-            <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
-          </select></label
         >
         <template v-if="layers.volume">
           <label class="slider"
@@ -4242,12 +4708,9 @@ onBeforeUnmount(() => {
             ><input v-model="layers.filterSlices" type="checkbox" />切面跟随体渲染过滤</label
           >
         </template>
-      </details>
+      </div>
 
-      <details open>
-        <summary>
-          粒子样式 <em>{{ particleParams.count.toLocaleString() }}</em>
-        </summary>
+      <div v-show="settingsTab === 'particles'">
         <label class="slider"
           >粒子数量 {{ particleParams.count.toLocaleString() }}
           <input
@@ -4343,112 +4806,25 @@ onBeforeUnmount(() => {
           >
           <label class="row"><input v-model="particleParams.paused" type="checkbox" />暂停</label>
         </div>
-      </details>
+      </div>
 
-      <details open>
-        <summary>
-          剖面 <em>{{ section.enabled ? SECTION_KIND_LABELS[section.kind] : "关" }}</em>
-        </summary>
-        <label class="row"
-          ><input v-model="section.enabled" type="checkbox" />显示
-        </label>
-        <span class="mode-picks">
-          <button type="button" :class="{ on: section.enabled && section.kind === 'height' }" @click="selectKind('height')">高度</button>
-          <button type="button" :class="{ on: section.enabled && section.kind === 'lon' }" @click="selectKind('lon')">经度</button>
-          <button type="button" :class="{ on: section.enabled && section.kind === 'lat' }" @click="selectKind('lat')">纬度</button>
-          <button type="button" :class="{ on: section.enabled && section.kind === 'polyline' }" @click="selectKind('polyline')">折线</button>
-          <button type="button" :class="{ on: section.enabled && section.kind === 'box' }" @click="selectKind('box')">框选</button>
-        </span>
-        <label class="row"
-          >变量
-          <select v-model="section.variable">
-            <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
-          </select></label
-        >
-        <label class="row"
-          >色带
-          <select v-model="section.colormap">
-            <option v-for="c in COLORMAPS" :key="c" :value="c">
-              {{ COLORMAP_LABELS[c] ?? c }}
-            </option>
-          </select></label
-        >
-        <label class="row" title="跟着面板「色标」：本帧时用当前时次的最小/最大，固定范围时用 display_range。手填时若某一端为空或非数字，会回退到该变量的默认范围。">
-          <input v-model="section.autoRange" type="checkbox" />自动范围
-          <input
-            v-model.number="section.min"
-            class="num"
-            type="number"
-            step="any"
-            :disabled="section.autoRange"
-            @blur="commitSectionRange" />–
-          <input
-            v-model.number="section.max"
-            class="num"
-            type="number"
-            step="any"
-            :disabled="section.autoRange"
-            @blur="commitSectionRange"
-        /></label>
-        <label class="slider"
-          >不透明度 {{ section.opacity.toFixed(2)
-          }}<input v-model.number="section.opacity" type="range" min="0.1" max="1" step="0.01"
-        /></label>
-        <label class="row" title="按数值淡出低端：低于阈值完全透明，其上 25% 区间渐显（与体渲染阈值一致的思路）"
-          ><input v-model="section.lowAlpha" type="checkbox" />低值透明</label
-        >
-        <label v-if="section.lowAlpha" class="slider"
-          >透明阈值 {{ (section.lowThreshold * 100).toFixed(0) }}%
-          <input v-model.number="section.lowThreshold" type="range" min="0" max="0.6" step="0.01"
-        /></label>
-        <label class="slider"
-          >等值线 {{ section.contours || "关"
-          }}<input v-model.number="section.contours" type="range" min="0" max="30" step="1"
-        /></label>
-        <label v-if="section.kind === 'height'" class="slider"
-          >高度 {{ slice.heightM.toFixed(1) }} m
-          <input v-model.number="slice.heightM" type="range" min="12.5" max="987.5" step="0.5"
-        /></label>
-        <label v-if="section.kind === 'lon' || section.kind === 'lat'" class="slider"
-          >位置偏移 {{ section.offsetKm.toFixed(2) }} km
-          <input v-model.number="section.offsetKm" type="range" min="-12" max="12" step="0.01"
-        /></label>
-        <div v-if="section.enabled && (section.kind === 'polyline' || section.kind === 'box')" class="section-tools">
-          <div class="mode-picks draw-actions">
-            <template v-if="section.drawMode">
-              <button v-if="section.kind === 'polyline'" type="button" class="on" :disabled="section.points.length < 2" @click="finishDrawing()">完成</button>
-              <button type="button" @click="cancelDrawing()">取消</button>
-            </template>
-            <template v-else>
-              <button type="button" :disabled="!hasGeometry()" @click="startDrawing(false)">编辑</button>
-              <button type="button" @click="startDrawing(true)">重画</button>
-              <button type="button" :disabled="!hasGeometry()" @click="clearDrawn()">清除</button>
-            </template>
-            <button v-if="section.kind === 'polyline'" type="button" :class="{ on: unfoldedVisible }" @click="unfoldedVisible = !unfoldedVisible">{{ unfoldedVisible ? "隐藏展开图" : "显示展开图" }}</button>
-          </div>
-          <div class="hint-line">{{ drawHint }}</div>
-        </div>
-        <template v-if="section.kind === 'box'">
-          <div class="slider range-label">
-            <span>高度范围 {{ section.box.heightMinM.toFixed(0) }}–{{ section.box.heightMaxM.toFixed(0) }} m</span>
-            <RangeSlider :min="0" :max="1000" :min-value="section.box.heightMinM" :max-value="section.box.heightMaxM" :step="12.5" @update:min-value="section.box.heightMinM = $event" @update:max-value="section.box.heightMaxM = $event" />
-          </div>
-          <label class="row">间隔
-            <select v-model.number="section.box.stepLevels">
-              <option :value="1">每 1 层</option>
-              <option :value="2">每 2 层</option>
-              <option :value="5">每 5 层</option>
-            </select>
-          </label>
-        </template>
-      </details>
-
-      <details>
-        <summary>视图</summary>
+      <div v-show="settingsTab === 'view'">
         <label v-if="!globeMode" class="slider"
           >垂直夸张 {{ view.exaggeration.toFixed(1) }}×
           <input v-model.number="view.exaggeration" type="range" min="1" max="10" step="0.1"
         /></label>
+        <label class="row"><input type="checkbox" :checked="format.id === 'sz3'" @change="onSz3Toggle(($event.target as HTMLInputElement).checked, $event)" /> SZ3</label>
+        <template v-if="globeMode">
+          <div class="row"><span>底图</span>
+            <button type="button" :class="{ on: globeBasemap === 'img' }" @click="setGlobeBasemap('img')">影像</button>
+            <button type="button" :class="{ on: globeBasemap === 'vec' }" @click="setGlobeBasemap('vec')">矢量</button>
+          </div>
+          <label class="slider">垂直夸张 {{ chromeK.toFixed(1) }}×<input type="range" min="1" max="10" step="0.1" :value="chromeK" @input="setGlobeK(Number(($event.target as HTMLInputElement).value))" /></label>
+          <div class="buttons">
+            <button type="button" @click="setGlobeView('overview')">总览</button>
+            <button type="button" @click="setGlobeView('top')">俯视</button>
+          </div>
+        </template>
         <label class="row"><input v-model="view.shadows" type="checkbox" />建筑阴影</label>
         <label class="row"
           >主题
@@ -4458,13 +4834,11 @@ onBeforeUnmount(() => {
           </select></label
         >
         <div v-if="!globeMode" class="buttons">
-          <button @click="setView('overview')">总览</button>
-          <button @click="setView('close')">近景</button>
-          <button @click="setView('top')">俯视</button>
+          <button type="button" @click="setView('overview')">总览</button>
+          <button type="button" @click="setView('close')">近景</button>
+          <button type="button" @click="setView('top')">俯视</button>
         </div>
-      </details>
-
-      <details>
+        <details>
         <summary>状态</summary>
         <div class="stats">
           <div>{{ status }}</div>
@@ -4475,9 +4849,9 @@ onBeforeUnmount(() => {
           </div>
           <div>建筑：{{ buildingsInfo }}（3D-GloBFP + OSM）</div>
         </div>
-      </details>
+        </details>
+      </div>
     </aside>
-    <button v-else class="open-panel" @click="panelOpen = true">控制面板</button>
   </div>
 </template>
 
@@ -4491,6 +4865,7 @@ onBeforeUnmount(() => {
 .hint-line { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 4px 0; }
 .range-label span { display: block; margin-bottom: 4px; }
 .viewer {
+  display: flex;
   --card: rgba(8, 17, 30, 0.78);
   --panel: rgba(8, 16, 28, 0.9);
   --line: rgba(120, 170, 200, 0.22);
@@ -4517,29 +4892,80 @@ onBeforeUnmount(() => {
 }
 .viewer.globe .legends,
 .viewer.globe .lonlat,
-.viewer.globe .panel,
-.viewer.globe .open-panel,
 .viewer.globe .timeline,
 .viewer.globe .profile-box,
-.viewer.globe .view-tools {
+.viewer.globe .view-tools,
+.viewer.globe .element-rail,
+.viewer.globe .settings-rail,
+.viewer.globe .stage-tools,
+.viewer.globe .section-float {
   pointer-events: auto;
 }
+.viewer.globe .stage { pointer-events: none; }
+.element-rail, .settings-rail {
+  flex: none;
+  height: 100%;
+  overflow: auto;
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--text);
+  z-index: 6;
+}
+.element-rail { width: 252px; border-right: 1px solid var(--line); }
+.element-rail.collapsed { width: 36px; }
+.settings-rail { width: 320px; border-left: 1px solid var(--line); padding: 12px 14px; }
+.stage { position: relative; flex: 1; min-width: 0; height: 100%; }
+.rail-head, .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.rail-head { padding: 8px; }
+.rail-fold, .float-actions button, .mode-icon, .tool-icon {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  border-radius: 4px;
+}
+.mode-icon, .tool-icon { width: 28px; height: 28px; padding: 0; }
+.mode-icon.on, .tool-icon.on, .mode-icon[aria-pressed="true"], .tool-icon[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.mode-icon:focus-visible, .tool-icon:focus-visible, .rail-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.element-list { list-style: none; margin: 0; padding: 0 8px 8px; }
+.element-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.element-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.element-modes { display: inline-flex; gap: 4px; flex: none; }
+.scene-group { padding: 8px; }
+.scene-title { color: var(--muted); margin-bottom: 4px; }
+.stage-tools { position: absolute; z-index: 8; top: 12px; right: 12px; display: flex; gap: 6px; }
+.section-float {
+  position: absolute;
+  z-index: 9;
+  top: 52px;
+  right: 12px;
+  width: min(300px, calc(100% - 24px));
+  max-height: calc(100% - 120px);
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+.section-float.collapsed { max-height: none; overflow: hidden; }
+.float-head { display: flex; justify-content: space-between; align-items: center; cursor: grab; user-select: none; }
+.float-actions { display: inline-flex; gap: 4px; }
+.prefs-note, .prefs-message { color: var(--muted); margin: 6px 0; }
+.prefs-actions { display: flex; gap: 8px; margin-bottom: 8px; }
 .view-tools {
   position: absolute;
   z-index: 7;
   right: 16px;
   bottom: 18px;
 }
-.view-tools.panel-open {
-  right: 328px;
-}
-.view-tools.panel-open.raised {
-  bottom: 96px;
-}
 @media (max-width: 1100px) {
   .view-tools.raised {
     bottom: 96px;
   }
+  .settings-rail { width: min(320px, calc(100% - 320px)); }
 }
 .viewer.light {
   --card: rgba(250, 252, 255, 0.82);
