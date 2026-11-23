@@ -40,6 +40,21 @@ import {
   saveVisualPrefs,
   type VisualPrefs,
 } from "../state/visualPrefs";
+import {
+  applyParticlePreset,
+  clampParticleHeightRange,
+  matchParticlePreset,
+  PARTICLE_PRESETS,
+  type ParticlePresetId,
+} from "../state/particlePresets";
+import {
+  createCustomColormap,
+  deleteCustomColormap,
+  loadCustomColormaps,
+  saveCustomColormaps,
+  updateCustomColormap,
+  type CustomColormap,
+} from "../state/customColormaps";
 import { timesOf } from "../data/manifest";
 import {
   advance as advanceTimeline,
@@ -84,7 +99,14 @@ import {
   type ColorMode,
   type ParticleParams,
 } from "../render/particles";
-import { COLORMAPS, COLORMAP_LABELS, DIVERGING, colormapRGB } from "../render/colormaps";
+import {
+  allColormapIds,
+  COLORMAPS,
+  COLORMAP_LABELS,
+  DIVERGING,
+  colormapRGB,
+  registerCustomColormaps,
+} from "../render/colormaps";
 import { LOW_ALPHA_RAMP } from "../render/slices";
 import {
   discardedFraction,
@@ -105,12 +127,14 @@ import {
   type DataRange,
 } from "../state/legendRange";
 import ColorLegend from "./ColorLegend.vue";
+import ColormapManager from "./ColormapManager.vue";
+import ColormapSelect, { type ColormapOption } from "./ColormapSelect.vue";
 import LonLatReadout from "./LonLatReadout.vue";
 import ProfileChart from "./ProfileChart.vue";
 import RangeSlider from "./RangeSlider.vue";
 import UnfoldedPlot from "./UnfoldedPlot.vue";
 import TimelineBar from "./TimelineBar.vue";
-import ViewTools from "./ViewTools.vue";
+import ViewTools, { type ViewPresetItem } from "./ViewTools.vue";
 
 export type ViewSnapshot = {
   t: number;
@@ -176,7 +200,93 @@ function onCesiumToggle(on: boolean): void {
   emit("set-cesium", on);
 }
 
-const statusCollapse = ref<string[]>([]);
+const debugCollapse = ref<string[]>([]);
+const particleAdvancedCollapse = ref<string[]>([]);
+const sectionStyleCollapse = ref<string[]>([]);
+const layerExpanded = reactive({
+  ground: false,
+  volume: true,
+  particles: false,
+});
+
+function selectParticlePreset(id: ParticlePresetId): void {
+  applyParticlePreset(particleParams, id);
+}
+
+function setParticleHeightRange(minM: number, maxM: number): void {
+  const [lo, hi] = clampParticleHeightRange(minM, maxM);
+  particleParams.heightMin = lo;
+  particleParams.heightMax = hi;
+}
+
+function toggleTheme(): void {
+  view.theme = view.theme === "dark" ? "light" : "dark";
+}
+
+const customColormaps = ref<CustomColormap[]>(
+  typeof localStorage !== "undefined" ? loadCustomColormaps(localStorage) : [],
+);
+registerCustomColormaps(customColormaps.value);
+const colormapRevision = ref(0);
+
+const colormapOptions = computed<ColormapOption[]>(() => [
+  ...COLORMAPS.map((id) => ({ id, label: COLORMAP_LABELS[id] ?? id })),
+  ...customColormaps.value.map((c) => ({ id: c.id, label: c.label, custom: true })),
+]);
+
+function syncCustomColormaps(next: CustomColormap[]): void {
+  customColormaps.value = next;
+  if (typeof localStorage !== "undefined") saveCustomColormaps(localStorage, next);
+  registerCustomColormaps(next);
+  colormapRevision.value += 1;
+  runLayerGl(() => {
+    particles?.setParams({ ...particleParams });
+  });
+}
+
+function onCreateColormap(payload: { label: string; stops: string[] }): void {
+  const res = createCustomColormap(customColormaps.value, payload.label, payload.stops);
+  if (!res) return;
+  syncCustomColormaps(res.list);
+}
+
+function onUpdateColormap(payload: { id: string; label: string; stops: string[] }): void {
+  const next = updateCustomColormap(customColormaps.value, payload.id, payload.label, payload.stops);
+  if (!next) return;
+  syncCustomColormaps(next);
+}
+
+function onDeleteColormap(id: string): void {
+  const next = deleteCustomColormap(customColormaps.value, id);
+  if (particleParams.colormap === id) particleParams.colormap = "glacier";
+  if (section.colormap === id) section.colormap = "viridis";
+  syncCustomColormaps(next);
+}
+
+const volumeLowAlpha = computed({
+  get: () => layers.volumeThreshold > 0,
+  set: (on: boolean) => {
+    layers.volumeThreshold = on ? 0.2 : 0;
+  },
+});
+
+const viewPresetItems = computed<ViewPresetItem[]>(() =>
+  globeMode
+    ? [
+        { id: "overview", label: "总览" },
+        { id: "top", label: "俯视" },
+      ]
+    : [
+        { id: "overview", label: "总览" },
+        { id: "close", label: "近景" },
+        { id: "top", label: "俯视" },
+      ],
+);
+
+function selectViewPreset(id: "overview" | "close" | "top"): void {
+  if (globeMode) setGlobeView(id);
+  else setView(id);
+}
 
 function onGroundToggle(): void {
   layers.ground = toggleLayer({ on: layers.ground, variable: layers.groundVar }).on;
@@ -243,12 +353,12 @@ function setGlobeView(name: string): void {
 
 function chromeLeft(): number {
   if (!props.showPanel || embed) return 0;
-  return elementRailOpen.value ? 232 : 44;
+  return elementRailOpen.value ? 256 : 44;
 }
 
 const railVars = computed(() => {
   const show = props.showPanel && !embed;
-  const left = show ? (elementRailOpen.value ? 232 : 44) : 0;
+  const left = show ? (elementRailOpen.value ? 256 : 44) : 0;
   const right = show && settingsOpen.value ? 320 : 0;
   return {
     "--rail-left": `${left}px`,
@@ -374,7 +484,7 @@ function applyVisualPrefs(prefs: VisualPrefs): void {
 }
 
 function readSavedVisualPrefs(): void {
-  const read = loadVisualPrefs(localStorage, COLORMAPS);
+  const read = loadVisualPrefs(localStorage, allColormapIds());
   prefsMessage.value = read.message;
   if (read.prefs) applyVisualPrefs(read.prefs);
 }
@@ -537,6 +647,8 @@ async function manifestCandidates(): Promise<string[]> {
 const timelineHidden = query.get("timeline") === "0";
 /** Debug-only measurement hooks on __atmosApi (sampleCell, buildingBaseSamples). */
 const debugApis = import.meta.env.DEV || query.get("globeDebug") === "1";
+/** Debug-only panel entries (SZ3 toggle, volume x/y/z cuts, runtime stats): `?debug=1` or `?globeDebug=1`. */
+const debugUi = query.get("debug") === "1" || query.get("globeDebug") === "1";
 const MAX_SPEED = 25; // m/s, scale of the derived speed byte
 const SPEED = "speed";
 
@@ -545,7 +657,7 @@ const canvas = ref<HTMLCanvasElement>();
 const manifest = shallowRef<Manifest>();
 const elementRailOpen = ref(props.showPanel && !embed);
 const settingsOpen = ref(false);
-const settingsTab = ref<"particles" | "look" | "view">("particles");
+const settingsTab = ref<"particles" | "scene" | "colormaps">("particles");
 const prefsMessage = ref<string | null>(null);
 const sectionFloatOpen = ref(false);
 const sectionFloatCollapsed = ref(false);
@@ -639,6 +751,7 @@ if (globeMode) {
   view.exaggeration = 1;
 }
 const particleParams = reactive<ParticleParams>({ ...DEFAULT_PARTICLES });
+const activeParticlePreset = computed(() => matchParticlePreset(particleParams));
 const slice = reactive({
   enabled: false,
   variable: SPEED,
@@ -4441,6 +4554,17 @@ onBeforeUnmount(() => {
             <div class="layer-row">
               <Layers class="layer-mark" :size="15" />
               <span class="layer-name">地面色斑</span>
+              <button
+                v-if="layers.ground && layers.groundVar !== 'none' && Number.isFinite(layers.groundFilterMin)"
+                type="button"
+                class="layer-expand"
+                :aria-expanded="layerExpanded.ground"
+                :title="layerExpanded.ground ? '收起参数' : '展开参数'"
+                @click="layerExpanded.ground = !layerExpanded.ground"
+              >
+                <ChevronUp v-if="layerExpanded.ground" :size="14" />
+                <ChevronDown v-else :size="14" />
+              </button>
               <el-switch
                 :model-value="layers.ground"
                 size="small"
@@ -4458,12 +4582,41 @@ onBeforeUnmount(() => {
             >
               <el-option v-for="v in variables2D" :key="v.name" :label="v.label" :value="v.name" />
             </el-select>
+            <div
+              v-if="layers.ground && layers.groundVar !== 'none' && Number.isFinite(layers.groundFilterMin) && layerExpanded.ground"
+              class="layer-extras"
+            >
+              <div class="slider-field range-label">
+                <div class="slider-head"><span>地面值域</span></div>
+                <RangeSlider
+                  :min="groundBounds[0]"
+                  :max="groundBounds[1]"
+                  :min-value="layers.groundFilterMin"
+                  :max-value="layers.groundFilterMax"
+                  :unit="groundUnits"
+                  :step="Math.max((groundBounds[1] - groundBounds[0]) / 200, 1e-6)"
+                  @update:min-value="layers.groundFilterMin = $event"
+                  @update:max-value="layers.groundFilterMax = $event"
+                />
+              </div>
+            </div>
           </div>
 
           <div class="layer-card" :class="{ active: layers.volume }">
             <div class="layer-row">
               <Box class="layer-mark" :size="15" />
               <span class="layer-name">体渲染</span>
+              <button
+                v-if="layers.volume"
+                type="button"
+                class="layer-expand"
+                :aria-expanded="layerExpanded.volume"
+                :title="layerExpanded.volume ? '收起参数' : '展开参数'"
+                @click="layerExpanded.volume = !layerExpanded.volume"
+              >
+                <ChevronUp v-if="layerExpanded.volume" :size="14" />
+                <ChevronDown v-else :size="14" />
+              </button>
               <el-switch
                 :model-value="layers.volume"
                 size="small"
@@ -4481,18 +4634,78 @@ onBeforeUnmount(() => {
             >
               <el-option v-for="v in variables3D" :key="v.name" :label="v.label" :value="v.name" />
             </el-select>
+            <div v-if="layers.volume && layerExpanded.volume" class="layer-extras">
+              <div class="slider-field">
+                <div class="slider-head">
+                  <span>不透明度</span>
+                  <span class="val">{{ layers.volumeOpacity.toFixed(2) }}</span>
+                </div>
+                <el-slider v-model="layers.volumeOpacity" :min="0.05" :max="2" :step="0.05" :show-tooltip="false" />
+              </div>
+
+              <div class="check-row">
+                <el-checkbox v-model="volumeLowAlpha">低值透明</el-checkbox>
+              </div>
+
+              <div v-if="volumeDataHint || volumeThresholdWarning" class="panel-warn">
+                {{ volumeDataHint ?? volumeThresholdWarning }}
+              </div>
+
+              <div class="slider-field range-label">
+                <div class="slider-head"><span>数值窗口</span></div>
+                <RangeSlider
+                  :min="volumeBounds[0]"
+                  :max="volumeBounds[1]"
+                  :min-value="layers.volumeFilterMin"
+                  :max-value="layers.volumeFilterMax"
+                  :unit="unitsOf(layers.volumeVar)"
+                  :step="Math.max((volumeBounds[1] - volumeBounds[0]) / 200, 1e-6)"
+                  @update:min-value="layers.volumeFilterMin = $event"
+                  @update:max-value="layers.volumeFilterMax = $event"
+                />
+              </div>
+            </div>
           </div>
 
           <div class="layer-card" :class="{ active: layers.particles }">
             <div class="layer-row">
               <Wind class="layer-mark" :size="15" />
               <span class="layer-name">风粒子</span>
+              <button
+                v-if="layers.particles"
+                type="button"
+                class="layer-expand"
+                :aria-expanded="layerExpanded.particles"
+                :title="layerExpanded.particles ? '收起参数' : '展开参数'"
+                @click="layerExpanded.particles = !layerExpanded.particles"
+              >
+                <ChevronUp v-if="layerExpanded.particles" :size="14" />
+                <ChevronDown v-else :size="14" />
+              </button>
               <el-switch
                 :model-value="layers.particles"
                 size="small"
                 aria-label="风粒子"
                 @change="onParticleToggle"
               />
+            </div>
+            <div v-if="layers.particles && layerExpanded.particles" class="layer-extras">
+              <div class="slider-field range-label">
+                <div class="slider-head">
+                  <span>高度范围</span>
+                  <span class="val">{{ particleParams.heightMin }}–{{ particleParams.heightMax }} m</span>
+                </div>
+                <RangeSlider
+                  :min="10"
+                  :max="1000"
+                  :min-value="particleParams.heightMin"
+                  :max-value="particleParams.heightMax"
+                  :step="10"
+                  unit="m"
+                  @update:min-value="setParticleHeightRange($event, particleParams.heightMax)"
+                  @update:max-value="setParticleHeightRange(particleParams.heightMin, $event)"
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -4504,6 +4717,28 @@ onBeforeUnmount(() => {
               Cesium 地球
             </el-checkbox>
             <el-checkbox v-model="layers.buildings">建筑白膜</el-checkbox>
+            <div v-if="layers.buildings" class="scene-sub">
+              <el-checkbox
+                v-model="layers.buildingTintEnabled"
+                :disabled="!layers.ground || layers.groundVar === 'none'"
+              >
+                白膜着色
+              </el-checkbox>
+              <div v-if="layers.buildingTintEnabled" class="slider-field">
+                <div class="slider-head">
+                  <span>着色程度</span>
+                  <span class="val">{{ Math.round(layers.buildingTintStrength * 100) }}%</span>
+                </div>
+                <el-slider
+                  v-model="layers.buildingTintStrength"
+                  :min="0"
+                  :max="1"
+                  :step="0.05"
+                  :disabled="!layers.ground || layers.groundVar === 'none'"
+                  :show-tooltip="false"
+                />
+              </div>
+            </div>
             <el-checkbox
               v-if="globeMode"
               :model-value="globeTerrain"
@@ -4536,6 +4771,7 @@ onBeforeUnmount(() => {
           :data-max="l.dataMax"
           :hint="l.hint"
           :warn="l.warn"
+          :revision="colormapRevision"
         />
       </div>
 
@@ -4548,12 +4784,16 @@ onBeforeUnmount(() => {
         :compass-deg="compassDeg"
         :fullscreen="fullscreen"
         :basemap="globeMode ? globeBasemap : undefined"
+        :theme="view.theme"
+        :view-presets="viewPresetItems"
         @reset="resetHomeView"
+        @select-view="selectViewPreset"
         @zoom-in="zoomView(ZOOM_IN)"
         @zoom-out="zoomView(ZOOM_OUT)"
         @north="faceNorth"
         @fullscreen="toggleFullscreen"
-        @toggle-basemap="setGlobeBasemap(globeBasemap === 'img' ? 'vec' : 'img')"
+        @select-basemap="setGlobeBasemap"
+        @toggle-theme="toggleTheme"
       />
 
       <ProfileChart
@@ -4599,8 +4839,9 @@ onBeforeUnmount(() => {
           <Columns2 :size="17" />
         </IconButton>
         <IconButton
+          v-if="section.enabled && !sectionFloatOpen"
           label="剖面设置"
-          hint="剖面设置"
+          hint="打开剖面配置"
           :pressed="sectionFloatOpen"
           @click="onSectionSettings"
         >
@@ -4615,8 +4856,8 @@ onBeforeUnmount(() => {
           <Crosshair :size="17" />
         </IconButton>
         <IconButton
-          label="视觉设置"
-          hint="视觉设置"
+          label="设置"
+          hint="设置"
           :pressed="settingsOpen"
           @click="openSettings"
         >
@@ -4679,62 +4920,6 @@ onBeforeUnmount(() => {
             <el-select v-model="section.variable" size="small" class="field-control">
               <el-option v-for="v in variables3D" :key="v.name" :label="v.label" :value="v.name" />
             </el-select>
-          </div>
-
-          <div class="form-row">
-            <span class="field-label">色带</span>
-            <el-select v-model="section.colormap" size="small" class="field-control">
-              <el-option v-for="c in COLORMAPS" :key="c" :label="COLORMAP_LABELS[c] ?? c" :value="c" />
-            </el-select>
-          </div>
-
-          <div class="form-row range-inputs">
-            <el-checkbox v-model="section.autoRange">自动</el-checkbox>
-            <el-input-number
-              v-model="section.min"
-              size="small"
-              :controls="false"
-              :disabled="section.autoRange"
-              class="num-input"
-              @blur="commitSectionRange"
-            />
-            <span class="dash">–</span>
-            <el-input-number
-              v-model="section.max"
-              size="small"
-              :controls="false"
-              :disabled="section.autoRange"
-              class="num-input"
-              @blur="commitSectionRange"
-            />
-          </div>
-
-          <div class="slider-field">
-            <div class="slider-head">
-              <span>不透明度</span>
-              <span class="val">{{ section.opacity.toFixed(2) }}</span>
-            </div>
-            <el-slider v-model="section.opacity" :min="0.1" :max="1" :step="0.01" :show-tooltip="false" />
-          </div>
-
-          <div class="check-row">
-            <el-checkbox v-model="section.lowAlpha">低值透明</el-checkbox>
-          </div>
-
-          <div v-if="section.lowAlpha" class="slider-field">
-            <div class="slider-head">
-              <span>透明阈值</span>
-              <span class="val">{{ (section.lowThreshold * 100).toFixed(0) }}%</span>
-            </div>
-            <el-slider v-model="section.lowThreshold" :min="0" :max="0.6" :step="0.01" :show-tooltip="false" />
-          </div>
-
-          <div class="slider-field">
-            <div class="slider-head">
-              <span>等值线</span>
-              <span class="val">{{ section.contours || "关" }}</span>
-            </div>
-            <el-slider v-model="section.contours" :min="0" :max="30" :step="1" :show-tooltip="false" />
           </div>
 
           <div v-if="section.kind === 'height'" class="slider-field">
@@ -4801,13 +4986,78 @@ onBeforeUnmount(() => {
               </el-select>
             </div>
           </template>
+
+          <div class="slider-field">
+            <div class="slider-head">
+              <span>等值线</span>
+              <span class="val">{{ section.contours || "关" }}</span>
+            </div>
+            <el-slider v-model="section.contours" :min="0" :max="30" :step="1" :show-tooltip="false" />
+          </div>
+
+          <el-collapse v-model="sectionStyleCollapse" class="inline-collapse">
+            <el-collapse-item title="显示样式" name="style">
+              <div class="collapse-stack">
+                <div class="form-row">
+                  <span class="field-label">色带</span>
+                  <ColormapSelect
+                    v-model="section.colormap"
+                    :options="colormapOptions"
+                    :revision="colormapRevision"
+                    class="field-control"
+                  />
+                </div>
+
+                <div class="form-row range-inputs">
+                  <el-checkbox v-model="section.autoRange">自动</el-checkbox>
+                  <el-input-number
+                    v-model="section.min"
+                    size="small"
+                    :controls="false"
+                    :disabled="section.autoRange"
+                    class="num-input"
+                    @blur="commitSectionRange"
+                  />
+                  <span class="dash">–</span>
+                  <el-input-number
+                    v-model="section.max"
+                    size="small"
+                    :controls="false"
+                    :disabled="section.autoRange"
+                    class="num-input"
+                    @blur="commitSectionRange"
+                  />
+                </div>
+
+                <div class="slider-field">
+                  <div class="slider-head">
+                    <span>不透明度</span>
+                    <span class="val">{{ section.opacity.toFixed(2) }}</span>
+                  </div>
+                  <el-slider v-model="section.opacity" :min="0.1" :max="1" :step="0.01" :show-tooltip="false" />
+                </div>
+
+                <div class="check-row">
+                  <el-checkbox v-model="section.lowAlpha">低值透明</el-checkbox>
+                </div>
+
+                <div v-if="section.lowAlpha" class="slider-field">
+                  <div class="slider-head">
+                    <span>透明阈值</span>
+                    <span class="val">{{ (section.lowThreshold * 100).toFixed(0) }}%</span>
+                  </div>
+                  <el-slider v-model="section.lowThreshold" :min="0" :max="0.6" :step="0.01" :show-tooltip="false" />
+                </div>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
         </div>
       </div>
     </div>
 
     <aside v-if="settingsOpen && showPanel && !embed" class="settings-rail" @pointerdown.stop @wheel.stop>
       <div class="panel-head">
-        <strong>视觉设置</strong>
+        <strong>设置</strong>
         <IconButton compact label="关闭设置" hint="关闭" align="start" @click="settingsOpen = false">
           <X :size="15" />
         </IconButton>
@@ -4823,64 +5073,25 @@ onBeforeUnmount(() => {
       <p v-if="prefsMessage" class="prefs-message">{{ prefsMessage }}</p>
 
       <el-tabs v-model="settingsTab" stretch class="settings-tabs">
-        <el-tab-pane label="粒子展示" name="particles">
+        <el-tab-pane label="粒子" name="particles">
           <div class="tab-content">
-            <div class="check-row">
-              <el-checkbox :model-value="layers.particles" @update:model-value="onParticleToggle">显示风粒子</el-checkbox>
-            </div>
-
-            <div class="slider-field">
-              <div class="slider-head">
-                <span>粒子数量</span>
-                <span class="val">{{ particleParams.count.toLocaleString() }}</span>
+            <div class="preset-section">
+              <div class="preset-head">
+                <span class="field-label">风格预设</span>
+                <span v-if="activeParticlePreset === 'custom'" class="custom-tag">自定义</span>
               </div>
-              <el-slider v-model="particleParams.count" :min="4000" :max="262144" :step="4000" :show-tooltip="false" />
-            </div>
-
-            <div class="slider-field">
-              <div class="slider-head">
-                <span>尾迹长度</span>
-                <span class="val">{{ particleParams.trailLength }} 步</span>
+              <div class="preset-grid">
+                <el-button
+                  v-for="preset in PARTICLE_PRESETS"
+                  :key="preset.id"
+                  size="small"
+                  :type="activeParticlePreset === preset.id ? 'primary' : 'default'"
+                  :plain="activeParticlePreset !== preset.id"
+                  @click="selectParticlePreset(preset.id)"
+                >
+                  {{ preset.label }}
+                </el-button>
               </div>
-              <el-slider
-                v-model="particleParams.trailLength"
-                :min="2"
-                :max="particleParams.count > 70000 ? 32 : 64"
-                :step="1"
-                :show-tooltip="false"
-              />
-            </div>
-
-            <div class="slider-field">
-              <div class="slider-head">
-                <span>速度倍率</span>
-                <span class="val">{{ particleParams.speed.toFixed(2) }}×</span>
-              </div>
-              <el-slider v-model="particleParams.speed" :min="0.05" :max="5" :step="0.05" :show-tooltip="false" />
-            </div>
-
-            <div class="slider-field">
-              <div class="slider-head">
-                <span>线宽</span>
-                <span class="val">{{ particleParams.lineWidth.toFixed(1) }} px</span>
-              </div>
-              <el-slider v-model="particleParams.lineWidth" :min="0.5" :max="8" :step="0.1" :show-tooltip="false" />
-            </div>
-
-            <div class="slider-field">
-              <div class="slider-head">
-                <span>生命周期</span>
-                <span class="val">{{ particleParams.lifetime.toFixed(1) }} s</span>
-              </div>
-              <el-slider v-model="particleParams.lifetime" :min="1" :max="30" :step="0.5" :show-tooltip="false" />
-            </div>
-
-            <div class="slider-field">
-              <div class="slider-head">
-                <span>不透明度</span>
-                <span class="val">{{ particleParams.opacity.toFixed(2) }}</span>
-              </div>
-              <el-slider v-model="particleParams.opacity" :min="0.05" :max="1" :step="0.01" :show-tooltip="false" />
             </div>
 
             <div class="form-row">
@@ -4892,9 +5103,12 @@ onBeforeUnmount(() => {
 
             <div v-if="particleParams.colorMode !== 'single'" class="form-row">
               <span class="field-label">色带</span>
-              <el-select v-model="particleParams.colormap" size="small" class="field-control">
-                <el-option v-for="c in COLORMAPS" :key="c" :label="COLORMAP_LABELS[c] ?? c" :value="c" />
-              </el-select>
+              <ColormapSelect
+                v-model="particleParams.colormap"
+                :options="colormapOptions"
+                :revision="colormapRevision"
+                class="field-control"
+              />
             </div>
             <div v-else class="form-row">
               <span class="field-label">颜色</span>
@@ -4903,43 +5117,135 @@ onBeforeUnmount(() => {
 
             <div class="slider-field">
               <div class="slider-head">
-                <span>粒子高度下限</span>
-                <span class="val">{{ particleParams.heightMin }} m</span>
+                <span>不透明度</span>
+                <span class="val">{{ particleParams.opacity.toFixed(2) }}</span>
               </div>
-              <el-slider v-model="particleParams.heightMin" :min="10" :max="950" :step="10" :show-tooltip="false" />
+              <el-slider v-model="particleParams.opacity" :min="0.05" :max="1" :step="0.01" :show-tooltip="false" />
             </div>
 
-            <div class="slider-field">
+            <div class="slider-field range-label">
               <div class="slider-head">
-                <span>粒子高度上限</span>
-                <span class="val">{{ particleParams.heightMax }} m</span>
+                <span>高度范围</span>
+                <span class="val">{{ particleParams.heightMin }}–{{ particleParams.heightMax }} m</span>
               </div>
-              <el-slider v-model="particleParams.heightMax" :min="40" :max="1000" :step="10" :show-tooltip="false" />
+              <RangeSlider
+                :min="10"
+                :max="1000"
+                :min-value="particleParams.heightMin"
+                :max-value="particleParams.heightMax"
+                :step="10"
+                unit="m"
+                @update:min-value="setParticleHeightRange($event, particleParams.heightMax)"
+                @update:max-value="setParticleHeightRange(particleParams.heightMin, $event)"
+              />
             </div>
 
-            <div class="slider-field">
-              <div class="slider-head">
-                <span>w 垂直放大</span>
-                <span class="val">{{ particleParams.wExaggeration.toFixed(1) }}×</span>
-              </div>
-              <el-slider v-model="particleParams.wExaggeration" :min="0" :max="20" :step="0.5" :show-tooltip="false" />
-            </div>
+            <el-collapse v-model="particleAdvancedCollapse" class="inline-collapse">
+              <el-collapse-item title="高级粒子参数" name="advanced">
+                <div class="collapse-stack">
+                  <div class="slider-field">
+                    <div class="slider-head">
+                      <span>粒子数量</span>
+                      <span class="val">{{ particleParams.count.toLocaleString() }}</span>
+                    </div>
+                    <el-slider v-model="particleParams.count" :min="4000" :max="262144" :step="4000" :show-tooltip="false" />
+                  </div>
 
-            <div class="row-wrap">
-              <el-checkbox v-model="particleParams.taper">尾迹收细</el-checkbox>
-              <el-checkbox v-model="particleParams.additive">叠加发光</el-checkbox>
-              <el-checkbox v-model="particleParams.paused">暂停</el-checkbox>
-            </div>
+                  <div class="slider-field">
+                    <div class="slider-head">
+                      <span>尾迹长度</span>
+                      <span class="val">{{ particleParams.trailLength }} 步</span>
+                    </div>
+                    <el-slider
+                      v-model="particleParams.trailLength"
+                      :min="2"
+                      :max="particleParams.count > 70000 ? 32 : 64"
+                      :step="1"
+                      :show-tooltip="false"
+                    />
+                  </div>
+
+                  <div class="slider-field">
+                    <div class="slider-head">
+                      <span>速度倍率</span>
+                      <span class="val">{{ particleParams.speed.toFixed(2) }}×</span>
+                    </div>
+                    <el-slider v-model="particleParams.speed" :min="0.05" :max="5" :step="0.05" :show-tooltip="false" />
+                  </div>
+
+                  <div class="slider-field">
+                    <div class="slider-head">
+                      <span>线宽</span>
+                      <span class="val">{{ particleParams.lineWidth.toFixed(1) }} px</span>
+                    </div>
+                    <el-slider v-model="particleParams.lineWidth" :min="0.5" :max="8" :step="0.1" :show-tooltip="false" />
+                  </div>
+
+                  <div class="slider-field">
+                    <div class="slider-head">
+                      <span>生命周期</span>
+                      <span class="val">{{ particleParams.lifetime.toFixed(1) }} s</span>
+                    </div>
+                    <el-slider v-model="particleParams.lifetime" :min="1" :max="30" :step="0.5" :show-tooltip="false" />
+                  </div>
+
+                  <div class="slider-field">
+                    <div class="slider-head">
+                      <span>w 垂直放大</span>
+                      <span class="val">{{ particleParams.wExaggeration.toFixed(1) }}×</span>
+                    </div>
+                    <el-slider v-model="particleParams.wExaggeration" :min="0" :max="20" :step="0.5" :show-tooltip="false" />
+                  </div>
+
+                  <div class="row-wrap">
+                    <el-checkbox v-model="particleParams.taper">尾迹收细</el-checkbox>
+                    <el-checkbox v-model="particleParams.additive">叠加发光</el-checkbox>
+                    <el-checkbox v-model="particleParams.paused">暂停</el-checkbox>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
           </div>
         </el-tab-pane>
 
-        <el-tab-pane label="图层外观" name="look">
+        <el-tab-pane label="场景" name="scene">
           <div class="tab-content">
+            <div v-if="!globeMode" class="slider-field">
+              <div class="slider-head">
+                <span>垂直夸张</span>
+                <span class="val">{{ view.exaggeration.toFixed(1) }}×</span>
+              </div>
+              <el-slider v-model="view.exaggeration" :min="1" :max="10" :step="0.1" :show-tooltip="false" />
+            </div>
+
+            <div v-else class="slider-field">
+              <div class="slider-head">
+                <span>垂直夸张</span>
+                <span class="val">{{ chromeK.toFixed(1) }}×</span>
+              </div>
+              <el-slider
+                :model-value="chromeK"
+                :min="1"
+                :max="10"
+                :step="0.1"
+                :show-tooltip="false"
+                @update:model-value="setGlobeK(Number($event))"
+              />
+            </div>
+
             <div class="form-row">
               <span class="field-label">色标</span>
               <el-select v-model="colorScaleMode" size="small" class="field-control">
                 <el-option value="frame" label="本帧最小–最大" />
                 <el-option value="display" label="固定范围" />
+              </el-select>
+            </div>
+
+            <div class="form-row">
+              <span class="field-label">主题</span>
+              <el-select v-model="view.theme" size="small" class="field-control">
+                <el-option value="dark" label="深色" />
+                <el-option value="light" label="浅色" />
               </el-select>
             </div>
 
@@ -4952,182 +5258,82 @@ onBeforeUnmount(() => {
                 <el-slider v-model="layers.buildingOpacity" :min="0" :max="1" :step="0.05" :show-tooltip="false" />
               </div>
               <div class="check-row">
-                <el-checkbox v-model="layers.buildingTintEnabled" :disabled="!layers.ground || layers.groundVar === 'none'">
-                  白膜着色
-                </el-checkbox>
-              </div>
-              <div class="slider-field">
-                <div class="slider-head">
-                  <span>着色程度</span>
-                  <span class="val">{{ Math.round(layers.buildingTintStrength * 100) }}%</span>
-                </div>
-                <el-slider
-                  v-model="layers.buildingTintStrength"
-                  :min="0"
-                  :max="1"
-                  :step="0.05"
-                  :disabled="!layers.ground || layers.groundVar === 'none'"
-                  :show-tooltip="false"
-                />
+                <el-checkbox v-model="view.shadows">建筑阴影</el-checkbox>
               </div>
             </template>
 
-            <div
-              v-if="layers.ground && layers.groundVar !== 'none' && Number.isFinite(layers.groundFilterMin)"
-              class="slider-field range-label"
-            >
-              <div class="slider-head"><span>地面值域</span></div>
-              <RangeSlider
-                :min="groundBounds[0]"
-                :max="groundBounds[1]"
-                :min-value="layers.groundFilterMin"
-                :max-value="layers.groundFilterMax"
-                :unit="groundUnits"
-                :step="Math.max((groundBounds[1] - groundBounds[0]) / 200, 1e-6)"
-                @update:min-value="layers.groundFilterMin = $event"
-                @update:max-value="layers.groundFilterMax = $event"
-              />
-            </div>
-
-            <template v-if="layers.volume">
-              <div class="slider-field">
-                <div class="slider-head">
-                  <span>体渲染不透明度</span>
-                  <span class="val">{{ layers.volumeOpacity.toFixed(2) }}</span>
-                </div>
-                <el-slider v-model="layers.volumeOpacity" :min="0.05" :max="2" :step="0.05" :show-tooltip="false" />
-              </div>
-
-              <div class="slider-field">
-                <div class="slider-head">
-                  <span>透明阈值</span>
-                  <span class="val">{{ volumeThresholdHint }}{{ volumeCurrentMaxHint }}</span>
-                </div>
-                <el-slider v-model="layers.volumeThreshold" :min="0" :max="0.95" :step="0.01" :show-tooltip="false" />
-              </div>
-
-              <div v-if="volumeDataHint || volumeThresholdWarning" class="panel-warn">
-                {{ volumeDataHint ?? volumeThresholdWarning }}
-              </div>
-
-              <div class="slider-field range-label">
-                <div class="slider-head"><span>xcut</span></div>
-                <RangeSlider :min="0" :max="1" :min-value="cuts.x[0]" :max-value="cuts.x[1]" :step="0.01" @update:min-value="cuts.x[0] = $event" @update:max-value="cuts.x[1] = $event" />
-              </div>
-              <div class="slider-field range-label">
-                <div class="slider-head"><span>ycut</span></div>
-                <RangeSlider :min="0" :max="1" :min-value="cuts.y[0]" :max-value="cuts.y[1]" :step="0.01" @update:min-value="cuts.y[0] = $event" @update:max-value="cuts.y[1] = $event" />
-              </div>
-              <div class="slider-field range-label">
-                <div class="slider-head"><span>zcut</span></div>
-                <RangeSlider :min="0" :max="1" :min-value="cuts.z[0]" :max-value="cuts.z[1]" :step="0.01" @update:min-value="cuts.z[0] = $event" @update:max-value="cuts.z[1] = $event" />
-              </div>
-
-              <div class="check-row">
-                <el-checkbox v-model="cuts.faces">切面</el-checkbox>
-              </div>
-              <template v-if="cuts.faces">
-                <div class="check-row">
-                  <el-checkbox v-model="layers.cutLowAlpha">切面低值透明</el-checkbox>
-                </div>
-                <div v-if="layers.cutLowAlpha" class="slider-field">
-                  <div class="slider-head">
-                    <span>切面透明阈值</span>
-                    <span class="val">{{ (layers.cutLowThreshold * 100).toFixed(0) }}%</span>
+            <el-collapse v-if="debugUi" v-model="debugCollapse" class="inline-collapse">
+              <el-collapse-item title="调试与裁剪" name="debug">
+                <div class="collapse-stack">
+                  <div class="check-row">
+                    <el-checkbox :model-value="format.id === 'sz3'" @update:model-value="onSz3Toggle(Boolean($event))">
+                      SZ3 压缩格式
+                    </el-checkbox>
                   </div>
-                  <el-slider v-model="layers.cutLowThreshold" :min="0" :max="0.6" :step="0.01" :show-tooltip="false" />
-                </div>
-              </template>
 
-              <div class="slider-field range-label">
-                <div class="slider-head"><span>数值窗口</span></div>
-                <RangeSlider
-                  :min="volumeBounds[0]"
-                  :max="volumeBounds[1]"
-                  :min-value="layers.volumeFilterMin"
-                  :max-value="layers.volumeFilterMax"
-                  :unit="unitsOf(layers.volumeVar)"
-                  :step="Math.max((volumeBounds[1] - volumeBounds[0]) / 200, 1e-6)"
-                  @update:min-value="layers.volumeFilterMin = $event"
-                  @update:max-value="layers.volumeFilterMax = $event"
-                />
-              </div>
+                  <template v-if="layers.volume">
+                    <div class="slider-field">
+                      <div class="slider-head">
+                        <span>透明阈值</span>
+                        <span class="val">{{ volumeThresholdHint }}</span>
+                      </div>
+                      <el-slider v-model="layers.volumeThreshold" :min="0" :max="0.95" :step="0.01" :show-tooltip="false" />
+                    </div>
+                    <div class="slider-field range-label">
+                      <div class="slider-head"><span>东西裁剪</span></div>
+                      <RangeSlider :min="0" :max="1" :min-value="cuts.x[0]" :max-value="cuts.x[1]" :step="0.01" @update:min-value="cuts.x[0] = $event" @update:max-value="cuts.x[1] = $event" />
+                    </div>
+                    <div class="slider-field range-label">
+                      <div class="slider-head"><span>南北裁剪</span></div>
+                      <RangeSlider :min="0" :max="1" :min-value="cuts.y[0]" :max-value="cuts.y[1]" :step="0.01" @update:min-value="cuts.y[0] = $event" @update:max-value="cuts.y[1] = $event" />
+                    </div>
+                    <div class="slider-field range-label">
+                      <div class="slider-head"><span>高度裁剪</span></div>
+                      <RangeSlider :min="0" :max="1" :min-value="cuts.z[0]" :max-value="cuts.z[1]" :step="0.01" @update:min-value="cuts.z[0] = $event" @update:max-value="cuts.z[1] = $event" />
+                    </div>
+                    <div class="check-row">
+                      <el-checkbox v-model="cuts.faces">切面</el-checkbox>
+                    </div>
+                    <template v-if="cuts.faces">
+                      <div class="check-row">
+                        <el-checkbox v-model="layers.cutLowAlpha">切面低值透明</el-checkbox>
+                      </div>
+                      <div v-if="layers.cutLowAlpha" class="slider-field">
+                        <div class="slider-head">
+                          <span>切面透明阈值</span>
+                          <span class="val">{{ (layers.cutLowThreshold * 100).toFixed(0) }}%</span>
+                        </div>
+                        <el-slider v-model="layers.cutLowThreshold" :min="0" :max="0.6" :step="0.01" :show-tooltip="false" />
+                      </div>
+                    </template>
+                    <div class="check-row">
+                      <el-checkbox v-model="layers.filterSlices">切面跟随体渲染过滤</el-checkbox>
+                    </div>
+                  </template>
 
-              <div class="check-row">
-                <el-checkbox v-model="layers.filterSlices">切面跟随体渲染过滤</el-checkbox>
-              </div>
-            </template>
-          </div>
-        </el-tab-pane>
-
-        <el-tab-pane label="视图" name="view">
-          <div class="tab-content">
-            <div v-if="!globeMode" class="slider-field">
-              <div class="slider-head">
-                <span>垂直夸张</span>
-                <span class="val">{{ view.exaggeration.toFixed(1) }}×</span>
-              </div>
-              <el-slider v-model="view.exaggeration" :min="1" :max="10" :step="0.1" :show-tooltip="false" />
-            </div>
-
-            <div class="check-row">
-              <el-checkbox :model-value="format.id === 'sz3'" @update:model-value="onSz3Toggle(Boolean($event))">
-                SZ3 压缩格式
-              </el-checkbox>
-            </div>
-
-            <template v-if="globeMode">
-              <div class="slider-field">
-                <div class="slider-head">
-                  <span>垂直夸张</span>
-                  <span class="val">{{ chromeK.toFixed(1) }}×</span>
-                </div>
-                <el-slider
-                  :model-value="chromeK"
-                  :min="1"
-                  :max="10"
-                  :step="0.1"
-                  :show-tooltip="false"
-                  @update:model-value="setGlobeK(Number($event))"
-                />
-              </div>
-              <div class="preset-buttons">
-                <el-button size="small" @click="setGlobeView('overview')">总览</el-button>
-                <el-button size="small" @click="setGlobeView('top')">俯视</el-button>
-              </div>
-            </template>
-
-            <div class="check-row">
-              <el-checkbox v-model="view.shadows">建筑阴影</el-checkbox>
-            </div>
-
-            <div class="form-row">
-              <span class="field-label">主题</span>
-              <el-select v-model="view.theme" size="small" class="field-control">
-                <el-option value="dark" label="深色" />
-                <el-option value="light" label="浅色" />
-              </el-select>
-            </div>
-
-            <div v-if="!globeMode" class="preset-buttons">
-              <el-button size="small" @click="setView('overview')">总览</el-button>
-              <el-button size="small" @click="setView('close')">近景</el-button>
-              <el-button size="small" @click="setView('top')">俯视</el-button>
-            </div>
-
-            <el-collapse v-model="statusCollapse" class="status-collapse">
-              <el-collapse-item title="运行状态" name="stats">
-                <div class="stats">
-                  <div>{{ status }}</div>
-                  <div>渲染：WebGL2 · {{ gpu }}</div>
-                  <div>粒子路径：{{ particles?.label ?? "等待 u/v/w" }}</div>
-                  <div>
-                    加载耗时：<span v-for="(ms, k) in loadMs" :key="k">{{ k }} {{ ms }} ms · </span>
+                  <div class="stats">
+                    <div>{{ status }}</div>
+                    <div>渲染：WebGL2 · {{ gpu }}</div>
+                    <div>粒子路径：{{ particles?.label ?? "等待 u/v/w" }}</div>
+                    <div>
+                      加载耗时：<span v-for="(ms, k) in loadMs" :key="k">{{ k }} {{ ms }} ms · </span>
+                    </div>
+                    <div>建筑：{{ buildingsInfo }}（3D-GloBFP + OSM）</div>
                   </div>
-                  <div>建筑：{{ buildingsInfo }}（3D-GloBFP + OSM）</div>
                 </div>
               </el-collapse-item>
             </el-collapse>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="色带" name="colormaps">
+          <div class="tab-content">
+            <ColormapManager
+              :custom-colormaps="customColormaps"
+              @create="onCreateColormap"
+              @update="onUpdateColormap"
+              @delete="onDeleteColormap"
+            />
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -5206,7 +5412,7 @@ onBeforeUnmount(() => {
 
 .element-rail {
   left: 0;
-  width: 232px;
+  width: 256px;
   border-right: 1px solid var(--line);
   transition: width 160ms ease;
 }
@@ -5315,6 +5521,75 @@ onBeforeUnmount(() => {
   opacity: 0.65;
 }
 
+.layer-expand {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.layer-expand:hover {
+  background: var(--surface);
+  color: var(--accent);
+}
+
+.layer-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.preset-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.preset-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.custom-tag {
+  font-size: 11px;
+  color: var(--accent);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.preset-grid :deep(.el-button) {
+  margin-left: 0;
+  width: 100%;
+}
+
+.preset-grid.compact {
+  gap: 4px;
+}
+
+.preset-grid.compact :deep(.el-button) {
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
 .scene-group {
   padding: 10px 12px 14px;
   border-top: 1px solid var(--line);
@@ -5333,6 +5608,15 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.scene-sub {
+  margin: 2px 0 4px 12px;
+  padding: 4px 0 4px 10px;
+  border-left: 2px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .check-stack :deep(.el-checkbox),
@@ -5487,11 +5771,22 @@ onBeforeUnmount(() => {
   color: var(--text);
 }
 
+.slider-head > span:first-child {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .slider-head .val {
   color: var(--accent);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.slider-sub {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .check-row {
@@ -5587,8 +5882,8 @@ onBeforeUnmount(() => {
   margin-left: 0;
 }
 
-.status-collapse {
-  margin-top: 4px;
+.inline-collapse {
+  margin-top: 2px;
   border-top: 1px solid var(--line);
   border-bottom: 0;
   --el-collapse-header-bg-color: transparent;
@@ -5596,6 +5891,16 @@ onBeforeUnmount(() => {
   --el-collapse-border-color: var(--line);
   --el-collapse-header-height: 34px;
   --el-collapse-header-font-size: 12px;
+}
+
+.inline-collapse :deep(.el-collapse-item__content) {
+  padding-bottom: 6px;
+}
+
+.collapse-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .stats {

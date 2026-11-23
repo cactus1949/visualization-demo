@@ -18,9 +18,13 @@ const props = defineProps<{
   dataMax?: number;
   hint?: string | null;
   warn?: string | null;
+  revision?: number;
 }>();
 
-const gradient = computed(() => colormapCss(props.colormap));
+const gradient = computed(() => {
+  void props.revision;
+  return colormapCss(props.colormap);
+});
 const windowMin = computed(() => props.windowMin ?? props.min);
 const windowMax = computed(() => props.windowMax ?? props.max);
 const windowLeft = computed(

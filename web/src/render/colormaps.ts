@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { stopsToHexString, type CustomColormap } from "../state/customColormaps";
 
 /**
  * Colormaps sampled from matplotlib at 32 evenly spaced stops (hex RGB, 6 chars per stop)
@@ -68,8 +69,15 @@ export const COLORMAPS = Object.keys(STOPS);
 /** Diverging maps get a symmetric range around zero by default. */
 export const DIVERGING = new Set(["rdbu", "coolwarm"]);
 
+const customStops = new Map<string, string>();
+const customLabels = new Map<string, string>();
+
+function stopsHexOf(name: string): string {
+  return customStops.get(name) ?? STOPS[name] ?? STOPS.viridis;
+}
+
 function stop(name: string, index: number): [number, number, number] {
-  const hex = STOPS[name] ?? STOPS.viridis;
+  const hex = stopsHexOf(name);
   const at = index * 6;
   return [
     parseInt(hex.slice(at, at + 2), 16),
@@ -80,7 +88,7 @@ function stop(name: string, index: number): [number, number, number] {
 
 /** 256 x RGBA8 lookup table for a colormap. */
 export function colormapBytes(name: string): Uint8Array {
-  const count = (STOPS[name] ?? STOPS.viridis).length / 6;
+  const count = stopsHexOf(name).length / 6;
   const bytes = new Uint8Array(256 * 4);
   for (let i = 0; i < 256; i += 1) {
     const position = (i / 255) * (count - 1);
@@ -113,17 +121,73 @@ export function colormapTexture(name: string): THREE.DataTexture {
   return texture;
 }
 
-/** CSS linear-gradient for legends. */
+/** CSS linear-gradient from an explicit stop array (for live editor preview). */
+export function colormapStopsCss(stops: readonly string[], direction = "90deg"): string {
+  if (stops.length === 0) return "transparent";
+  if (stops.length === 1) return stops[0]!;
+  const parts = stops.map((c, i) => `${c} ${((i / (stops.length - 1)) * 100).toFixed(1)}%`);
+  return `linear-gradient(${direction}, ${parts.join(", ")})`;
+}
+
+/** CSS linear-gradient for legends and dropdown swatches. */
 export function colormapCss(name: string, direction = "90deg"): string {
-  const count = (STOPS[name] ?? STOPS.viridis).length / 6;
+  const count = stopsHexOf(name).length / 6;
+  const step = count <= 10 ? 1 : 3;
   const parts: string[] = [];
-  for (let i = 0; i < count; i += 3) {
+  for (let i = 0; i < count; i += step) {
     const [r, g, b] = stop(name, i);
     parts.push(`rgb(${r},${g},${b}) ${((i / (count - 1)) * 100).toFixed(1)}%`);
   }
-  const [r, g, b] = stop(name, count - 1);
-  parts.push(`rgb(${r},${g},${b}) 100%`);
+  if ((count - 1) % step !== 0) {
+    const [r, g, b] = stop(name, count - 1);
+    parts.push(`rgb(${r},${g},${b}) 100%`);
+  }
   return `linear-gradient(${direction}, ${parts.join(", ")})`;
+}
+
+/** 采样 N 个均匀分布的 #rrggbb 节点（用于复制内置色带进行二次编辑）。 */
+export function sampleColormapStops(name: string, count = 5): string[] {
+  const n = Math.max(2, count);
+  const out: string[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const [r, g, b] = colormapRGB(name, i / (n - 1));
+    out.push(`#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`);
+  }
+  return out;
+}
+
+export function allColormapIds(): string[] {
+  return [...COLORMAPS, ...customStops.keys()];
+}
+
+export function colormapLabel(name: string): string {
+  return customLabels.get(name) ?? COLORMAP_LABELS[name] ?? name;
+}
+
+/** 同步自定义色带到 LUT 与 WebGL 纹理缓存，已有纹理原地更新以实时生效。 */
+export function registerCustomColormaps(items: readonly CustomColormap[]): void {
+  const prevKeys = new Set(customStops.keys());
+  customStops.clear();
+  customLabels.clear();
+  for (const item of items) {
+    customStops.set(item.id, stopsToHexString(item.stops));
+    customLabels.set(item.id, item.label);
+    lutCache.delete(item.id);
+    const tex = textureCache.get(item.id);
+    if (tex) {
+      (tex.image.data as Uint8Array).set(colormapBytes(item.id));
+      tex.needsUpdate = true;
+    }
+    prevKeys.delete(item.id);
+  }
+  for (const removed of prevKeys) {
+    lutCache.delete(removed);
+    const tex = textureCache.get(removed);
+    if (tex) {
+      (tex.image.data as Uint8Array).set(colormapBytes("viridis"));
+      tex.needsUpdate = true;
+    }
+  }
 }
 
 export function colormapColor(name: string, value: number): THREE.Color {
