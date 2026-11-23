@@ -1,5 +1,22 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch, watchEffect } from "vue";
+import {
+  Box,
+  ChevronDown,
+  ChevronUp,
+  Columns2,
+  Crosshair,
+  GripHorizontal,
+  Layers,
+  PanelLeftClose,
+  PanelLeftOpen,
+  RotateCcw,
+  Save,
+  Settings,
+  SlidersHorizontal,
+  Wind,
+  X,
+} from "@lucide/vue";
 import * as THREE from "three";
 import type { ViewHost } from "../host/types";
 import { createThreeHost } from "../host/threeHost";
@@ -143,31 +160,23 @@ const emit = defineEmits<{
 const formatChoices = loadFormats();
 
 /** SZ3 stays on unless another export format exists to switch to. */
-function onSz3Toggle(on: boolean, event: Event): void {
-  const input = event.target as HTMLInputElement;
+function onSz3Toggle(on: boolean): void {
   if (on) {
-    if (!formatChoices.some((f) => f.id === "sz3")) {
-      input.checked = false;
-      return;
-    }
+    if (!formatChoices.some((f) => f.id === "sz3")) return;
     emit("set-format", "sz3");
     return;
   }
   const other = formatChoices.find((f) => f.id !== "sz3");
-  if (!other) {
-    input.checked = true;
-    return;
-  }
+  if (!other) return;
   emit("set-format", other.id);
 }
 
-function onCesiumToggle(on: boolean, event: Event): void {
-  if (!formatChoices.some((f) => f.id === "sz3")) {
-    (event.target as HTMLInputElement).checked = globeMode;
-    return;
-  }
+function onCesiumToggle(on: boolean): void {
+  if (!formatChoices.some((f) => f.id === "sz3")) return;
   emit("set-cesium", on);
 }
+
+const statusCollapse = ref<string[]>([]);
 
 function onGroundToggle(): void {
   layers.ground = toggleLayer({ on: layers.ground, variable: layers.groundVar }).on;
@@ -234,8 +243,18 @@ function setGlobeView(name: string): void {
 
 function chromeLeft(): number {
   if (!props.showPanel || embed) return 0;
-  return elementRailOpen.value ? 220 : 40;
+  return elementRailOpen.value ? 232 : 44;
 }
+
+const railVars = computed(() => {
+  const show = props.showPanel && !embed;
+  const left = show ? (elementRailOpen.value ? 232 : 44) : 0;
+  const right = show && settingsOpen.value ? 320 : 0;
+  return {
+    "--rail-left": `${left}px`,
+    "--rail-right": `${right}px`,
+  };
+});
 
 function publishChrome(): void {
   const root = viewerRoot.value;
@@ -1969,14 +1988,17 @@ function stepTime(now: number, dt: number): void {
   cur.s = br.s;
   if (changed && timeStats.lastSwitchStart === 0) timeStats.lastSwitchStart = now;
   feedSlots();
-  timeFields.pump();
   const plan = currentPlan();
   const active = { scalars: plan.gpuScalars, speed: plan.needSpeed };
   const res: TimeResource[] = [
     ...(plan.queueWind ? [timeFields.wind] : []),
     ...active.scalars.map((n) => timeFields!.scalar(n)),
   ];
-  const shown = timeFields.blend(cur.a, cur.b, cur.s, res, active.speed);
+  let shown = false;
+  runLayerGl(() => {
+    timeFields!.pump();
+    shown = timeFields!.blend(cur.a, cur.b, cur.s, res, active.speed);
+  });
   if (shown && timeStats.lastSwitchStart) {
     timeStats.switchMs.push(performance.now() - timeStats.lastSwitchStart);
     if (timeStats.switchMs.length > 120) timeStats.switchMs.shift();
@@ -4094,6 +4116,9 @@ watch(
   () => view.shadows,
   (on) => atmos?.setShadows(on && budget.knobs().shadowMapSize > 0),
 );
+watchEffect(() => {
+  document.documentElement.classList.toggle("dark", view.theme === "dark");
+});
 watch(
   () => view.theme,
   (theme) => {
@@ -4387,595 +4412,769 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="viewerRoot" class="viewer" :class="[view.theme, { globe: globeMode }]">
-    <aside v-if="showPanel && !embed" class="element-rail" :class="{ collapsed: !elementRailOpen }">
+  <div ref="viewerRoot" class="viewer" :class="[view.theme, { globe: globeMode }]" :style="railVars">
+    <aside
+      v-if="showPanel && !embed"
+      class="element-rail"
+      :class="{ collapsed: !elementRailOpen }"
+      @pointerdown.stop
+      @wheel.stop
+    >
       <div class="rail-head">
-        <strong v-if="elementRailOpen">图层</strong>
+        <strong v-if="elementRailOpen" class="rail-title">图层</strong>
         <IconButton
           class="rail-fold"
           compact
           :label="elementRailOpen ? '收起图层' : '展开图层'"
-          :hint="elementRailOpen ? '收起左侧图层栏' : '展开左侧图层栏'"
+          :hint="elementRailOpen ? '收起图层' : '展开图层'"
           align="start"
+          placement="right"
           @click="elementRailOpen = !elementRailOpen"
         >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              v-if="elementRailOpen"
-              d="M14.5 6 8.5 12l6 6"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.6"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-            <path
-              v-else
-              d="M9.5 6 15.5 12l-6 6"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.6"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
+          <PanelLeftClose v-if="elementRailOpen" :size="16" />
+          <PanelLeftOpen v-else :size="16" />
         </IconButton>
       </div>
       <div v-show="elementRailOpen" class="rail-body">
         <div class="layer-block">
-          <div class="layer-row">
-            <svg class="layer-mark" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 15.5 8 10l4 3 3.2-4.2L20 15.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" />
-              <path d="M4 18.5h16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-            </svg>
-            <span class="layer-name">地面色斑</span>
-            <button type="button" class="switch" role="switch" :aria-checked="layers.ground" aria-label="地面色斑" @click="onGroundToggle"><span></span></button>
+          <div class="layer-card" :class="{ active: layers.ground }">
+            <div class="layer-row">
+              <Layers class="layer-mark" :size="15" />
+              <span class="layer-name">地面色斑</span>
+              <el-switch
+                :model-value="layers.ground"
+                size="small"
+                aria-label="地面色斑"
+                @change="onGroundToggle"
+              />
+            </div>
+            <el-select
+              class="layer-select"
+              :class="{ idle: !layers.ground }"
+              :model-value="layers.groundVar"
+              size="small"
+              aria-label="地面变量"
+              @update:model-value="onGroundVar(String($event))"
+            >
+              <el-option v-for="v in variables2D" :key="v.name" :label="v.label" :value="v.name" />
+            </el-select>
           </div>
-          <select class="layer-select" :class="{ idle: !layers.ground }" :value="layers.groundVar" aria-label="地面变量" @change="onGroundVar(($event.target as HTMLSelectElement).value)">
-            <option v-for="v in variables2D" :key="v.name" :value="v.name">{{ v.label }}</option>
-          </select>
-          <div class="layer-row">
-            <svg class="layer-mark" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 3.8 20 8v8.2L12 20.2 4 16.2V8L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
-              <path d="M12 12.1 20 8M12 12.1 4 8M12 12.1v8.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
-            </svg>
-            <span class="layer-name">体渲染</span>
-            <button type="button" class="switch" role="switch" :aria-checked="layers.volume" aria-label="体渲染" @click="onVolumeToggle"><span></span></button>
+
+          <div class="layer-card" :class="{ active: layers.volume }">
+            <div class="layer-row">
+              <Box class="layer-mark" :size="15" />
+              <span class="layer-name">体渲染</span>
+              <el-switch
+                :model-value="layers.volume"
+                size="small"
+                aria-label="体渲染"
+                @change="onVolumeToggle"
+              />
+            </div>
+            <el-select
+              class="layer-select"
+              :class="{ idle: !layers.volume }"
+              :model-value="layers.volumeVar"
+              size="small"
+              aria-label="体渲染变量"
+              @update:model-value="onVolumeVar(String($event))"
+            >
+              <el-option v-for="v in variables3D" :key="v.name" :label="v.label" :value="v.name" />
+            </el-select>
           </div>
-          <select class="layer-select" :class="{ idle: !layers.volume }" :value="layers.volumeVar" aria-label="体渲染变量" @change="onVolumeVar(($event.target as HTMLSelectElement).value)">
-            <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
-          </select>
-          <div class="layer-row">
-            <svg class="layer-mark" viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="7" cy="15" r="1.3" fill="currentColor" />
-              <circle cx="12" cy="9.5" r="1.3" fill="currentColor" />
-              <circle cx="17" cy="14" r="1.3" fill="currentColor" />
-              <path d="M7 15c1.2-2.6 2.8-4 5-5.5M12 9.5c1.5 1.2 3 2.8 5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-            </svg>
-            <span class="layer-name">风粒子</span>
-            <button type="button" class="switch" role="switch" :aria-checked="layers.particles" aria-label="风粒子" @click="onParticleToggle"><span></span></button>
+
+          <div class="layer-card" :class="{ active: layers.particles }">
+            <div class="layer-row">
+              <Wind class="layer-mark" :size="15" />
+              <span class="layer-name">风粒子</span>
+              <el-switch
+                :model-value="layers.particles"
+                size="small"
+                aria-label="风粒子"
+                @change="onParticleToggle"
+              />
+            </div>
           </div>
         </div>
+
         <div class="scene-group">
           <div class="scene-title">场景</div>
-          <label class="row"><input type="checkbox" :checked="globeMode" @change="onCesiumToggle(($event.target as HTMLInputElement).checked, $event)" /> Cesium 地球</label>
-          <label class="row"><input v-model="layers.buildings" type="checkbox" /> 建筑白膜</label>
-          <label v-if="globeMode" class="row"><input type="checkbox" :checked="globeTerrain" @change="setGlobeTerrain(($event.target as HTMLInputElement).checked)" /> 地形</label>
+          <div class="check-stack">
+            <el-checkbox :model-value="globeMode" @update:model-value="onCesiumToggle(Boolean($event))">
+              Cesium 地球
+            </el-checkbox>
+            <el-checkbox v-model="layers.buildings">建筑白膜</el-checkbox>
+            <el-checkbox
+              v-if="globeMode"
+              :model-value="globeTerrain"
+              @update:model-value="setGlobeTerrain(Boolean($event))"
+            >
+              地形
+            </el-checkbox>
+          </div>
         </div>
       </div>
     </aside>
+
     <div ref="stageEl" class="stage">
-    <canvas v-if="!globeMode" ref="canvas" class="canvas" />
+      <canvas v-if="!globeMode" ref="canvas" class="canvas" />
 
-    <div class="legends" :class="{ raised: cursor }">
-      <ColorLegend
-        v-for="l in legends"
-        :key="l.key"
-        :title="l.title"
-        :units="l.units"
-        :colormap="l.colormap"
-        :min="l.min"
-        :max="l.max"
-        :window-min="l.windowMin"
-        :window-max="l.windowMax"
-        :over-low="l.overLow"
-        :over-high="l.overHigh"
-        :data-min="l.dataMin"
-        :data-max="l.dataMax"
-        :hint="l.hint"
-        :warn="l.warn"
+      <div class="legends">
+        <ColorLegend
+          v-for="l in legends"
+          :key="l.key"
+          :title="l.title"
+          :units="l.units"
+          :colormap="l.colormap"
+          :min="l.min"
+          :max="l.max"
+          :window-min="l.windowMin"
+          :window-max="l.windowMax"
+          :over-low="l.overLow"
+          :over-high="l.overHigh"
+          :data-min="l.dataMin"
+          :data-max="l.dataMax"
+          :hint="l.hint"
+          :warn="l.warn"
+        />
+      </div>
+
+      <LonLatReadout :lon="cursor?.lon ?? null" :lat="cursor?.lat ?? null" />
+
+      <TimelineBar v-if="showTimeline" :tl="tl" :theme="view.theme" @change="onTimelineChange" />
+
+      <ViewTools
+        :class="{ raised: showTimeline }"
+        :compass-deg="compassDeg"
+        :fullscreen="fullscreen"
+        :basemap="globeMode ? globeBasemap : undefined"
+        @reset="resetHomeView"
+        @zoom-in="zoomView(ZOOM_IN)"
+        @zoom-out="zoomView(ZOOM_OUT)"
+        @north="faceNorth"
+        @fullscreen="toggleFullscreen"
+        @toggle-basemap="setGlobeBasemap(globeBasemap === 'img' ? 'vec' : 'img')"
       />
-    </div>
 
-    <LonLatReadout v-if="cursor" :lon="cursor.lon" :lat="cursor.lat" />
+      <ProfileChart
+        v-if="layers.probe && probe"
+        class="profile-box"
+        :lon="probe.lon"
+        :lat="probe.lat"
+        :pinned="probe.pinned"
+        :levels="manifest?.grid.levels_m ?? []"
+        :values="probe.values"
+        :label="labelOf(probeVariable)"
+        :units="unitsOf(probeVariable)"
+        :signed="probeSigned(probeVariable)"
+        :variable="probeVariable"
+        :variables="probeVariables"
+        :follow-mouse="layers.probeFollowMouse"
+        @update:variable="probeVariable = $event"
+        @update:follow-mouse="layers.probeFollowMouse = $event"
+        @close="probe = null; fixedCell = null; updateMarker()"
+      />
+      <UnfoldedPlot
+        v-if="unfoldedVisible"
+        :grid="unfolded"
+        :min="section.min"
+        :max="section.max"
+        :colormap="section.colormap"
+        :units="unitsOf(section.variable)"
+        @close="unfoldedVisible = false"
+      />
 
-    <TimelineBar v-if="showTimeline" :tl="tl" :theme="view.theme" @change="onTimelineChange" />
-
-    <ViewTools
-      :class="{ raised: showTimeline }"
-      :compass-deg="compassDeg"
-      :fullscreen="fullscreen"
-      @reset="resetHomeView"
-      @zoom-in="zoomView(ZOOM_IN)"
-      @zoom-out="zoomView(ZOOM_OUT)"
-      @north="faceNorth"
-      @fullscreen="toggleFullscreen"
-    />
-
-    <ProfileChart
-      v-if="layers.probe && probe"
-      class="profile-box"
-      :lon="probe.lon"
-      :lat="probe.lat"
-      :pinned="probe.pinned"
-      :levels="manifest?.grid.levels_m ?? []"
-      :values="probe.values"
-      :label="labelOf(probeVariable)"
-      :units="unitsOf(probeVariable)"
-      :signed="probeSigned(probeVariable)"
-      :variable="probeVariable"
-      :variables="probeVariables"
-      @update:variable="probeVariable = $event"
-      @close="probe = null; fixedCell = null; updateMarker()"
-    />
-    <UnfoldedPlot v-if="unfoldedVisible" :grid="unfolded" :min="section.min" :max="section.max" :colormap="section.colormap" :units="unitsOf(section.variable)" @close="unfoldedVisible = false" />
-
-    <!-- <div class="budget-row">
-      <div class="budget-chip" title="当前绘制预算。滑条、色标和图层勾选没有被改。">{{ budgetLabelText }}</div>
-      <button type="button" class="budget-export" @click="exportDiagnostic">导出诊断</button>
-    </div> -->
-    <p v-if="gpuNotice" class="gpu-notice">{{ gpuNotice }}</p>
-    <div v-if="section.enabled && section.drawMode" class="draw-chip">
-      <span class="dot" />{{ section.kind === "polyline" ? "绘制折线" : "绘制框选" }} · {{ drawHint }}
-    </div>
-
-    <div v-if="showPanel && !embed" class="stage-tools">
-      <IconButton
-        label="剖面"
-        hint="打开经度剖面和配置。剖面已经打开时，再点这里就关掉。"
-        :pressed="section.enabled"
-        @click="onSectionMain"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M5 17.5V8.2L12 4.8l7 3.4v9.3L12 21.2 5 17.5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
-          <path d="M12 4.8v16.4" fill="none" stroke="currentColor" stroke-width="1.6" />
-        </svg>
-      </IconButton>
-      <IconButton
-        label="剖面设置"
-        hint="只打开剖面配置，不改变剖面是否在画。"
-        :pressed="sectionFloatOpen"
-        @click="onSectionSettings"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M5 8h14M5 16h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          <circle cx="9" cy="8" r="2.1" fill="none" stroke="currentColor" stroke-width="1.6" />
-          <circle cx="15" cy="16" r="2.1" fill="none" stroke="currentColor" stroke-width="1.6" />
-        </svg>
-      </IconButton>
-      <IconButton
-        label="探针"
-        hint="在地面点一下，固定该点并看垂直廓线。再点关闭。"
-        :pressed="layers.probe"
-        @click="layers.probe = !layers.probe"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6" />
-          <path d="M12 4.2v2.6M12 17.2v2.6M4.2 12h2.6M17.2 12h2.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          <circle cx="12" cy="12" r="1.3" fill="currentColor" />
-        </svg>
-      </IconButton>
-      <IconButton
-        label="视觉设置"
-        hint="粒子、色标和视图。改动马上出现在画面上。"
-        :pressed="settingsOpen"
-        @click="openSettings"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6" />
-          <path d="M12 3.4v2.2M12 18.4v2.2M3.4 12h2.2M18.4 12h2.2M5.9 5.9l1.6 1.6M16.5 16.5l1.6 1.6M18.1 5.9l-1.6 1.6M7.5 16.5 5.9 18.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-        </svg>
-      </IconButton>
-    </div>
-    <div
-      v-if="sectionFloatOpen"
-      class="section-float"
-      :class="{ collapsed: sectionFloatCollapsed }"
-      :style="sectionFloatPos ? { left: sectionFloatPos.x + 'px', top: sectionFloatPos.y + 'px', right: 'auto' } : undefined"
-      @pointerdown.stop
-      @wheel.stop
-    >
-      <div class="float-head" @pointerdown="onSectionFloatDrag">
-        <strong>剖面配置</strong>
-        <span class="float-actions">
-          <IconButton
-            compact
-            :label="sectionFloatCollapsed ? '展开剖面配置' : '收起剖面配置'"
-            :hint="sectionFloatCollapsed ? '展开配置。剖面继续显示。' : '收起配置。剖面继续显示。'"
-            @click="onSectionFloatCollapse"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                :d="sectionFloatCollapsed ? 'M6 9.5 12 15.5 18 9.5' : 'M6 14.5 12 8.5 18 14.5'"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-          </IconButton>
-          <IconButton compact label="关闭剖面配置" hint="关掉这个配置窗。剖面继续显示。" @click="onSectionFloatClose">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 7l10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-            </svg>
-          </IconButton>
-        </span>
+      <p v-if="gpuNotice" class="gpu-notice">{{ gpuNotice }}</p>
+      <div v-if="section.enabled && section.drawMode" class="draw-chip">
+        <span class="dot" />{{ section.kind === "polyline" ? "绘制折线" : "绘制框选" }} · {{ drawHint }}
       </div>
-      <div v-show="!sectionFloatCollapsed" class="float-body">
-        <span class="mode-picks">
-          <button type="button" :class="{ on: section.enabled && section.kind === 'height' }" :aria-pressed="section.enabled && section.kind === 'height'" @click="selectKind('height')">高度</button>
-          <button type="button" :class="{ on: section.enabled && section.kind === 'lon' }" :aria-pressed="section.enabled && section.kind === 'lon'" @click="selectKind('lon')">经度</button>
-          <button type="button" :class="{ on: section.enabled && section.kind === 'lat' }" :aria-pressed="section.enabled && section.kind === 'lat'" @click="selectKind('lat')">纬度</button>
-          <button type="button" :class="{ on: section.enabled && section.kind === 'polyline' }" :aria-pressed="section.enabled && section.kind === 'polyline'" @click="selectKind('polyline')">折线</button>
-          <button type="button" :class="{ on: section.enabled && section.kind === 'box' }" :aria-pressed="section.enabled && section.kind === 'box'" @click="selectKind('box')">框选</button>
-        </span>
-        <label class="row">变量
-          <select v-model="section.variable">
-            <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
-          </select></label>
-        <label class="row">色带
-          <select v-model="section.colormap">
-            <option v-for="c in COLORMAPS" :key="c" :value="c">{{ COLORMAP_LABELS[c] ?? c }}</option>
-          </select></label>
-        <label class="row" title="跟着「色标」：本帧用当前时次的最小/最大，固定范围用 display_range。手填时若某一端无效，会回退到默认范围。">
-          <input v-model="section.autoRange" type="checkbox" />自动范围
-          <input v-model.number="section.min" class="num" type="number" step="any" :disabled="section.autoRange" @blur="commitSectionRange" />–
-          <input v-model.number="section.max" class="num" type="number" step="any" :disabled="section.autoRange" @blur="commitSectionRange" />
-        </label>
-        <label class="slider">不透明度 {{ section.opacity.toFixed(2) }}<input v-model.number="section.opacity" type="range" min="0.1" max="1" step="0.01" /></label>
-        <label class="row" title="按数值淡出低端：低于阈值完全透明，其上 25% 区间渐显"><input v-model="section.lowAlpha" type="checkbox" />低值透明</label>
-        <label v-if="section.lowAlpha" class="slider">透明阈值 {{ (section.lowThreshold * 100).toFixed(0) }}%<input v-model.number="section.lowThreshold" type="range" min="0" max="0.6" step="0.01" /></label>
-        <label class="slider">等值线 {{ section.contours || "关" }}<input v-model.number="section.contours" type="range" min="0" max="30" step="1" /></label>
-        <label v-if="section.kind === 'height'" class="slider">高度 {{ slice.heightM.toFixed(1) }} m<input v-model.number="slice.heightM" type="range" min="12.5" max="987.5" step="0.5" /></label>
-        <label v-if="section.kind === 'lon' || section.kind === 'lat'" class="slider">位置偏移 {{ section.offsetKm.toFixed(2) }} km<input v-model.number="section.offsetKm" type="range" min="-12" max="12" step="0.01" /></label>
-        <div v-if="section.enabled && (section.kind === 'polyline' || section.kind === 'box')" class="section-tools">
-          <div class="mode-picks draw-actions">
-            <template v-if="section.drawMode">
-              <button v-if="section.kind === 'polyline'" type="button" class="on" :disabled="section.points.length < 2" @click="finishDrawing()">完成</button>
-              <button type="button" @click="cancelDrawing()">取消</button>
-            </template>
-            <template v-else>
-              <button type="button" :disabled="!hasGeometry()" @click="startDrawing(false)">编辑</button>
-              <button type="button" @click="startDrawing(true)">重画</button>
-              <button type="button" :disabled="!hasGeometry()" @click="clearDrawn()">清除</button>
-            </template>
-            <button v-if="section.kind === 'polyline'" type="button" :class="{ on: unfoldedVisible }" @click="unfoldedVisible = !unfoldedVisible">{{ unfoldedVisible ? "隐藏展开图" : "显示展开图" }}</button>
-          </div>
-          <div class="hint-line">{{ drawHint }}</div>
-        </div>
-        <template v-if="section.kind === 'box'">
-          <div class="slider range-label">
-            <span>高度范围 {{ section.box.heightMinM.toFixed(0) }}–{{ section.box.heightMaxM.toFixed(0) }} m</span>
-            <RangeSlider :min="0" :max="1000" :min-value="section.box.heightMinM" :max-value="section.box.heightMaxM" :step="12.5" @update:min-value="section.box.heightMinM = $event" @update:max-value="section.box.heightMaxM = $event" />
-          </div>
-          <label class="row">间隔
-            <select v-model.number="section.box.stepLevels">
-              <option :value="1">每 1 层</option>
-              <option :value="2">每 2 层</option>
-              <option :value="5">每 5 层</option>
-            </select>
-          </label>
-        </template>
-      </div>
-    </div>
-    </div>
 
-    <aside v-if="settingsOpen && showPanel && !embed" class="settings-rail">
-      <div class="panel-head">
-        <strong>视觉设置</strong>
-        <IconButton compact label="关闭设置" hint="关掉设置栏。图层和当前调整都还在。" align="start" @click="settingsOpen = false">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7 7l10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          </svg>
+      <div v-if="showPanel && !embed" class="stage-tools">
+        <IconButton
+          label="剖面"
+          hint="剖面"
+          :pressed="section.enabled"
+          @click="onSectionMain"
+        >
+          <Columns2 :size="17" />
+        </IconButton>
+        <IconButton
+          label="剖面设置"
+          hint="剖面设置"
+          :pressed="sectionFloatOpen"
+          @click="onSectionSettings"
+        >
+          <SlidersHorizontal :size="17" />
+        </IconButton>
+        <IconButton
+          label="探针"
+          hint="探针"
+          :pressed="layers.probe"
+          @click="layers.probe = !layers.probe"
+        >
+          <Crosshair :size="17" />
+        </IconButton>
+        <IconButton
+          label="视觉设置"
+          hint="视觉设置"
+          :pressed="settingsOpen"
+          @click="openSettings"
+        >
+          <Settings :size="17" />
         </IconButton>
       </div>
-      <p class="prefs-note">改动马上上屏。保存只写在这台浏览器。</p>
-      <div class="prefs-actions">
-        <button type="button" @click="saveVisualSettings">保存</button>
-        <button type="button" @click="restoreVisualDefaults">恢复默认</button>
-      </div>
-      <p v-if="prefsMessage" class="prefs-message">{{ prefsMessage }}</p>
-      <div class="mode-picks" role="tablist" aria-label="设置分类">
-        <button type="button" role="tab" :aria-selected="settingsTab === 'particles'" :class="{ on: settingsTab === 'particles' }" @click="settingsTab = 'particles'">粒子展示</button>
-        <button type="button" role="tab" :aria-selected="settingsTab === 'look'" :class="{ on: settingsTab === 'look' }" @click="settingsTab = 'look'">图层外观</button>
-        <button type="button" role="tab" :aria-selected="settingsTab === 'view'" :class="{ on: settingsTab === 'view' }" @click="settingsTab = 'view'">视图</button>
-      </div>
 
-      <div v-show="settingsTab === 'look'">
-        <label class="row" title="本帧：色标两端用当前时次的最小和最大。固定范围：用 display_range。">色标
-          <select v-model="colorScaleMode">
-            <option value="frame">本帧最小–最大</option>
-            <option value="display">固定范围</option>
-          </select></label>
-        <label v-if="layers.buildings" class="slider"
-          >建筑不透明度 {{ layers.buildingOpacity.toFixed(2) }}
-          <input v-model.number="layers.buildingOpacity" type="range" min="0" max="1" step="0.05"
-        /></label>
-        <label v-if="layers.buildings" class="row"
-          ><input v-model="layers.buildingTintEnabled" type="checkbox" :disabled="!layers.ground || layers.groundVar === 'none'" />白膜着色</label
-        >
-        <label v-if="layers.buildings" class="slider"
-          >着色程度 {{ Math.round(layers.buildingTintStrength * 100) }}%
-          <input
-            v-model.number="layers.buildingTintStrength"
-            type="range"
-            min="0"
-            max="1"
-            step="0.05"
-            :disabled="!layers.ground || layers.groundVar === 'none'"
-          />
-        </label>
-        <div
-          v-if="layers.ground && layers.groundVar !== 'none' && Number.isFinite(layers.groundFilterMin)"
-          class="slider range-label"
-          title="只显示该值域内的地面着色（色带映射不变）；白膜着色同步过滤"
-        >
-          <span>地面值域</span>
-          <RangeSlider
-            :min="groundBounds[0]"
-            :max="groundBounds[1]"
-            :min-value="layers.groundFilterMin"
-            :max-value="layers.groundFilterMax"
-            :unit="groundUnits"
-            :step="Math.max((groundBounds[1] - groundBounds[0]) / 200, 1e-6)"
-            @update:min-value="layers.groundFilterMin = $event"
-            @update:max-value="layers.groundFilterMax = $event"
-          />
-        </div>
-        <label v-if="layers.probe" class="row"
-          ><input v-model="layers.probeFollowMouse" type="checkbox" />跟随鼠标</label
-        >
-        <template v-if="layers.volume">
-          <label class="slider"
-            >体渲染不透明度 {{ layers.volumeOpacity.toFixed(2)
-            }}<input
-              v-model.number="layers.volumeOpacity"
-              type="range"
-              min="0.05"
-              max="2"
-              step="0.05"
-          /></label>
-          <label
-            class="slider"
-            title="色带映射范围上的归一化位置（0–1）。低于此值的体素完全透明，之上逐渐显现。与「数值窗口」不同：窗口是硬裁剪，阈值只改透明度。"
-            >透明阈值 {{ volumeThresholdHint }}{{ volumeCurrentMaxHint
-            }}<input
-              v-model.number="layers.volumeThreshold"
-              type="range"
-              min="0"
-              max="0.95"
-              step="0.01"
-          /></label>
-          <div v-if="volumeDataHint || volumeThresholdWarning" class="panel-warn">{{ volumeDataHint ?? volumeThresholdWarning }}</div>
-          <div class="slider range-label"><span>xcut</span><RangeSlider :min="0" :max="1" :min-value="cuts.x[0]" :max-value="cuts.x[1]" :step="0.01" @update:min-value="cuts.x[0] = $event" @update:max-value="cuts.x[1] = $event" /></div>
-          <div class="slider range-label"><span>ycut</span><RangeSlider :min="0" :max="1" :min-value="cuts.y[0]" :max-value="cuts.y[1]" :step="0.01" @update:min-value="cuts.y[0] = $event" @update:max-value="cuts.y[1] = $event" /></div>
-          <div class="slider range-label"><span>zcut</span><RangeSlider :min="0" :max="1" :min-value="cuts.z[0]" :max-value="cuts.z[1]" :step="0.01" @update:min-value="cuts.z[0] = $event" @update:max-value="cuts.z[1] = $event" /></div>
-          <label class="row"><input v-model="cuts.faces" type="checkbox" />切面</label>
-          <template v-if="cuts.faces">
-            <label
-              class="row"
-              title="切面上低值按阈值渐隐，避免稀疏场（如风切变、结冰指数）画出不透明的黑墙"
-              ><input v-model="layers.cutLowAlpha" type="checkbox" />切面低值透明</label
+      <div
+        v-if="sectionFloatOpen"
+        class="section-float"
+        :class="{ collapsed: sectionFloatCollapsed }"
+        :style="sectionFloatPos ? { left: sectionFloatPos.x + 'px', top: sectionFloatPos.y + 'px', right: 'auto' } : undefined"
+        @pointerdown.stop
+        @wheel.stop
+      >
+        <div class="float-head" @pointerdown="onSectionFloatDrag">
+          <div class="float-title">
+            <GripHorizontal :size="14" class="drag-grip" />
+            <strong>剖面配置</strong>
+          </div>
+          <span class="float-actions">
+            <IconButton
+              compact
+              :label="sectionFloatCollapsed ? '展开剖面配置' : '收起剖面配置'"
+              :hint="sectionFloatCollapsed ? '展开' : '收起'"
+              @click="onSectionFloatCollapse"
             >
-            <label v-if="layers.cutLowAlpha" class="slider"
-              >切面透明阈值 {{ (layers.cutLowThreshold * 100).toFixed(0) }}%
-              <input v-model.number="layers.cutLowThreshold" type="range" min="0" max="0.6" step="0.01"
-            /></label>
-          </template>
-          <div class="slider range-label" title="只渲染落在此区间内的体素（硬裁剪）。色带的映射范围不变。">
-            <span>数值窗口</span>
-            <RangeSlider
-              :min="volumeBounds[0]"
-              :max="volumeBounds[1]"
-              :min-value="layers.volumeFilterMin"
-              :max-value="layers.volumeFilterMax"
-              :unit="unitsOf(layers.volumeVar)"
-              :step="Math.max((volumeBounds[1] - volumeBounds[0]) / 200, 1e-6)"
-              @update:min-value="layers.volumeFilterMin = $event"
-              @update:max-value="layers.volumeFilterMax = $event"
+              <ChevronDown v-if="sectionFloatCollapsed" :size="15" />
+              <ChevronUp v-else :size="15" />
+            </IconButton>
+            <IconButton compact label="关闭剖面配置" hint="关闭" @click="onSectionFloatClose">
+              <X :size="15" />
+            </IconButton>
+          </span>
+        </div>
+
+        <div v-show="!sectionFloatCollapsed" class="float-body">
+          <div class="mode-picks">
+            <el-button
+              v-for="item in [
+                { id: 'height', label: '高度' },
+                { id: 'lon', label: '经度' },
+                { id: 'lat', label: '纬度' },
+                { id: 'polyline', label: '折线' },
+                { id: 'box', label: '框选' },
+              ] as const"
+              :key="item.id"
+              size="small"
+              :type="section.enabled && section.kind === item.id ? 'primary' : 'default'"
+              :plain="!(section.enabled && section.kind === item.id)"
+              :aria-pressed="section.enabled && section.kind === item.id"
+              @click="selectKind(item.id)"
+            >
+              {{ item.label }}
+            </el-button>
+          </div>
+
+          <div class="form-row">
+            <span class="field-label">变量</span>
+            <el-select v-model="section.variable" size="small" class="field-control">
+              <el-option v-for="v in variables3D" :key="v.name" :label="v.label" :value="v.name" />
+            </el-select>
+          </div>
+
+          <div class="form-row">
+            <span class="field-label">色带</span>
+            <el-select v-model="section.colormap" size="small" class="field-control">
+              <el-option v-for="c in COLORMAPS" :key="c" :label="COLORMAP_LABELS[c] ?? c" :value="c" />
+            </el-select>
+          </div>
+
+          <div class="form-row range-inputs">
+            <el-checkbox v-model="section.autoRange">自动</el-checkbox>
+            <el-input-number
+              v-model="section.min"
+              size="small"
+              :controls="false"
+              :disabled="section.autoRange"
+              class="num-input"
+              @blur="commitSectionRange"
+            />
+            <span class="dash">–</span>
+            <el-input-number
+              v-model="section.max"
+              size="small"
+              :controls="false"
+              :disabled="section.autoRange"
+              class="num-input"
+              @blur="commitSectionRange"
             />
           </div>
-          <label
-            class="row"
-            title="切面同时使用体渲染的数值窗口和透明阈值。剖面模式不会套用此窗口，避免换变量后整面被裁掉。"
-            ><input v-model="layers.filterSlices" type="checkbox" />切面跟随体渲染过滤</label
-          >
-        </template>
-      </div>
 
-      <div v-show="settingsTab === 'particles'">
-        <label class="row"><input type="checkbox" :checked="layers.particles" @change="onParticleToggle" />显示风粒子</label>
-        <label class="slider"
-          >粒子数量 {{ particleParams.count.toLocaleString() }}
-          <input
-            v-model.number="particleParams.count"
-            type="range"
-            min="4000"
-            max="262144"
-            step="4000"
-        /></label>
-        <label class="slider"
-          >尾迹长度 {{ particleParams.trailLength }} 步
-          <input
-            v-model.number="particleParams.trailLength"
-            type="range"
-            min="2"
-            :max="particleParams.count > 70000 ? 32 : 64"
-            step="1"
-        /></label>
-        <label class="slider"
-          >速度倍率 {{ particleParams.speed.toFixed(2) }}×
-          <input v-model.number="particleParams.speed" type="range" min="0.05" max="5" step="0.05"
-        /></label>
-        <label class="slider"
-          >线宽 {{ particleParams.lineWidth.toFixed(1) }} px
-          <input
-            v-model.number="particleParams.lineWidth"
-            type="range"
-            min="0.5"
-            max="8"
-            step="0.1"
-        /></label>
-        <label class="slider"
-          >生命周期 {{ particleParams.lifetime.toFixed(1) }} s
-          <input v-model.number="particleParams.lifetime" type="range" min="1" max="30" step="0.5"
-        /></label>
-        <label class="slider"
-          >不透明度 {{ particleParams.opacity.toFixed(2) }}
-          <input
-            v-model.number="particleParams.opacity"
-            type="range"
-            min="0.05"
-            max="1"
-            step="0.01"
-        /></label>
-        <label class="row"
-          >着色
-          <select v-model="particleParams.colorMode">
-            <option v-for="m in COLOR_MODES" :key="m.value" :value="m.value">{{ m.label }}</option>
-          </select></label
-        >
-        <label v-if="particleParams.colorMode !== 'single'" class="row"
-          >色带
-          <select v-model="particleParams.colormap">
-            <option v-for="c in COLORMAPS" :key="c" :value="c">
-              {{ COLORMAP_LABELS[c] ?? c }}
-            </option>
-          </select></label
-        >
-        <label v-else class="row">颜色 <input v-model="particleParams.color" type="color" /></label>
-        <label class="slider"
-          >粒子高度下限 {{ particleParams.heightMin }} m
-          <input
-            v-model.number="particleParams.heightMin"
-            type="range"
-            min="10"
-            max="950"
-            step="10"
-        /></label>
-        <label class="slider"
-          >粒子高度上限 {{ particleParams.heightMax }} m
-          <input
-            v-model.number="particleParams.heightMax"
-            type="range"
-            min="40"
-            max="1000"
-            step="10"
-        /></label>
-        <label class="slider"
-          >w 垂直放大 {{ particleParams.wExaggeration.toFixed(1) }}×
-          <input
-            v-model.number="particleParams.wExaggeration"
-            type="range"
-            min="0"
-            max="20"
-            step="0.5"
-        /></label>
-        <div class="row-wrap">
-          <label class="row"
-            ><input v-model="particleParams.taper" type="checkbox" />尾迹收细</label
-          >
-          <label class="row"
-            ><input v-model="particleParams.additive" type="checkbox" />叠加发光</label
-          >
-          <label class="row"><input v-model="particleParams.paused" type="checkbox" />暂停</label>
-        </div>
-      </div>
+          <div class="slider-field">
+            <div class="slider-head">
+              <span>不透明度</span>
+              <span class="val">{{ section.opacity.toFixed(2) }}</span>
+            </div>
+            <el-slider v-model="section.opacity" :min="0.1" :max="1" :step="0.01" :show-tooltip="false" />
+          </div>
 
-      <div v-show="settingsTab === 'view'">
-        <label v-if="!globeMode" class="slider"
-          >垂直夸张 {{ view.exaggeration.toFixed(1) }}×
-          <input v-model.number="view.exaggeration" type="range" min="1" max="10" step="0.1"
-        /></label>
-        <label class="row"><input type="checkbox" :checked="format.id === 'sz3'" @change="onSz3Toggle(($event.target as HTMLInputElement).checked, $event)" /> SZ3</label>
-        <template v-if="globeMode">
-          <div class="row"><span>底图</span>
-            <button type="button" :class="{ on: globeBasemap === 'img' }" @click="setGlobeBasemap('img')">影像</button>
-            <button type="button" :class="{ on: globeBasemap === 'vec' }" @click="setGlobeBasemap('vec')">矢量</button>
+          <div class="check-row">
+            <el-checkbox v-model="section.lowAlpha">低值透明</el-checkbox>
           </div>
-          <label class="slider">垂直夸张 {{ chromeK.toFixed(1) }}×<input type="range" min="1" max="10" step="0.1" :value="chromeK" @input="setGlobeK(Number(($event.target as HTMLInputElement).value))" /></label>
-          <div class="buttons">
-            <button type="button" @click="setGlobeView('overview')">总览</button>
-            <button type="button" @click="setGlobeView('top')">俯视</button>
+
+          <div v-if="section.lowAlpha" class="slider-field">
+            <div class="slider-head">
+              <span>透明阈值</span>
+              <span class="val">{{ (section.lowThreshold * 100).toFixed(0) }}%</span>
+            </div>
+            <el-slider v-model="section.lowThreshold" :min="0" :max="0.6" :step="0.01" :show-tooltip="false" />
           </div>
-        </template>
-        <label class="row"><input v-model="view.shadows" type="checkbox" />建筑阴影</label>
-        <label class="row"
-          >主题
-          <select v-model="view.theme">
-            <option value="dark">深色</option>
-            <option value="light">浅色</option>
-          </select></label
-        >
-        <div v-if="!globeMode" class="buttons">
-          <button type="button" @click="setView('overview')">总览</button>
-          <button type="button" @click="setView('close')">近景</button>
-          <button type="button" @click="setView('top')">俯视</button>
+
+          <div class="slider-field">
+            <div class="slider-head">
+              <span>等值线</span>
+              <span class="val">{{ section.contours || "关" }}</span>
+            </div>
+            <el-slider v-model="section.contours" :min="0" :max="30" :step="1" :show-tooltip="false" />
+          </div>
+
+          <div v-if="section.kind === 'height'" class="slider-field">
+            <div class="slider-head">
+              <span>高度</span>
+              <span class="val">{{ slice.heightM.toFixed(1) }} m</span>
+            </div>
+            <el-slider v-model="slice.heightM" :min="12.5" :max="987.5" :step="0.5" :show-tooltip="false" />
+          </div>
+
+          <div v-if="section.kind === 'lon' || section.kind === 'lat'" class="slider-field">
+            <div class="slider-head">
+              <span>位置偏移</span>
+              <span class="val">{{ section.offsetKm.toFixed(2) }} km</span>
+            </div>
+            <el-slider v-model="section.offsetKm" :min="-12" :max="12" :step="0.01" :show-tooltip="false" />
+          </div>
+
+          <div v-if="section.enabled && (section.kind === 'polyline' || section.kind === 'box')" class="section-tools">
+            <div class="draw-actions">
+              <template v-if="section.drawMode">
+                <el-button v-if="section.kind === 'polyline'" size="small" type="primary" :disabled="section.points.length < 2" @click="finishDrawing()">完成</el-button>
+                <el-button size="small" @click="cancelDrawing()">取消</el-button>
+              </template>
+              <template v-else>
+                <el-button size="small" :disabled="!hasGeometry()" @click="startDrawing(false)">编辑</el-button>
+                <el-button size="small" @click="startDrawing(true)">重画</el-button>
+                <el-button size="small" :disabled="!hasGeometry()" @click="clearDrawn()">清除</el-button>
+              </template>
+              <el-button
+                v-if="section.kind === 'polyline'"
+                size="small"
+                :type="unfoldedVisible ? 'primary' : 'default'"
+                @click="unfoldedVisible = !unfoldedVisible"
+              >
+                {{ unfoldedVisible ? "隐藏展开图" : "显示展开图" }}
+              </el-button>
+            </div>
+            <div class="hint-line">{{ drawHint }}</div>
+          </div>
+
+          <template v-if="section.kind === 'box'">
+            <div class="slider-field range-label">
+              <div class="slider-head">
+                <span>高度范围</span>
+                <span class="val">{{ section.box.heightMinM.toFixed(0) }}–{{ section.box.heightMaxM.toFixed(0) }} m</span>
+              </div>
+              <RangeSlider
+                :min="0"
+                :max="1000"
+                :min-value="section.box.heightMinM"
+                :max-value="section.box.heightMaxM"
+                :step="12.5"
+                @update:min-value="section.box.heightMinM = $event"
+                @update:max-value="section.box.heightMaxM = $event"
+              />
+            </div>
+            <div class="form-row">
+              <span class="field-label">间隔</span>
+              <el-select v-model="section.box.stepLevels" size="small" class="field-control">
+                <el-option :value="1" label="每 1 层" />
+                <el-option :value="2" label="每 2 层" />
+                <el-option :value="5" label="每 5 层" />
+              </el-select>
+            </div>
+          </template>
         </div>
-        <details>
-        <summary>状态</summary>
-        <div class="stats">
-          <div>{{ status }}</div>
-          <div>渲染：WebGL2 · {{ gpu }}</div>
-          <div>粒子路径：{{ particles?.label ?? "等待 u/v/w" }}</div>
-          <div>
-            加载耗时：<span v-for="(ms, k) in loadMs" :key="k">{{ k }} {{ ms }} ms · </span>
-          </div>
-          <div>建筑：{{ buildingsInfo }}（3D-GloBFP + OSM）</div>
-        </div>
-        </details>
       </div>
+    </div>
+
+    <aside v-if="settingsOpen && showPanel && !embed" class="settings-rail" @pointerdown.stop @wheel.stop>
+      <div class="panel-head">
+        <strong>视觉设置</strong>
+        <IconButton compact label="关闭设置" hint="关闭" align="start" @click="settingsOpen = false">
+          <X :size="15" />
+        </IconButton>
+      </div>
+      <div class="prefs-actions">
+        <el-button type="primary" size="small" @click="saveVisualSettings">
+          <Save :size="13" class="btn-ico" />保存
+        </el-button>
+        <el-button size="small" @click="restoreVisualDefaults">
+          <RotateCcw :size="13" class="btn-ico" />恢复默认
+        </el-button>
+      </div>
+      <p v-if="prefsMessage" class="prefs-message">{{ prefsMessage }}</p>
+
+      <el-tabs v-model="settingsTab" stretch class="settings-tabs">
+        <el-tab-pane label="粒子展示" name="particles">
+          <div class="tab-content">
+            <div class="check-row">
+              <el-checkbox :model-value="layers.particles" @update:model-value="onParticleToggle">显示风粒子</el-checkbox>
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>粒子数量</span>
+                <span class="val">{{ particleParams.count.toLocaleString() }}</span>
+              </div>
+              <el-slider v-model="particleParams.count" :min="4000" :max="262144" :step="4000" :show-tooltip="false" />
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>尾迹长度</span>
+                <span class="val">{{ particleParams.trailLength }} 步</span>
+              </div>
+              <el-slider
+                v-model="particleParams.trailLength"
+                :min="2"
+                :max="particleParams.count > 70000 ? 32 : 64"
+                :step="1"
+                :show-tooltip="false"
+              />
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>速度倍率</span>
+                <span class="val">{{ particleParams.speed.toFixed(2) }}×</span>
+              </div>
+              <el-slider v-model="particleParams.speed" :min="0.05" :max="5" :step="0.05" :show-tooltip="false" />
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>线宽</span>
+                <span class="val">{{ particleParams.lineWidth.toFixed(1) }} px</span>
+              </div>
+              <el-slider v-model="particleParams.lineWidth" :min="0.5" :max="8" :step="0.1" :show-tooltip="false" />
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>生命周期</span>
+                <span class="val">{{ particleParams.lifetime.toFixed(1) }} s</span>
+              </div>
+              <el-slider v-model="particleParams.lifetime" :min="1" :max="30" :step="0.5" :show-tooltip="false" />
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>不透明度</span>
+                <span class="val">{{ particleParams.opacity.toFixed(2) }}</span>
+              </div>
+              <el-slider v-model="particleParams.opacity" :min="0.05" :max="1" :step="0.01" :show-tooltip="false" />
+            </div>
+
+            <div class="form-row">
+              <span class="field-label">着色</span>
+              <el-select v-model="particleParams.colorMode" size="small" class="field-control">
+                <el-option v-for="m in COLOR_MODES" :key="m.value" :label="m.label" :value="m.value" />
+              </el-select>
+            </div>
+
+            <div v-if="particleParams.colorMode !== 'single'" class="form-row">
+              <span class="field-label">色带</span>
+              <el-select v-model="particleParams.colormap" size="small" class="field-control">
+                <el-option v-for="c in COLORMAPS" :key="c" :label="COLORMAP_LABELS[c] ?? c" :value="c" />
+              </el-select>
+            </div>
+            <div v-else class="form-row">
+              <span class="field-label">颜色</span>
+              <el-color-picker v-model="particleParams.color" size="small" />
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>粒子高度下限</span>
+                <span class="val">{{ particleParams.heightMin }} m</span>
+              </div>
+              <el-slider v-model="particleParams.heightMin" :min="10" :max="950" :step="10" :show-tooltip="false" />
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>粒子高度上限</span>
+                <span class="val">{{ particleParams.heightMax }} m</span>
+              </div>
+              <el-slider v-model="particleParams.heightMax" :min="40" :max="1000" :step="10" :show-tooltip="false" />
+            </div>
+
+            <div class="slider-field">
+              <div class="slider-head">
+                <span>w 垂直放大</span>
+                <span class="val">{{ particleParams.wExaggeration.toFixed(1) }}×</span>
+              </div>
+              <el-slider v-model="particleParams.wExaggeration" :min="0" :max="20" :step="0.5" :show-tooltip="false" />
+            </div>
+
+            <div class="row-wrap">
+              <el-checkbox v-model="particleParams.taper">尾迹收细</el-checkbox>
+              <el-checkbox v-model="particleParams.additive">叠加发光</el-checkbox>
+              <el-checkbox v-model="particleParams.paused">暂停</el-checkbox>
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="图层外观" name="look">
+          <div class="tab-content">
+            <div class="form-row">
+              <span class="field-label">色标</span>
+              <el-select v-model="colorScaleMode" size="small" class="field-control">
+                <el-option value="frame" label="本帧最小–最大" />
+                <el-option value="display" label="固定范围" />
+              </el-select>
+            </div>
+
+            <template v-if="layers.buildings">
+              <div class="slider-field">
+                <div class="slider-head">
+                  <span>建筑不透明度</span>
+                  <span class="val">{{ layers.buildingOpacity.toFixed(2) }}</span>
+                </div>
+                <el-slider v-model="layers.buildingOpacity" :min="0" :max="1" :step="0.05" :show-tooltip="false" />
+              </div>
+              <div class="check-row">
+                <el-checkbox v-model="layers.buildingTintEnabled" :disabled="!layers.ground || layers.groundVar === 'none'">
+                  白膜着色
+                </el-checkbox>
+              </div>
+              <div class="slider-field">
+                <div class="slider-head">
+                  <span>着色程度</span>
+                  <span class="val">{{ Math.round(layers.buildingTintStrength * 100) }}%</span>
+                </div>
+                <el-slider
+                  v-model="layers.buildingTintStrength"
+                  :min="0"
+                  :max="1"
+                  :step="0.05"
+                  :disabled="!layers.ground || layers.groundVar === 'none'"
+                  :show-tooltip="false"
+                />
+              </div>
+            </template>
+
+            <div
+              v-if="layers.ground && layers.groundVar !== 'none' && Number.isFinite(layers.groundFilterMin)"
+              class="slider-field range-label"
+            >
+              <div class="slider-head"><span>地面值域</span></div>
+              <RangeSlider
+                :min="groundBounds[0]"
+                :max="groundBounds[1]"
+                :min-value="layers.groundFilterMin"
+                :max-value="layers.groundFilterMax"
+                :unit="groundUnits"
+                :step="Math.max((groundBounds[1] - groundBounds[0]) / 200, 1e-6)"
+                @update:min-value="layers.groundFilterMin = $event"
+                @update:max-value="layers.groundFilterMax = $event"
+              />
+            </div>
+
+            <template v-if="layers.volume">
+              <div class="slider-field">
+                <div class="slider-head">
+                  <span>体渲染不透明度</span>
+                  <span class="val">{{ layers.volumeOpacity.toFixed(2) }}</span>
+                </div>
+                <el-slider v-model="layers.volumeOpacity" :min="0.05" :max="2" :step="0.05" :show-tooltip="false" />
+              </div>
+
+              <div class="slider-field">
+                <div class="slider-head">
+                  <span>透明阈值</span>
+                  <span class="val">{{ volumeThresholdHint }}{{ volumeCurrentMaxHint }}</span>
+                </div>
+                <el-slider v-model="layers.volumeThreshold" :min="0" :max="0.95" :step="0.01" :show-tooltip="false" />
+              </div>
+
+              <div v-if="volumeDataHint || volumeThresholdWarning" class="panel-warn">
+                {{ volumeDataHint ?? volumeThresholdWarning }}
+              </div>
+
+              <div class="slider-field range-label">
+                <div class="slider-head"><span>xcut</span></div>
+                <RangeSlider :min="0" :max="1" :min-value="cuts.x[0]" :max-value="cuts.x[1]" :step="0.01" @update:min-value="cuts.x[0] = $event" @update:max-value="cuts.x[1] = $event" />
+              </div>
+              <div class="slider-field range-label">
+                <div class="slider-head"><span>ycut</span></div>
+                <RangeSlider :min="0" :max="1" :min-value="cuts.y[0]" :max-value="cuts.y[1]" :step="0.01" @update:min-value="cuts.y[0] = $event" @update:max-value="cuts.y[1] = $event" />
+              </div>
+              <div class="slider-field range-label">
+                <div class="slider-head"><span>zcut</span></div>
+                <RangeSlider :min="0" :max="1" :min-value="cuts.z[0]" :max-value="cuts.z[1]" :step="0.01" @update:min-value="cuts.z[0] = $event" @update:max-value="cuts.z[1] = $event" />
+              </div>
+
+              <div class="check-row">
+                <el-checkbox v-model="cuts.faces">切面</el-checkbox>
+              </div>
+              <template v-if="cuts.faces">
+                <div class="check-row">
+                  <el-checkbox v-model="layers.cutLowAlpha">切面低值透明</el-checkbox>
+                </div>
+                <div v-if="layers.cutLowAlpha" class="slider-field">
+                  <div class="slider-head">
+                    <span>切面透明阈值</span>
+                    <span class="val">{{ (layers.cutLowThreshold * 100).toFixed(0) }}%</span>
+                  </div>
+                  <el-slider v-model="layers.cutLowThreshold" :min="0" :max="0.6" :step="0.01" :show-tooltip="false" />
+                </div>
+              </template>
+
+              <div class="slider-field range-label">
+                <div class="slider-head"><span>数值窗口</span></div>
+                <RangeSlider
+                  :min="volumeBounds[0]"
+                  :max="volumeBounds[1]"
+                  :min-value="layers.volumeFilterMin"
+                  :max-value="layers.volumeFilterMax"
+                  :unit="unitsOf(layers.volumeVar)"
+                  :step="Math.max((volumeBounds[1] - volumeBounds[0]) / 200, 1e-6)"
+                  @update:min-value="layers.volumeFilterMin = $event"
+                  @update:max-value="layers.volumeFilterMax = $event"
+                />
+              </div>
+
+              <div class="check-row">
+                <el-checkbox v-model="layers.filterSlices">切面跟随体渲染过滤</el-checkbox>
+              </div>
+            </template>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="视图" name="view">
+          <div class="tab-content">
+            <div v-if="!globeMode" class="slider-field">
+              <div class="slider-head">
+                <span>垂直夸张</span>
+                <span class="val">{{ view.exaggeration.toFixed(1) }}×</span>
+              </div>
+              <el-slider v-model="view.exaggeration" :min="1" :max="10" :step="0.1" :show-tooltip="false" />
+            </div>
+
+            <div class="check-row">
+              <el-checkbox :model-value="format.id === 'sz3'" @update:model-value="onSz3Toggle(Boolean($event))">
+                SZ3 压缩格式
+              </el-checkbox>
+            </div>
+
+            <template v-if="globeMode">
+              <div class="slider-field">
+                <div class="slider-head">
+                  <span>垂直夸张</span>
+                  <span class="val">{{ chromeK.toFixed(1) }}×</span>
+                </div>
+                <el-slider
+                  :model-value="chromeK"
+                  :min="1"
+                  :max="10"
+                  :step="0.1"
+                  :show-tooltip="false"
+                  @update:model-value="setGlobeK(Number($event))"
+                />
+              </div>
+              <div class="preset-buttons">
+                <el-button size="small" @click="setGlobeView('overview')">总览</el-button>
+                <el-button size="small" @click="setGlobeView('top')">俯视</el-button>
+              </div>
+            </template>
+
+            <div class="check-row">
+              <el-checkbox v-model="view.shadows">建筑阴影</el-checkbox>
+            </div>
+
+            <div class="form-row">
+              <span class="field-label">主题</span>
+              <el-select v-model="view.theme" size="small" class="field-control">
+                <el-option value="dark" label="深色" />
+                <el-option value="light" label="浅色" />
+              </el-select>
+            </div>
+
+            <div v-if="!globeMode" class="preset-buttons">
+              <el-button size="small" @click="setView('overview')">总览</el-button>
+              <el-button size="small" @click="setView('close')">近景</el-button>
+              <el-button size="small" @click="setView('top')">俯视</el-button>
+            </div>
+
+            <el-collapse v-model="statusCollapse" class="status-collapse">
+              <el-collapse-item title="运行状态" name="stats">
+                <div class="stats">
+                  <div>{{ status }}</div>
+                  <div>渲染：WebGL2 · {{ gpu }}</div>
+                  <div>粒子路径：{{ particles?.label ?? "等待 u/v/w" }}</div>
+                  <div>
+                    加载耗时：<span v-for="(ms, k) in loadMs" :key="k">{{ k }} {{ ms }} ms · </span>
+                  </div>
+                  <div>建筑：{{ buildingsInfo }}（3D-GloBFP + OSM）</div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
     </aside>
   </div>
 </template>
 
 <style scoped>
-.mode-picks { display: inline-flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
-.mode-picks button { background: rgba(20,40,55,.8); color: inherit; border: 1px solid var(--line); border-radius: 3px; padding: 1px 6px; cursor: pointer; font: inherit; }
-.mode-picks button.on { border-color: var(--accent); color: var(--accent); }
-.viewer.light .mode-picks button { background: rgba(247, 250, 252, 0.95); color: #1c2d3a; border-color: rgba(60, 90, 110, 0.3); }
-.viewer.light .mode-picks button.on { border-color: #0f8aa3; color: #0f8aa3; background: #fff; }
-.section-tools { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
-.hint-line { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 4px 0; }
-.range-label span { display: block; margin-bottom: 4px; }
 .viewer {
   display: flex;
-  --card: rgba(8, 17, 30, 0.78);
-  --panel: rgba(8, 16, 28, 0.9);
-  --line: rgba(120, 170, 200, 0.22);
-  --text: #dce9f2;
+  --card: rgba(9, 19, 33, 0.82);
+  --panel: rgba(9, 19, 33, 0.94);
+  --surface: rgba(255, 255, 255, 0.04);
+  --surface-active: rgba(95, 211, 230, 0.08);
+  --line: rgba(120, 170, 200, 0.2);
+  --text: #e2eff7;
   --muted: #87a3b5;
   --accent: #5fd3e6;
-  --accent-soft: rgba(95, 211, 230, 0.22);
+  --accent-soft: rgba(95, 211, 230, 0.18);
   position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
   color: var(--text);
   font:
-    12px/1.45 system-ui,
-    -apple-system,
-    "PingFang SC",
-    "Microsoft YaHei",
-    sans-serif;
+    12px/1.45 var(--el-font-family, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif);
 }
+
+.viewer.light {
+  --card: rgba(250, 252, 255, 0.86);
+  --panel: rgba(250, 252, 255, 0.96);
+  --surface: rgba(15, 45, 70, 0.04);
+  --surface-active: rgba(15, 138, 163, 0.08);
+  --line: rgba(60, 90, 110, 0.18);
+  --text: #1c2d3a;
+  --muted: #5d7384;
+  --accent: #0f8aa3;
+  --accent-soft: rgba(15, 138, 163, 0.14);
+}
+
 /* globe tab: Cesium's canvas sits underneath; only the overlays take input */
 .viewer.globe {
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
+
 .viewer.globe .legends,
 .viewer.globe .lonlat,
 .viewer.globe .timeline,
@@ -4987,142 +5186,489 @@ onBeforeUnmount(() => {
 .viewer.globe .section-float {
   pointer-events: auto;
 }
-.viewer.globe .stage { pointer-events: none; }
-.element-rail, .settings-rail {
-  flex: none;
-  height: 100%;
-  overflow: auto;
+
+.viewer.globe .stage {
+  pointer-events: none;
+}
+
+.element-rail,
+.settings-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  overflow-y: auto;
   background: var(--panel);
+  backdrop-filter: blur(16px);
   border-color: var(--line);
   color: var(--text);
-  z-index: 6;
+  z-index: 10;
 }
-.element-rail { width: 220px; border-right: 1px solid var(--line); }
-.element-rail.collapsed { width: 40px; }
-.settings-rail { width: 320px; border-left: 1px solid var(--line); padding: 10px 12px; }
-.stage { position: relative; flex: 1; min-width: 0; height: 100%; }
-.rail-head, .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.rail-head { padding: 4px 6px; }
-.panel-head strong { font-size: 13px; }
-.element-rail.collapsed .rail-head { justify-content: center; }
-.layer-block { display: flex; flex-direction: column; gap: 8px; padding: 4px 10px 8px; }
-.layer-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
-.layer-mark { width: 16px; height: 16px; flex: none; color: var(--muted); }
-.layer-name { flex: 1; min-width: 0; }
-.layer-select { width: 100%; margin: -2px 0 2px; }
-.layer-select.idle { opacity: 0.6; }
-.switch {
-  width: 34px;
-  height: 18px;
-  padding: 1px;
+
+.element-rail {
+  left: 0;
+  width: 232px;
+  border-right: 1px solid var(--line);
+  transition: width 160ms ease;
+}
+
+.element-rail.collapsed {
+  width: 44px;
+}
+
+.settings-rail {
+  right: 0;
+  width: 320px;
+  border-left: 1px solid var(--line);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+}
+
+.stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.rail-head,
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.rail-head {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rail-title,
+.panel-head strong {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.element-rail.collapsed .rail-head {
+  justify-content: center;
+  padding: 8px 4px;
+}
+
+.layer-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.layer-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 9px;
-  background: transparent;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
+}
+
+.layer-card.active {
+  background: var(--surface-active);
+  border-color: rgba(95, 211, 230, 0.35);
+}
+
+.viewer.light .layer-card.active {
+  border-color: rgba(15, 138, 163, 0.35);
+}
+
+.layer-row {
   display: flex;
   align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.layer-mark {
   flex: none;
+  color: var(--muted);
+  transition: color 140ms ease;
 }
-.switch span {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--muted);
+
+.layer-card.active .layer-mark {
+  color: var(--accent);
 }
-.switch[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
-.switch[aria-checked="true"] span { margin-left: 14px; background: #04141c; }
-.viewer.light .switch[aria-checked="true"] span { background: #fff; }
-.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.scene-group { padding: 8px 10px 12px; border-top: 1px solid var(--line); }
-.scene-title { color: var(--muted); margin-bottom: 2px; font-size: 11px; }
+
+.layer-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.layer-select {
+  width: 100%;
+}
+
+.layer-select.idle {
+  opacity: 0.65;
+}
+
+.scene-group {
+  padding: 10px 12px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.scene-title {
+  color: var(--muted);
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.check-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.check-stack :deep(.el-checkbox),
+.check-row :deep(.el-checkbox),
+.row-wrap :deep(.el-checkbox) {
+  height: 26px;
+  margin-right: 0;
+}
+
 .stage-tools {
   position: absolute;
   z-index: 8;
   top: 12px;
-  right: 12px;
+  right: calc(var(--rail-right, 0px) + 12px);
   display: flex;
-  padding: 2px;
+  padding: 3px;
   gap: 2px;
   border-radius: 12px;
   background: var(--card);
   border: 1px solid var(--line);
-  backdrop-filter: blur(10px);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
 }
+
 .section-float {
   position: absolute;
   z-index: 9;
-  top: 108px;
-  right: 12px;
-  width: min(300px, calc(100% - 24px));
-  max-height: calc(100% - 120px);
-  overflow: visible;
-  padding: 8px 10px;
-  border-radius: 10px;
+  top: 64px;
+  right: calc(var(--rail-right, 0px) + 12px);
+  width: min(308px, calc(100% - var(--rail-left, 0px) - var(--rail-right, 0px) - 24px));
+  max-height: calc(100% - 88px);
+  overflow: hidden;
+  border-radius: 12px;
   background: var(--panel);
   border: 1px solid var(--line);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.36);
 }
-.section-float.collapsed { max-height: none; }
-.float-body { max-height: min(560px, calc(100vh - 180px)); overflow: auto; }
-.float-head { display: flex; justify-content: space-between; align-items: center; cursor: grab; user-select: none; }
-.float-actions { display: inline-flex; gap: 4px; }
-.prefs-note, .prefs-message { color: var(--muted); margin: 6px 0; }
-.prefs-actions { display: flex; gap: 8px; margin-bottom: 8px; }
+
+.section-float.collapsed {
+  max-height: none;
+}
+
+.float-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  cursor: grab;
+  user-select: none;
+}
+
+.section-float.collapsed .float-head {
+  border-bottom: 0;
+}
+
+.float-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.drag-grip {
+  color: var(--muted);
+}
+
+.float-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.float-body {
+  padding: 10px 12px 12px;
+  max-height: min(560px, calc(100vh - 150px));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mode-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mode-picks :deep(.el-button) {
+  margin-left: 0;
+  padding: 5px 9px;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field-label {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 32px;
+}
+
+.field-control {
+  flex: 1;
+  min-width: 0;
+}
+
+.range-inputs {
+  gap: 6px;
+}
+
+.range-inputs :deep(.el-checkbox) {
+  margin-right: 2px;
+}
+
+.num-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.num-input :deep(.el-input__inner) {
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash {
+  color: var(--muted);
+  flex: none;
+}
+
+.slider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.slider-field :deep(.el-slider) {
+  height: 22px;
+  padding: 0 6px;
+}
+
+.slider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.slider-head .val {
+  color: var(--accent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+}
+
+.row-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding-top: 2px;
+}
+
+.section-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.draw-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.draw-actions :deep(.el-button) {
+  margin-left: 0;
+}
+
+.hint-line {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prefs-message {
+  color: var(--accent);
+  font-size: 11px;
+  margin: 6px 0 0;
+}
+
+.prefs-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.prefs-actions :deep(.el-button) {
+  flex: 1;
+  margin-left: 0;
+}
+
+.btn-ico {
+  margin-right: 4px;
+}
+
+.settings-tabs {
+  margin-top: 8px;
+}
+
+.settings-tabs :deep(.el-tabs__header) {
+  margin-bottom: 10px;
+}
+
+.settings-tabs :deep(.el-tabs__item) {
+  font-size: 12px;
+  height: 32px;
+  line-height: 32px;
+  padding: 0 8px;
+}
+
+.tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+}
+
+.preset-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.preset-buttons :deep(.el-button) {
+  flex: 1;
+  margin-left: 0;
+}
+
+.status-collapse {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-content-bg-color: transparent;
+  --el-collapse-border-color: var(--line);
+  --el-collapse-header-height: 34px;
+  --el-collapse-header-font-size: 12px;
+}
+
+.stats {
+  color: var(--muted);
+  font-size: 11px;
+  display: grid;
+  gap: 4px;
+  word-break: break-all;
+}
+
 .view-tools {
   position: absolute;
   z-index: 7;
-  right: 16px;
+  right: calc(var(--rail-right, 0px) + 16px);
   bottom: 18px;
 }
+
 @media (max-width: 1100px) {
   .view-tools.raised {
     bottom: 96px;
   }
-  .settings-rail { width: min(320px, calc(100% - 320px)); }
-  .viewer:has(.settings-rail) .element-rail { width: 40px; }
-  .viewer:has(.settings-rail) .rail-body { display: none; }
+  .settings-rail {
+    width: min(320px, calc(100% - 320px));
+  }
+  .viewer:has(.settings-rail) .element-rail {
+    width: 44px;
+  }
+  .viewer:has(.settings-rail) .rail-body {
+    display: none;
+  }
 }
-.viewer.light {
-  --card: rgba(250, 252, 255, 0.82);
-  --panel: rgba(250, 252, 255, 0.93);
-  --line: rgba(60, 90, 110, 0.2);
-  --text: #1c2d3a;
-  --muted: #5d7384;
-  --accent: #0f8aa3;
-  --accent-soft: rgba(15, 138, 163, 0.16);
-}
+
 .canvas {
   display: block;
   width: 100%;
   height: 100%;
   touch-action: none;
 }
-.muted {
-  color: var(--muted);
-}
+
 .panel-warn {
-  margin: -2px 0 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 194, 71, 0.12);
+  border: 1px solid rgba(255, 194, 71, 0.3);
   font-size: 11px;
-  line-height: 1.35;
+  line-height: 1.4;
   color: #ffc247;
 }
+
+.viewer.light .panel-warn {
+  color: #9a6b12;
+  background: rgba(255, 194, 71, 0.18);
+}
+
 .legends {
   position: absolute;
   z-index: 5;
-  left: 16px;
-  bottom: 16px;
+  left: calc(var(--rail-left, 0px) + 16px);
+  bottom: 52px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: left 160ms ease;
 }
-.legends.raised {
-  bottom: 48px;
-}
+
 .profile-box {
   position: absolute;
   z-index: 5;
-  left: 16px;
+  left: calc(var(--rail-left, 0px) + 16px);
   top: 16px;
+  transition: left 160ms ease;
 }
+
 .draw-chip {
   position: absolute;
   z-index: 6;
@@ -5132,50 +5678,30 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
+  padding: 5px 14px;
   border-radius: 999px;
-  background: rgba(10, 22, 34, 0.86);
+  background: rgba(10, 22, 34, 0.88);
   border: 1px solid rgba(92, 225, 255, 0.55);
+  backdrop-filter: blur(10px);
   color: #d8f6ff;
   font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
 }
-.draw-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: #5ce1ff; box-shadow: 0 0 6px #5ce1ff; }
-.budget-row {
-  position: absolute;
-  z-index: 6;
-  left: 16px;
-  bottom: 58px;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  max-width: min(720px, calc(100% - 32px));
+
+.draw-chip .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #5ce1ff;
+  box-shadow: 0 0 6px #5ce1ff;
 }
-.budget-chip {
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  color: var(--text);
-  font-size: 12px;
-  pointer-events: none;
-}
-.budget-export {
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  color: var(--text);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
+
 .gpu-notice {
   position: absolute;
   z-index: 7;
-  left: 16px;
-  right: 16px;
+  left: calc(var(--rail-left, 0px) + 16px);
+  right: calc(var(--rail-right, 0px) + 16px);
   bottom: 92px;
   margin: 0;
   padding: 8px 12px;
@@ -5184,147 +5710,5 @@ onBeforeUnmount(() => {
   border: 1px solid var(--line);
   color: var(--text);
   font-size: 13px;
-}
-.panel {
-  position: absolute;
-  z-index: 6;
-  right: 14px;
-  top: 14px;
-  width: 300px;
-  max-height: calc(100% - 28px);
-  overflow-y: auto;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  backdrop-filter: blur(14px);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
-}
-.panel-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-}
-.eyebrow {
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  color: var(--muted);
-}
-.panel h1 {
-  margin: 2px 0 6px;
-  font-size: 17px;
-  font-weight: 600;
-}
-.icon {
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
-  border-radius: 7px;
-  width: 26px;
-  height: 26px;
-  cursor: pointer;
-}
-details {
-  border-top: 1px solid var(--line);
-  padding: 8px 0 4px;
-}
-summary {
-  cursor: pointer;
-  font-weight: 600;
-  font-size: 13px;
-  list-style: none;
-}
-summary::-webkit-details-marker {
-  display: none;
-}
-summary::before {
-  content: "▸ ";
-  color: var(--muted);
-}
-details[open] > summary::before {
-  content: "▾ ";
-}
-summary em {
-  float: right;
-  font-style: normal;
-  font-weight: 400;
-  color: var(--accent);
-  font-size: 11px;
-}
-.row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 6px 0;
-}
-.row small {
-  margin-left: auto;
-  color: var(--muted);
-}
-.row select {
-  flex: 1;
-  min-width: 0;
-}
-.row-wrap {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 12px;
-}
-.slider {
-  display: block;
-  margin: 6px 0;
-  color: var(--text);
-}
-.slider input {
-  display: block;
-  width: 100%;
-  margin: 3px 0 0;
-  accent-color: var(--accent);
-}
-select,
-.num {
-  padding: 3px 6px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-}
-select option {
-  color: #111;
-}
-.num {
-  width: 64px;
-}
-input[type="checkbox"] {
-  accent-color: var(--accent);
-}
-.buttons {
-  display: flex;
-  gap: 6px;
-  margin: 6px 0;
-}
-.buttons button,
-.open-panel {
-  flex: 1;
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--card);
-  color: var(--text);
-  cursor: pointer;
-}
-.open-panel {
-  position: absolute;
-  right: 14px;
-  top: 14px;
-  flex: none;
-}
-.stats {
-  color: var(--muted);
-  font-size: 11px;
-  display: grid;
-  gap: 4px;
-  word-break: break-all;
 }
 </style>

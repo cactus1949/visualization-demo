@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { X } from "@lucide/vue";
 import { colormapBytes } from "../render/colormaps";
 
 const props = defineProps<{
@@ -128,7 +129,9 @@ const plotH = PLOT_H;
   <div v-if="grid" class="unfolded-plot">
     <div class="plot-head">
       <div class="plot-title">折线展开图</div>
-      <button type="button" title="关闭" @click="emit('close')">×</button>
+      <el-button text circle size="small" title="关闭" aria-label="关闭" @click="emit('close')">
+        <X :size="14" />
+      </el-button>
     </div>
     <div class="plot-body">
       <div class="y-col">
@@ -169,9 +172,10 @@ const plotH = PLOT_H;
 <style scoped>
 .unfolded-plot {
   position: absolute;
-  left: 18px;
+  left: calc(var(--rail-left, 0px) + 18px);
   /* Sit above the bottom-left ColorLegend so axis titles are never covered. */
   bottom: 108px;
+  transition: left 160ms ease;
   box-sizing: border-box;
   padding: 10px 12px 10px;
   background: rgba(8, 14, 22, 0.9);

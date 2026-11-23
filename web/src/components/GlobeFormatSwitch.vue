@@ -15,14 +15,14 @@ const formats = loadFormats();
 <template>
   <div class="row globe-format">
     <span>编码</span>
-    <button
-      v-for="f in formats"
-      :key="f.id"
-      type="button"
-      :class="{ on: modelValue === f.id }"
-      @click="emit('update:modelValue', f.id)"
+    <el-radio-group
+      :model-value="modelValue"
+      size="small"
+      @update:model-value="emit('update:modelValue', String($event))"
     >
-      {{ f.label }}
-    </button>
+      <el-radio-button v-for="f in formats" :key="f.id" :value="f.id">
+        {{ f.label }}
+      </el-radio-button>
+    </el-radio-group>
   </div>
 </template>

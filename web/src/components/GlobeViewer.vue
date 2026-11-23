@@ -569,8 +569,12 @@ onUnmounted(teardown);
       @set-cesium="emit('set-cesium', $event)"
     />
     <aside v-if="error" class="globe-panel">
-      <label class="row"><input type="checkbox" :checked="props.format?.id === 'sz3'" @change="emit('set-format', ($event.target as HTMLInputElement).checked ? 'sz3' : 'current')" /> SZ3</label>
-      <label class="row"><input type="checkbox" checked @change="emit('set-cesium', ($event.target as HTMLInputElement).checked)" /> Cesium</label>
+      <div class="row">
+        <el-checkbox :model-value="props.format?.id === 'sz3'" @update:model-value="emit('set-format', $event ? 'sz3' : 'current')">SZ3</el-checkbox>
+      </div>
+      <div class="row">
+        <el-checkbox :model-value="true" @update:model-value="emit('set-cesium', Boolean($event))">Cesium</el-checkbox>
+      </div>
     </aside>
     <p v-if="error" class="globe-error">{{ error }}</p>
   </div>
@@ -584,10 +588,7 @@ onUnmounted(teardown);
 }
 .globe-host {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: var(--chrome-left, 0px);
-  right: var(--chrome-right, 0px);
+  inset: 0;
 }
 .globe-host :deep(.cesium-credit-logoContainer) {
   display: none !important;

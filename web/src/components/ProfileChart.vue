@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { X } from "@lucide/vue";
 
 export type ProbeVariableOption = { name: string; label: string };
 
@@ -14,8 +15,9 @@ const props = defineProps<{
   signed: boolean;
   variable: string;
   variables: ProbeVariableOption[];
+  followMouse?: boolean;
 }>();
-const emit = defineEmits<{ close: []; "update:variable": [name: string] }>();
+const emit = defineEmits<{ close: []; "update:variable": [name: string]; "update:followMouse": [on: boolean] }>();
 
 const W = 268;
 const H = 176;
@@ -231,14 +233,30 @@ const xTitle = computed(() => (unitText.value ? `${props.label} (${unitText.valu
     <div class="head">
       <b>{{ pinned ? "固定探针" : "探针" }}</b>
       <span>{{ lon.toFixed(4) }}°E {{ lat.toFixed(4) }}°N</span>
-      <button v-if="pinned" class="x" type="button" title="关闭" @click="emit('close')">×</button>
+      <el-button v-if="pinned" class="x" text circle size="small" title="关闭" aria-label="关闭" @click="emit('close')">
+        <X :size="14" />
+      </el-button>
     </div>
-    <label class="var-row">
-      变量
-      <select :value="variable" @change="emit('update:variable', ($event.target as HTMLSelectElement).value)">
-        <option v-for="opt in variables" :key="opt.name" :value="opt.name">{{ opt.label }}</option>
-      </select>
-    </label>
+    <div class="var-row">
+      <span>变量</span>
+      <el-select
+        :model-value="variable"
+        size="small"
+        style="flex: 1; min-width: 0"
+        @update:model-value="emit('update:variable', String($event))"
+      >
+        <el-option v-for="opt in variables" :key="opt.name" :label="opt.label" :value="opt.name" />
+      </el-select>
+      <el-checkbox
+        v-if="followMouse !== undefined"
+        :model-value="followMouse"
+        size="small"
+        class="follow-check"
+        @update:model-value="emit('update:followMouse', Boolean($event))"
+      >
+        跟随鼠标
+      </el-checkbox>
+    </div>
     <svg
       ref="svgEl"
       :width="W"
@@ -374,6 +392,11 @@ const xTitle = computed(() => (unitText.value ? `${props.label} (${unitText.valu
   gap: 8px;
   margin-bottom: 6px;
   color: var(--muted);
+}
+.follow-check {
+  flex: none;
+  margin-right: 0;
+  height: 24px;
 }
 .var-row select {
   flex: 1;

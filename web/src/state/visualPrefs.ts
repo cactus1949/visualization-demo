@@ -237,7 +237,7 @@ export function loadVisualPrefs(store: PrefStore, knownColormaps: readonly strin
 export function saveVisualPrefs(store: PrefStore, prefs: VisualPrefs): { ok: boolean; message: string } {
   try {
     store.setItem(VISUAL_PREFS_KEY, JSON.stringify(prefs));
-    return { ok: true, message: "视觉设置已保存在这台浏览器" };
+    return { ok: true, message: "已保存" };
   } catch {
     return { ok: false, message: "这台浏览器不能保存设置" };
   }

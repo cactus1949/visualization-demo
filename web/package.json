@@ -13,8 +13,10 @@
     "format": "prettier --write src scripts vite.config.ts index.html"
   },
   "dependencies": {
+    "@lucide/vue": "^1.77.0",
     "@vitejs/plugin-vue": "latest",
     "cesium": "1.147.0",
+    "element-plus": "^2.14.8",
     "three": "0.187.0",
     "typescript": "6.0.3",
     "vite": "latest",

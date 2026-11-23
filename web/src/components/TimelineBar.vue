@@ -7,6 +7,7 @@
  * not-yet-loaded ticks = disabled grey at 0.40.
  */
 import { computed, ref } from "vue";
+import { Pause, Play, SkipBack, SkipForward } from "@lucide/vue";
 import { ANNOTATION_TOKENS as TK } from "../render/annotations/tokens";
 import { RATES, clockOf, setTime, stepFrame, type TimelineState } from "../state/timeline";
 
@@ -31,7 +32,7 @@ const vars = computed(() => ({
   "--tl-fixed": TK.colors.fixed,
   "--tl-preview": TK.colors.preview,
   "--tl-disabled": TK.colors.disabled,
-  "--tl-text": TK.colors.labelText,
+  "--tl-text": props.theme === "light" ? "#1c2d3a" : TK.colors.labelText,
   "--tl-handle": `${TK.sizes.handlePx}px`,
   "--tl-font": TK.type.fontFamily,
 }));
@@ -91,23 +92,28 @@ function toggleSmooth(): void {
 <template>
   <div class="timeline" :class="{ light: props.theme === 'light' }" :style="vars" @pointerdown.stop @wheel.stop>
     <div class="buttons">
-      <button type="button" class="tb" title="上一帧（←）" aria-label="上一帧" @click="step(-1)">
-        <svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 3h2v10H3zM13 3v10L6 8z" fill="currentColor" /></svg>
-      </button>
-      <button
-        type="button"
-        class="tb play"
-        :class="{ on: tl.playing }"
-        :title="tl.playing ? '暂停（空格）' : '播放（空格）'"
-        :aria-label="tl.playing ? '暂停' : '播放'"
-        @click="togglePlay"
-      >
-        <svg v-if="!tl.playing" viewBox="0 0 16 16" width="16" height="16"><path d="M4 2.5v11l9.5-5.5z" fill="currentColor" /></svg>
-        <svg v-else viewBox="0 0 16 16" width="16" height="16"><path d="M4 2.5h3v11H4zM9 2.5h3v11H9z" fill="currentColor" /></svg>
-      </button>
-      <button type="button" class="tb" title="下一帧（→）" aria-label="下一帧" @click="step(1)">
-        <svg viewBox="0 0 16 16" width="14" height="14"><path d="M11 3h2v10h-2zM3 3v10l7-5z" fill="currentColor" /></svg>
-      </button>
+      <el-tooltip content="上一帧（←）" placement="top" :show-after="200" :hide-after="0">
+        <button type="button" class="tb" aria-label="上一帧" @click="step(-1)">
+          <SkipBack :size="14" :stroke-width="2" />
+        </button>
+      </el-tooltip>
+      <el-tooltip :content="tl.playing ? '暂停（空格）' : '播放（空格）'" placement="top" :show-after="200" :hide-after="0">
+        <button
+          type="button"
+          class="tb play"
+          :class="{ on: tl.playing }"
+          :aria-label="tl.playing ? '暂停' : '播放'"
+          @click="togglePlay"
+        >
+          <Pause v-if="tl.playing" :size="16" :stroke-width="2.2" />
+          <Play v-else :size="16" :stroke-width="2.2" class="play-icon" />
+        </button>
+      </el-tooltip>
+      <el-tooltip content="下一帧（→）" placement="top" :show-after="200" :hide-after="0">
+        <button type="button" class="tb" aria-label="下一帧" @click="step(1)">
+          <SkipForward :size="14" :stroke-width="2" />
+        </button>
+      </el-tooltip>
     </div>
 
     <div class="track-wrap">
@@ -151,7 +157,7 @@ function toggleSmooth(): void {
       </div>
     </div>
 
-    <div class="readout" title="文件中的时刻（文件未标注时区）">
+    <div class="readout">
       <span class="date">{{ clock.date }}</span>
       <b>{{ clock.time }}</b>
       <small>{{ leadText }}</small>
@@ -164,21 +170,21 @@ function toggleSmooth(): void {
         :key="r"
         type="button"
         :class="{ on: tl.rate === r }"
-        :title="`1 小时数据播 ${(4 / r).toString()} 秒`"
         @click="setRate(r)"
       >
         {{ r }}×
       </button>
     </div>
-    <button
-      type="button"
-      class="smooth"
-      :class="{ on: tl.smooth }"
-      title="帧间平滑：在相邻两个整点之间做 GPU 插值（风场保模长）。关闭后按整点切换。"
-      @click="toggleSmooth"
-    >
-      平滑
-    </button>
+    <el-tooltip content="帧间平滑" placement="top" :show-after="250" :hide-after="0">
+      <button
+        type="button"
+        class="smooth"
+        :class="{ on: tl.smooth }"
+        @click="toggleSmooth"
+      >
+        平滑
+      </button>
+    </el-tooltip>
   </div>
 </template>
 
@@ -186,12 +192,13 @@ function toggleSmooth(): void {
 .timeline {
   position: absolute;
   z-index: 6;
-  left: 50%;
+  left: calc(var(--rail-left, 0px) + (100% - var(--rail-left, 0px) - var(--rail-right, 0px)) / 2);
   bottom: 14px;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  max-width: calc(100% - var(--rail-left, 0px) - var(--rail-right, 0px) - 140px);
   padding: 8px 12px 8px 10px;
   border-radius: 12px;
   background: rgba(8, 14, 22, 0.78);
@@ -237,9 +244,14 @@ function toggleSmooth(): void {
 .tb.play.on {
   background: rgba(255, 194, 71, 0.16);
 }
+.play-icon {
+  margin-left: 1px;
+}
 .track-wrap {
   position: relative;
-  width: 420px;
+  flex: 1 1 320px;
+  min-width: 180px;
+  width: clamp(180px, 28vw, 420px);
   padding-top: 15px;
 }
 .tick-labels {
