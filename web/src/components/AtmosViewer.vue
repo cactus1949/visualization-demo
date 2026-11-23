@@ -13,7 +13,8 @@ import { floatRange, domainOf, textureUploadMs, type Domain } from "../render/fi
 import { TimeFields, type TimeResource } from "../render/timeFields";
 import { particleRanges, type ParticleRanges } from "../render/particleRanges";
 import { colorScaleEnds, colorScaleModeOf, type ColorScaleMode } from "../state/colorScale";
-import { elementRows, toggleMode } from "../state/elementMode";
+import { selectLayerVariable, toggleLayer } from "../state/elementMode";
+import IconButton from "./IconButton.vue";
 import { reduceSectionChrome, sectionChromeWhenEnabled } from "../state/sectionChrome";
 import { clampFloatBox } from "../state/floatFrame";
 import {
@@ -168,16 +169,28 @@ function onCesiumToggle(on: boolean, event: Event): void {
   emit("set-cesium", on);
 }
 
-function onGroundIcon(name: string): void {
-  const next = toggleMode({ on: layers.ground, variable: layers.groundVar }, name);
-  layers.groundVar = next.variable;
-  layers.ground = next.on;
+function onGroundToggle(): void {
+  layers.ground = toggleLayer({ on: layers.ground, variable: layers.groundVar }).on;
 }
 
-function onVolumeIcon(name: string): void {
-  const next = toggleMode({ on: layers.volume, variable: layers.volumeVar }, name);
-  layers.volumeVar = next.variable;
+function onGroundVar(name: string): void {
+  const next = selectLayerVariable({ on: layers.ground, variable: layers.groundVar }, name);
+  layers.ground = next.on;
+  layers.groundVar = next.variable;
+}
+
+function onVolumeToggle(): void {
+  layers.volume = toggleLayer({ on: layers.volume, variable: layers.volumeVar }).on;
+}
+
+function onVolumeVar(name: string): void {
+  const next = selectLayerVariable({ on: layers.volume, variable: layers.volumeVar }, name);
   layers.volume = next.on;
+  layers.volumeVar = next.variable;
+}
+
+function onParticleToggle(): void {
+  layers.particles = !layers.particles;
 }
 
 function globeStatus(): { terrain?: boolean; style?: string; k?: number } | null {
@@ -221,7 +234,7 @@ function setGlobeView(name: string): void {
 
 function chromeLeft(): number {
   if (!props.showPanel || embed) return 0;
-  return elementRailOpen.value ? 252 : 36;
+  return elementRailOpen.value ? 220 : 40;
 }
 
 function publishChrome(): void {
@@ -234,8 +247,13 @@ function publishChrome(): void {
   globe.style.setProperty("--chrome-right", `${Math.round(right)}px`);
 }
 
-function fitNarrowChrome(): void {
-  if (window.innerWidth < 1100 && settingsOpen.value) elementRailOpen.value = false;
+function onChromeResize(): void {
+  fitNarrowChrome();
+}
+
+function fitNarrowChrome(width?: number): void {
+  const measured = typeof width === "number" ? width : document.documentElement.clientWidth;
+  if (measured > 0 && measured < 1100 && settingsOpen.value) elementRailOpen.value = false;
   void nextTick().then(() => publishChrome());
   clampSectionFloat();
 }
@@ -703,8 +721,6 @@ const variables2D = computed(() => {
   }
   return list;
 });
-const rows = computed(() => elementRows(variables2D.value, variables3D.value));
-
 function labelOf(name: string): string {
   if (name === SPEED) return "水平风速";
   if (name === "direction") return "风向";
@@ -4322,17 +4338,27 @@ watch([elementRailOpen, settingsOpen], () => {
   void nextTick().then(() => publishChrome());
 });
 const narrowMedia = typeof window === "undefined" ? null : window.matchMedia("(max-width: 1100px)");
+let railObserver: ResizeObserver | null = null;
 onMounted(() => {
   document.addEventListener("fullscreenchange", syncFullscreen);
-  window.addEventListener("resize", fitNarrowChrome);
-  narrowMedia?.addEventListener("change", fitNarrowChrome);
+  window.addEventListener("resize", onChromeResize);
+  narrowMedia?.addEventListener("change", onChromeResize);
+  if (viewerRoot.value) {
+    railObserver = new ResizeObserver((entries) => {
+      fitNarrowChrome(entries[0]?.contentRect.width ?? document.documentElement.clientWidth);
+    });
+    railObserver.observe(viewerRoot.value);
+  }
+  void nextTick().then(() => publishChrome());
   void start();
 });
 onBeforeUnmount(() => {
   disposed = true;
   document.removeEventListener("fullscreenchange", syncFullscreen);
-  window.removeEventListener("resize", fitNarrowChrome);
-  narrowMedia?.removeEventListener("change", fitNarrowChrome);
+  window.removeEventListener("resize", onChromeResize);
+  narrowMedia?.removeEventListener("change", onChromeResize);
+  railObserver?.disconnect();
+  railObserver = null;
   // the Cesium canvas outlives this component: remove exactly what start() added
   if (pointerTarget) for (const [name, listener] of pointerListeners()) pointerTarget.removeEventListener(name, listener);
   pointerTarget = null;
@@ -4364,52 +4390,77 @@ onBeforeUnmount(() => {
   <div ref="viewerRoot" class="viewer" :class="[view.theme, { globe: globeMode }]">
     <aside v-if="showPanel && !embed" class="element-rail" :class="{ collapsed: !elementRailOpen }">
       <div class="rail-head">
-        <strong v-if="elementRailOpen">气象要素</strong>
-        <button type="button" class="rail-fold" :aria-expanded="elementRailOpen" :aria-label="elementRailOpen ? '收起要素列表' : '展开要素列表'" @click="elementRailOpen = !elementRailOpen">{{ elementRailOpen ? "‹" : "›" }}</button>
+        <strong v-if="elementRailOpen">图层</strong>
+        <IconButton
+          class="rail-fold"
+          compact
+          :label="elementRailOpen ? '收起图层' : '展开图层'"
+          :hint="elementRailOpen ? '收起左侧图层栏' : '展开左侧图层栏'"
+          align="start"
+          @click="elementRailOpen = !elementRailOpen"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              v-if="elementRailOpen"
+              d="M14.5 6 8.5 12l6 6"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              v-else
+              d="M9.5 6 15.5 12l-6 6"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </IconButton>
       </div>
       <div v-show="elementRailOpen" class="rail-body">
-        <ul class="element-list">
-          <li v-for="row in rows" :key="row.id" class="element-row">
-            <span class="element-name">{{ row.label }}</span>
-            <span class="element-modes">
-              <button
-                v-if="row.ground"
-                type="button"
-                class="mode-icon"
-                :class="{ on: layers.ground && layers.groundVar === row.ground }"
-                :aria-pressed="layers.ground && layers.groundVar === row.ground"
-                :aria-label="`${row.label} 地面色斑`"
-                title="地面色斑：把这一要素铺在地面。再点关闭。同一时间地面只显示一个要素。"
-                @click="onGroundIcon(row.ground!)"
-              >斑</button>
-              <button
-                v-if="row.volume"
-                type="button"
-                class="mode-icon"
-                :class="{ on: layers.volume && layers.volumeVar === row.volume }"
-                :aria-pressed="layers.volume && layers.volumeVar === row.volume"
-                :aria-label="`${row.label} 体渲染`"
-                title="体渲染：用三维体显示这一要素。再点关闭。同一时间体只显示一个要素，并会关掉剖面。"
-                @click="onVolumeIcon(row.volume!)"
-              >体</button>
-              <button
-                v-if="row.particles"
-                type="button"
-                class="mode-icon"
-                :class="{ on: layers.particles }"
-                :aria-pressed="layers.particles"
-                aria-label="风粒子"
-                title="风粒子：沿三维风移动的流线。只属于风场，再点关闭。"
-                @click="layers.particles = !layers.particles"
-              >粒</button>
-            </span>
-          </li>
-        </ul>
+        <div class="layer-block">
+          <div class="layer-row">
+            <svg class="layer-mark" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 15.5 8 10l4 3 3.2-4.2L20 15.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" />
+              <path d="M4 18.5h16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            </svg>
+            <span class="layer-name">地面色斑</span>
+            <button type="button" class="switch" role="switch" :aria-checked="layers.ground" aria-label="地面色斑" @click="onGroundToggle"><span></span></button>
+          </div>
+          <select class="layer-select" :class="{ idle: !layers.ground }" :value="layers.groundVar" aria-label="地面变量" @change="onGroundVar(($event.target as HTMLSelectElement).value)">
+            <option v-for="v in variables2D" :key="v.name" :value="v.name">{{ v.label }}</option>
+          </select>
+          <div class="layer-row">
+            <svg class="layer-mark" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3.8 20 8v8.2L12 20.2 4 16.2V8L12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+              <path d="M12 12.1 20 8M12 12.1 4 8M12 12.1v8.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+            </svg>
+            <span class="layer-name">体渲染</span>
+            <button type="button" class="switch" role="switch" :aria-checked="layers.volume" aria-label="体渲染" @click="onVolumeToggle"><span></span></button>
+          </div>
+          <select class="layer-select" :class="{ idle: !layers.volume }" :value="layers.volumeVar" aria-label="体渲染变量" @change="onVolumeVar(($event.target as HTMLSelectElement).value)">
+            <option v-for="v in variables3D" :key="v.name" :value="v.name">{{ v.label }}</option>
+          </select>
+          <div class="layer-row">
+            <svg class="layer-mark" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="7" cy="15" r="1.3" fill="currentColor" />
+              <circle cx="12" cy="9.5" r="1.3" fill="currentColor" />
+              <circle cx="17" cy="14" r="1.3" fill="currentColor" />
+              <path d="M7 15c1.2-2.6 2.8-4 5-5.5M12 9.5c1.5 1.2 3 2.8 5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            </svg>
+            <span class="layer-name">风粒子</span>
+            <button type="button" class="switch" role="switch" :aria-checked="layers.particles" aria-label="风粒子" @click="onParticleToggle"><span></span></button>
+          </div>
+        </div>
         <div class="scene-group">
           <div class="scene-title">场景</div>
           <label class="row"><input type="checkbox" :checked="globeMode" @change="onCesiumToggle(($event.target as HTMLInputElement).checked, $event)" /> Cesium 地球</label>
           <label class="row"><input v-model="layers.buildings" type="checkbox" /> 建筑白膜</label>
-          <label v-if="globeMode" class="row"><input type="checkbox" :checked="globeTerrain" @change="setGlobeTerrain(($event.target as HTMLInputElement).checked)" /> 地形（自建 DEM）</label>
+          <label v-if="globeMode" class="row"><input type="checkbox" :checked="globeTerrain" @change="setGlobeTerrain(($event.target as HTMLInputElement).checked)" /> 地形</label>
         </div>
       </div>
     </aside>
@@ -4479,40 +4530,52 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="showPanel && !embed" class="stage-tools">
-      <button
-        type="button"
-        class="tool-icon"
-        :class="{ on: section.enabled }"
-        :aria-pressed="section.enabled"
-        aria-label="剖面"
-        title="剖面：打开经度剖面和配置。再点关闭剖面。"
+      <IconButton
+        label="剖面"
+        hint="打开经度剖面和配置。剖面已经打开时，再点这里就关掉。"
+        :pressed="section.enabled"
         @click="onSectionMain"
-      >剖</button>
-      <button
-        type="button"
-        class="tool-icon"
-        :aria-pressed="sectionFloatOpen"
-        aria-label="剖面设置"
-        title="剖面设置：只打开配置，不改变剖面是否显示。"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 17.5V8.2L12 4.8l7 3.4v9.3L12 21.2 5 17.5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+          <path d="M12 4.8v16.4" fill="none" stroke="currentColor" stroke-width="1.6" />
+        </svg>
+      </IconButton>
+      <IconButton
+        label="剖面设置"
+        hint="只打开剖面配置，不改变剖面是否在画。"
+        :pressed="sectionFloatOpen"
         @click="onSectionSettings"
-      >设</button>
-      <button
-        type="button"
-        class="tool-icon"
-        :class="{ on: layers.probe }"
-        :aria-pressed="layers.probe"
-        aria-label="探针"
-        title="探针：单击固定一点并看垂直廓线。再点关闭。"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 8h14M5 16h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          <circle cx="9" cy="8" r="2.1" fill="none" stroke="currentColor" stroke-width="1.6" />
+          <circle cx="15" cy="16" r="2.1" fill="none" stroke="currentColor" stroke-width="1.6" />
+        </svg>
+      </IconButton>
+      <IconButton
+        label="探针"
+        hint="在地面点一下，固定该点并看垂直廓线。再点关闭。"
+        :pressed="layers.probe"
         @click="layers.probe = !layers.probe"
-      >针</button>
-      <button
-        type="button"
-        class="tool-icon gear"
-        :aria-pressed="settingsOpen"
-        aria-label="视觉设置"
-        title="视觉设置：粒子、外观和视图。改动立即生效。"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6" />
+          <path d="M12 4.2v2.6M12 17.2v2.6M4.2 12h2.6M17.2 12h2.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          <circle cx="12" cy="12" r="1.3" fill="currentColor" />
+        </svg>
+      </IconButton>
+      <IconButton
+        label="视觉设置"
+        hint="粒子、色标和视图。改动马上出现在画面上。"
+        :pressed="settingsOpen"
         @click="openSettings"
-      >⚙</button>
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6" />
+          <path d="M12 3.4v2.2M12 18.4v2.2M3.4 12h2.2M18.4 12h2.2M5.9 5.9l1.6 1.6M16.5 16.5l1.6 1.6M18.1 5.9l-1.6 1.6M7.5 16.5 5.9 18.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+        </svg>
+      </IconButton>
     </div>
     <div
       v-if="sectionFloatOpen"
@@ -4525,8 +4588,28 @@ onBeforeUnmount(() => {
       <div class="float-head" @pointerdown="onSectionFloatDrag">
         <strong>剖面配置</strong>
         <span class="float-actions">
-          <button type="button" :aria-expanded="!sectionFloatCollapsed" aria-label="收起剖面配置" title="收起配置，剖面继续显示" @click="onSectionFloatCollapse">{{ sectionFloatCollapsed ? "展" : "—" }}</button>
-          <button type="button" aria-label="关闭剖面配置" title="关闭配置，剖面继续显示" @click="onSectionFloatClose">×</button>
+          <IconButton
+            compact
+            :label="sectionFloatCollapsed ? '展开剖面配置' : '收起剖面配置'"
+            :hint="sectionFloatCollapsed ? '展开配置。剖面继续显示。' : '收起配置。剖面继续显示。'"
+            @click="onSectionFloatCollapse"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                :d="sectionFloatCollapsed ? 'M6 9.5 12 15.5 18 9.5' : 'M6 14.5 12 8.5 18 14.5'"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </IconButton>
+          <IconButton compact label="关闭剖面配置" hint="关掉这个配置窗。剖面继续显示。" @click="onSectionFloatClose">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 7l10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+            </svg>
+          </IconButton>
         </span>
       </div>
       <div v-show="!sectionFloatCollapsed" class="float-body">
@@ -4590,13 +4673,14 @@ onBeforeUnmount(() => {
 
     <aside v-if="settingsOpen && showPanel && !embed" class="settings-rail">
       <div class="panel-head">
-        <div>
-          <div class="eyebrow">视觉设置</div>
-          <h1>低空风场可视化</h1>
-        </div>
-        <button class="icon" type="button" title="关闭设置" aria-label="关闭设置" @click="settingsOpen = false">×</button>
+        <strong>视觉设置</strong>
+        <IconButton compact label="关闭设置" hint="关掉设置栏。图层和当前调整都还在。" align="start" @click="settingsOpen = false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 7l10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+        </IconButton>
       </div>
-      <p class="prefs-note">改动立即生效，左侧开关会一起变。保存只留在这台浏览器。</p>
+      <p class="prefs-note">改动马上上屏。保存只写在这台浏览器。</p>
       <div class="prefs-actions">
         <button type="button" @click="saveVisualSettings">保存</button>
         <button type="button" @click="restoreVisualDefaults">恢复默认</button>
@@ -4711,6 +4795,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-show="settingsTab === 'particles'">
+        <label class="row"><input type="checkbox" :checked="layers.particles" @change="onParticleToggle" />显示风粒子</label>
         <label class="slider"
           >粒子数量 {{ particleParams.count.toLocaleString() }}
           <input
@@ -4872,6 +4957,7 @@ onBeforeUnmount(() => {
   --text: #dce9f2;
   --muted: #87a3b5;
   --accent: #5fd3e6;
+  --accent-soft: rgba(95, 211, 230, 0.22);
   position: relative;
   width: 100%;
   height: 100%;
@@ -4911,46 +4997,72 @@ onBeforeUnmount(() => {
   color: var(--text);
   z-index: 6;
 }
-.element-rail { width: 252px; border-right: 1px solid var(--line); }
-.element-rail.collapsed { width: 36px; }
-.settings-rail { width: 320px; border-left: 1px solid var(--line); padding: 12px 14px; }
+.element-rail { width: 220px; border-right: 1px solid var(--line); }
+.element-rail.collapsed { width: 40px; }
+.settings-rail { width: 320px; border-left: 1px solid var(--line); padding: 10px 12px; }
 .stage { position: relative; flex: 1; min-width: 0; height: 100%; }
 .rail-head, .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.rail-head { padding: 8px; }
-.rail-fold, .float-actions button, .mode-icon, .tool-icon {
+.rail-head { padding: 4px 6px; }
+.panel-head strong { font-size: 13px; }
+.element-rail.collapsed .rail-head { justify-content: center; }
+.layer-block { display: flex; flex-direction: column; gap: 8px; padding: 4px 10px 8px; }
+.layer-row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.layer-mark { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.layer-name { flex: 1; min-width: 0; }
+.layer-select { width: 100%; margin: -2px 0 2px; }
+.layer-select.idle { opacity: 0.6; }
+.switch {
+  width: 34px;
+  height: 18px;
+  padding: 1px;
   border: 1px solid var(--line);
+  border-radius: 9px;
   background: transparent;
-  color: inherit;
-  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  flex: none;
 }
-.mode-icon, .tool-icon { width: 28px; height: 28px; padding: 0; }
-.mode-icon.on, .tool-icon.on, .mode-icon[aria-pressed="true"], .tool-icon[aria-pressed="true"] {
-  border-color: var(--accent);
-  color: var(--accent);
+.switch span {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
 }
-.mode-icon:focus-visible, .tool-icon:focus-visible, .rail-fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.element-list { list-style: none; margin: 0; padding: 0 8px 8px; }
-.element-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--line); }
-.element-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.element-modes { display: inline-flex; gap: 4px; flex: none; }
-.scene-group { padding: 8px; }
-.scene-title { color: var(--muted); margin-bottom: 4px; }
-.stage-tools { position: absolute; z-index: 8; top: 12px; right: 12px; display: flex; gap: 6px; }
+.switch[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
+.switch[aria-checked="true"] span { margin-left: 14px; background: #04141c; }
+.viewer.light .switch[aria-checked="true"] span { background: #fff; }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.scene-group { padding: 8px 10px 12px; border-top: 1px solid var(--line); }
+.scene-title { color: var(--muted); margin-bottom: 2px; font-size: 11px; }
+.stage-tools {
+  position: absolute;
+  z-index: 8;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(10px);
+}
 .section-float {
   position: absolute;
   z-index: 9;
-  top: 52px;
+  top: 108px;
   right: 12px;
   width: min(300px, calc(100% - 24px));
   max-height: calc(100% - 120px);
-  overflow: auto;
+  overflow: visible;
   padding: 8px 10px;
   border-radius: 10px;
   background: var(--panel);
   border: 1px solid var(--line);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
 }
-.section-float.collapsed { max-height: none; overflow: hidden; }
+.section-float.collapsed { max-height: none; }
+.float-body { max-height: min(560px, calc(100vh - 180px)); overflow: auto; }
 .float-head { display: flex; justify-content: space-between; align-items: center; cursor: grab; user-select: none; }
 .float-actions { display: inline-flex; gap: 4px; }
 .prefs-note, .prefs-message { color: var(--muted); margin: 6px 0; }
@@ -4966,6 +5078,8 @@ onBeforeUnmount(() => {
     bottom: 96px;
   }
   .settings-rail { width: min(320px, calc(100% - 320px)); }
+  .viewer:has(.settings-rail) .element-rail { width: 40px; }
+  .viewer:has(.settings-rail) .rail-body { display: none; }
 }
 .viewer.light {
   --card: rgba(250, 252, 255, 0.82);
@@ -4974,6 +5088,7 @@ onBeforeUnmount(() => {
   --text: #1c2d3a;
   --muted: #5d7384;
   --accent: #0f8aa3;
+  --accent-soft: rgba(15, 138, 163, 0.16);
 }
 .canvas {
   display: block;

@@ -1,32 +1,29 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { elementRows, toggleMode } from "./elementMode.ts";
+import { selectLayerVariable, toggleLayer } from "./elementMode.ts";
 
-describe("element rows", () => {
-  it("puts particles only on horizontal wind, and ground and volume stay separate", () => {
-    const rows = elementRows(
-      [
-        { name: "none", label: "无" },
-        { name: "speed0", label: "近地面风速" },
-        { name: "t2m", label: "2米气温 (t2m)" },
-      ],
-      [
-        { name: "speed", label: "水平风速" },
-        { name: "u_gust", label: "阵风 (u_gust)" },
-        { name: "tke", label: "湍动能 (tke)" },
-      ],
-    );
-    assert.equal(rows.filter((row) => row.particles).length, 1);
-    assert.equal(rows[0]!.particles, true);
-    assert.equal(rows.find((row) => row.id === "t2m")?.volume, null);
-    assert.equal(rows.find((row) => row.id === "u_gust")?.ground, null);
-    assert.equal(rows.some((row) => row.id === "none" || row.id === "speed0"), false);
+describe("layer switch and dropdown", () => {
+  it("flips only the switch and keeps the current variable", () => {
+    assert.deepEqual(toggleLayer({ on: true, variable: "speed0" }), { on: false, variable: "speed0" });
+    assert.deepEqual(toggleLayer({ on: false, variable: "t2m" }), { on: true, variable: "t2m" });
   });
 
-  it("replaces the variable of one mode and turns that mode off when the same icon is clicked again", () => {
-    const replaced = toggleMode({ on: true, variable: "speed" }, "u_gust");
-    assert.deepEqual(replaced, { on: true, variable: "u_gust" });
-    const closed = toggleMode(replaced, "u_gust");
-    assert.deepEqual(closed, { on: false, variable: "u_gust" });
+  it("replaces the variable without turning the layer on or off", () => {
+    assert.deepEqual(selectLayerVariable({ on: true, variable: "speed" }, "u_gust"), {
+      on: true,
+      variable: "u_gust",
+    });
+    assert.deepEqual(selectLayerVariable({ on: false, variable: "speed" }, "tke"), {
+      on: false,
+      variable: "tke",
+    });
+  });
+
+  it("keeps a ground choice from changing the volume choice", () => {
+    const ground = selectLayerVariable({ on: true, variable: "speed0" }, "t2m");
+    const volume = toggleLayer({ on: true, variable: "speed" });
+    assert.equal(ground.variable, "t2m");
+    assert.equal(ground.on, true);
+    assert.deepEqual(volume, { on: false, variable: "speed" });
   });
 });
