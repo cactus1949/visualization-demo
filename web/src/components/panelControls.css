@@ -1,0 +1,106 @@
+/* Shared panel form controls used by LayerRail, SectionFloat, and SettingsDrawer. */
+
+.viewer .form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.viewer .field-label {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 32px;
+}
+
+.viewer .field-control {
+  flex: 1;
+  min-width: 0;
+}
+
+.viewer .slider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.viewer .slider-field .el-slider {
+  height: 22px;
+  padding: 0 6px;
+}
+
+.viewer .slider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.viewer .slider-head > span:first-child {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.viewer .slider-head .val {
+  color: var(--accent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.viewer .check-row {
+  display: flex;
+  align-items: center;
+}
+
+.viewer .row-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding-top: 2px;
+}
+
+.viewer .check-stack .el-checkbox,
+.viewer .check-row .el-checkbox,
+.viewer .row-wrap .el-checkbox {
+  height: 26px;
+  margin-right: 0;
+}
+
+.viewer .inline-collapse {
+  margin-top: 2px;
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-content-bg-color: transparent;
+  --el-collapse-border-color: var(--line);
+  --el-collapse-header-height: 34px;
+  --el-collapse-header-font-size: 12px;
+}
+
+.viewer .inline-collapse .el-collapse-item__content {
+  padding-bottom: 6px;
+}
+
+.viewer .collapse-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.viewer .panel-warn {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 194, 71, 0.12);
+  border: 1px solid rgba(255, 194, 71, 0.3);
+  font-size: 11px;
+  line-height: 1.4;
+  color: #ffc247;
+}
+
+.viewer.light .panel-warn {
+  color: #9a6b12;
+  background: rgba(255, 194, 71, 0.18);
+}
