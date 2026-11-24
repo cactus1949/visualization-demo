@@ -157,6 +157,7 @@ export function discardedFraction(
     filterEnable?: boolean;
     lowAlpha?: boolean;
     lowThreshold?: number;
+    hideZero?: boolean;
   },
 ): number {
   if (!data.length) return 1;
@@ -168,6 +169,10 @@ export function discardedFraction(
     total += 1;
     const v = data[i]!;
     if (!Number.isFinite(v)) { total -= 1; continue; }
+    if (opts.hideZero && Math.abs(v) <= 1e-6) {
+      dead += 1;
+      continue;
+    }
     if (
       opts.filterEnable &&
       (v < (opts.filterMin ?? -Infinity) - 1e-6 || v > (opts.filterMax ?? Infinity) + 1e-6)

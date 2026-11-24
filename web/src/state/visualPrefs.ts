@@ -31,7 +31,7 @@ export interface VisualPrefs {
   buildingTintEnabled?: boolean;
   buildingTintStrength?: number;
   volumeOpacity?: number;
-  volumeThreshold?: number;
+  volumeHideZero?: boolean;
   cutLowAlpha?: boolean;
   cutLowThreshold?: number;
   filterSlices?: boolean;
@@ -42,8 +42,7 @@ export interface VisualPrefs {
     min?: number;
     max?: number;
     opacity?: number;
-    lowAlpha?: boolean;
-    lowThreshold?: number;
+    hideZero?: boolean;
     contours?: number;
     heightM?: number;
     offsetKm?: number;
@@ -165,8 +164,8 @@ export function parseVisualPrefs(raw: string | null, knownColormaps: readonly st
   if (tintStrength !== null) prefs.buildingTintStrength = clamp(tintStrength, 0, 1);
   const volumeOpacity = finite(src.volumeOpacity);
   if (volumeOpacity !== null) prefs.volumeOpacity = clamp(volumeOpacity, 0.05, 2);
-  const volumeThreshold = finite(src.volumeThreshold);
-  if (volumeThreshold !== null) prefs.volumeThreshold = clamp(volumeThreshold, 0, 0.95);
+  const volumeHideZero = bool(src.volumeHideZero);
+  if (volumeHideZero !== undefined) prefs.volumeHideZero = volumeHideZero;
   const cutLow = bool(src.cutLowAlpha);
   if (cutLow !== undefined) prefs.cutLowAlpha = cutLow;
   const cutThr = finite(src.cutLowThreshold);
@@ -196,10 +195,8 @@ export function parseVisualPrefs(raw: string | null, knownColormaps: readonly st
     if (max !== null) style.max = max;
     const opacity = finite(s.opacity);
     if (opacity !== null) style.opacity = clamp(opacity, 0.1, 1);
-    const lowAlpha = bool(s.lowAlpha);
-    if (lowAlpha !== undefined) style.lowAlpha = lowAlpha;
-    const lowThreshold = finite(s.lowThreshold);
-    if (lowThreshold !== null) style.lowThreshold = clamp(lowThreshold, 0, 0.6);
+    const hideZero = bool(s.hideZero);
+    if (hideZero !== undefined) style.hideZero = hideZero;
     const contours = finite(s.contours);
     if (contours !== null) style.contours = clamp(Math.round(contours), 0, 30);
     const heightM = finite(s.heightM);

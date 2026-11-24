@@ -32,6 +32,8 @@ export interface SliceStyle {
   /** Value-based alpha: normalized t below `lowThreshold` fades to transparent. */
   lowAlpha?: boolean;
   lowThreshold?: number;
+  /** Hide physical zero values (|v| <= 1e-6) without clipping non-zero low values. */
+  hideZero?: boolean;
 }
 
 /** Shared ramp width above the low-alpha threshold (normalized units). */
@@ -74,6 +76,7 @@ uniform float uContours;
 uniform float uHighlight;
 uniform float uLowAlpha;
 uniform float uLowThreshold;
+uniform float uHideZero;
 ${GLSL_LOW_ALPHA}
 in vec3 vLocal;
 out vec4 outColor;
@@ -82,6 +85,7 @@ void main() {${globe ? LOGDEPTH_FRAGMENT : ""}
   if (!insideDomain(vLocal)) discard;
   float value = texture(uField, localToTex(vLocal)).r;
   if (isnan(value)) discard;
+  if (uHideZero > 0.5 && abs(value) <= 1e-6) discard;
   if (uFilterEnable > 0.5 && (value < uFilterMin - 1e-6 || value > uFilterMax + 1e-6)) discard;
   float t = clamp((value - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
   vec3 color = texture(uColormap, vec2(t, 0.5)).rgb;
@@ -131,6 +135,7 @@ export class SliceMaterial extends THREE.ShaderMaterial {
         uHighlight: { value: 0 },
         uLowAlpha: { value: 0 },
         uLowThreshold: { value: 0.15 },
+        uHideZero: { value: 0 },
       },
       transparent: true,
       side: THREE.DoubleSide,
@@ -162,6 +167,7 @@ export class SliceMaterial extends THREE.ShaderMaterial {
     this.uniforms.uContours.value = style.contours;
     this.uniforms.uLowAlpha.value = style.lowAlpha ? 1 : 0;
     this.uniforms.uLowThreshold.value = style.lowThreshold ?? 0.15;
+    this.uniforms.uHideZero.value = style.hideZero ? 1 : 0;
     this.lowAlpha = Boolean(style.lowAlpha);
     // Slices always write depth: particles behind a slice are hidden by it (drawn later),
     // opaque buildings are drawn earlier and stay visible through translucent slices.

@@ -24,6 +24,7 @@ export interface SectionFloatState {
   contours: number;
   lowAlpha: boolean;
   lowThreshold: number;
+  hideZero: boolean;
   points: unknown[];
   box: {
     heightMinM: number;
@@ -244,15 +245,7 @@ const SECTION_KINDS: readonly { id: SectionKind; label: string }[] = [
             </div>
 
             <div class="check-row">
-              <el-checkbox v-model="section.lowAlpha">低值透明</el-checkbox>
-            </div>
-
-            <div v-if="section.lowAlpha" class="slider-field">
-              <div class="slider-head">
-                <span>透明阈值</span>
-                <span class="val">{{ (section.lowThreshold * 100).toFixed(0) }}%</span>
-              </div>
-              <el-slider v-model="section.lowThreshold" :min="0" :max="0.6" :step="0.01" :show-tooltip="false" />
+              <el-checkbox v-model="section.hideZero">隐藏零值</el-checkbox>
             </div>
           </div>
         </el-collapse-item>

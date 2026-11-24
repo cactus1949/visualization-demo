@@ -45,6 +45,7 @@ uniform float uSurfFilterEnable[16];
 uniform float uSurfContours[16];
 uniform float uSurfLowAlpha[16];
 uniform float uSurfLowThreshold[16];
+uniform float uSurfHideZero[16];
 `;
 const SURF_SPAN_GLSL = /* glsl */ `bool insideAA(vec3 p, vec4 p0, vec4 p1) {
   return p.x >= p0.w - 1e-5 && p.x <= p1.x + 1e-5 && p.z >= p1.y - 1e-5 && p.z <= p1.z + 1e-5;
@@ -77,6 +78,7 @@ const SURF_COLOR_GLSL = /* glsl */ `vec4 surfaceColor(int i, vec3 p) {
     if (isnan(v)) return vec4(0.0);
     c = texture(uColormap, vec2(clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0), 0.5));
   }
+  if (uSurfHideZero[i] > 0.5 && abs(v) <= 1e-6) return vec4(0.0);
   if (uSurfFilterEnable[i] > 0.5 && (v < uSurfFilterMin[i] - 1e-6 || v > uSurfFilterMax[i] + 1e-6))
     return vec4(0.0);
   float n = clamp((v - uSurfMin[i]) / max(uSurfMax[i] - uSurfMin[i], 1e-9), 0.0, 1.0);
@@ -112,6 +114,7 @@ uniform float uMax;
 uniform float uFilterMin;
 uniform float uFilterMax;
 uniform float uFilterEnable;
+uniform float uHideZero;
 uniform float uThreshold;
 uniform float uOpacity;
 uniform float uSteps;
@@ -225,6 +228,7 @@ ${SURF_COLOR_GLSL}void main() {
       continue;
     float v = texture(uField, localToTex(p)).r;
     if (isnan(v)) continue;
+    if (uHideZero > 0.5 && abs(v) <= 1e-6) continue;
     if (uFilterEnable > 0.5 && (v < uFilterMin - 1e-6 || v > uFilterMax + 1e-6)) continue;
     float n = clamp((v - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
     if (n < uThreshold) continue;
@@ -234,7 +238,7 @@ ${SURF_COLOR_GLSL}void main() {
     // Beer-Lambert of this step. The linear form a = sigma * dt exceeds 1 at a coarse
     // step count and the first sample becomes an opaque wall. exp keeps the same
     // density the opacity slider asked for when the step is small.
-    float sigma = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * 6.0;
+    float sigma = uOpacity * lowAlphaFactor(n, step(1e-6, uThreshold), uThreshold) * (0.35 + 0.65 * n) * 6.0;
     float a = 1.0 - exp(-sigma * dt);
     acc.rgb += (1.0 - acc.a) * a * c;
     acc.a += (1.0 - acc.a) * a;
@@ -290,6 +294,7 @@ uniform float uMax;
 uniform float uFilterMin;
 uniform float uFilterMax;
 uniform float uFilterEnable;
+uniform float uHideZero;
 uniform float uThreshold;
 uniform float uOpacity;
 uniform float uSteps;
@@ -434,11 +439,12 @@ void main() {
     if (r < uCutLo.y || r > uCutHi.y) continue;
     float v = texture(uField, shellToTex(uvh.xy, r)).r;
     if (isnan(v)) continue;
+    if (uHideZero > 0.5 && abs(v) <= 1e-6) continue;
     if (uFilterEnable > 0.5 && (v < uFilterMin - 1e-6 || v > uFilterMax + 1e-6)) continue;
     float n = clamp((v - uMin) / max(uMax - uMin, 1e-9), 0.0, 1.0);
     if (n < uThreshold) continue;
     vec3 c = texture(uColormap, vec2(n, 0.5)).rgb;
-    float sigma = uOpacity * lowAlphaFactor(n, 1.0, uThreshold) * (0.35 + 0.65 * n) * 6.0;
+    float sigma = uOpacity * lowAlphaFactor(n, step(1e-6, uThreshold), uThreshold) * (0.35 + 0.65 * n) * 6.0;
     float a = 1.0 - exp(-sigma * stepKm);
     acc.rgb += (1.0 - acc.a) * a * c;
     acc.a += (1.0 - acc.a) * a;
@@ -535,7 +541,8 @@ export class VolumeLayer {
       uFilterMin: { value: 0 },
       uFilterMax: { value: 1 },
       uFilterEnable: { value: 0 },
-      uThreshold: { value: 0.15 },
+      uHideZero: { value: 0 },
+      uThreshold: { value: 0 },
       uOpacity: { value: 0.6 },
       uSteps: { value: 128 },
       uCutLo: { value: new THREE.Vector3(-domain.sx / 2, 0, -domain.sz / 2) },
@@ -576,6 +583,7 @@ export class VolumeLayer {
       "Contours",
       "LowAlpha",
       "LowThreshold",
+      "HideZero",
     ]) {
       uniforms[`uSurf${n}`] = { value: new Array(MAX_SURFACES).fill(0) };
     }
@@ -728,6 +736,7 @@ export class VolumeLayer {
       u.uSurfContours.value[i] = s.contours;
       u.uSurfLowAlpha.value[i] = s.lowAlpha ? 1 : 0;
       u.uSurfLowThreshold.value[i] = s.lowThreshold ?? 0.15;
+      u.uSurfHideZero.value[i] = s.hideZero ? 1 : 0;
       if (s.field) {
         if (s.binding === "slice") {
           u.uSliceField.value = s.field.texture;

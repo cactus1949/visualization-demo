@@ -190,13 +190,6 @@ const {
   setGlobeView,
 } = useGlobeChrome();
 
-const volumeLowAlpha = computed({
-  get: () => layers.volumeThreshold > 0,
-  set: (on: boolean) => {
-    layers.volumeThreshold = on ? 0.2 : 0;
-  },
-});
-
 const viewPresetItems = computed<ViewPresetItem[]>(() =>
   globeMode
     ? [
@@ -397,7 +390,8 @@ const layers = reactive({
   volume: false,
   volumeVar: "tke",
   volumeOpacity: 0.6,
-  volumeThreshold: 0.2,
+  volumeThreshold: 0,
+  volumeHideZero: false,
   volumeFilterMin: 0,
   volumeFilterMax: 1,
   /** When true, volume cut faces use the volume value window and transparent threshold. */
@@ -426,6 +420,7 @@ const slice = reactive({
   contours: 12,
   lowAlpha: false,
   lowThreshold: 0.15,
+  hideZero: false,
 });
 const section = reactive({
   enabled: false,
@@ -440,9 +435,11 @@ const section = reactive({
   max: 15,
   opacity: 0.85,
   contours: 12,
-  /** 低值透明: value-based alpha ramp, default on for sparse non-negative fields. */
+  /** 低值透明: value-based alpha ramp (legacy/API). */
   lowAlpha: false,
   lowThreshold: 0.15,
+  /** 隐藏零值: discard physical zero values (|v| <= 1e-6), default on for sparse fields. */
+  hideZero: false,
   points: [] as { x: number; z: number }[],
   box: {
     x0: 0, z0: 0, x1: 0, z1: 0,
@@ -1001,6 +998,7 @@ function syncStyleToSlice(): void {
   slice.contours = section.contours;
   slice.lowAlpha = section.lowAlpha;
   slice.lowThreshold = section.lowThreshold;
+  slice.hideZero = section.hideZero;
   slice.enabled = section.enabled && section.kind === "height";
 }
 function syncStyleToSection(): void {
@@ -1013,6 +1011,7 @@ function syncStyleToSection(): void {
   section.contours = slice.contours;
   section.lowAlpha = slice.lowAlpha;
   section.lowThreshold = slice.lowThreshold;
+  section.hideZero = slice.hideZero;
 }
 function levelsOf(): number[] {
   return manifest.value?.grid.levels_m ?? domain.levels;
@@ -1387,6 +1386,7 @@ function updateVolume(): void {
   volume.bind(b, vs.colormap, vs.min, vs.max);
   volume.material.uniforms.uOpacity.value = layers.volumeOpacity;
   volume.material.uniforms.uThreshold.value = layers.volumeThreshold;
+  volume.material.uniforms.uHideZero.value = layers.volumeHideZero ? 1 : 0;
   updateVolumeFilter();
   syncVolumeSlices();
   if (window.__atmosStatus) {
@@ -1408,14 +1408,14 @@ function syncVolumeSlices(): void {
     kind: "horizontal", binding: "slice", field: hb,
     min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
     filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
-    lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
+    lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold, hideZero: section.hideZero,
     height: slice.heightM / 1000,
   };
   const s: CompositeSurface | null = (vertOn || polyOn) ? {
     kind: "vertical", binding: "section", field: vb,
     min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
     filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
-    lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
+    lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold, hideZero: section.hideZero,
     normalX: section.kind === "lat" ? 0 : 1, normalZ: section.kind === "lat" ? 1 : 0,
     offset: section.offsetKm,
   } : null;
@@ -1458,7 +1458,7 @@ function syncVolumeSlices(): void {
           kind: "horizontal", binding: "section", field: bb,
           min: section.min, max: section.max, opacity: section.opacity, colormap: section.colormap,
           filterMin, filterMax, filterEnable: layers.filterSlices, contours: section.contours,
-          lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
+          lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold, hideZero: section.hideZero,
           height: hM / 1000, clipX0: x0, clipX1: x1, clipZ0: z0, clipZ1: z1,
         });
       }
@@ -3179,7 +3179,7 @@ function exposeApi(): void {
         if (data) {
           discarded = discardedFraction(data, {
             min: section.min, max: section.max,
-            lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold,
+            lowAlpha: section.lowAlpha, lowThreshold: section.lowThreshold, hideZero: section.hideZero,
           });
           if (discarded > 0.995) reasons.push("section-all-discarded");
         }
@@ -3714,7 +3714,8 @@ watch(
   (name) => {
     section.colormap = defaultColormap(name);
     section.autoRange = true;
-    section.lowAlpha = isSparseVar(name);
+    section.hideZero = isSparseVar(name);
+    section.lowAlpha = false;
     const [lo, hi] = autoRange(name, section.colormap);
     section.min = lo;
     section.max = hi;
@@ -3741,6 +3742,7 @@ watch(
     section.contours,
     section.lowAlpha,
     section.lowThreshold,
+    section.hideZero,
   ],
   updateSection,
 );
@@ -3815,13 +3817,14 @@ watch(
 );
 watch(() => [layers.ground, layers.groundVar, layers.groundFilterMin, layers.groundFilterMax], updateGround);
 watch(
-  () => [layers.volumeVar, layers.volumeOpacity, layers.volumeThreshold],
+  () => [layers.volumeVar, layers.volumeOpacity, layers.volumeThreshold, layers.volumeHideZero],
   updateVolume,
 );
 watch(
   () => layers.volumeVar,
   (name) => {
     if (name !== volumeFilterVariable.value) resetVolumeFilter(name);
+    layers.volumeHideZero = isSparseVar(name);
     layers.cutLowAlpha = isSparseVar(name);
     layers.cutLowThreshold = 0.15;
   },
@@ -4077,14 +4080,12 @@ onBeforeUnmount(() => {
       :ground-units="groundUnits"
       :volume-bounds="volumeBounds"
       :volume-units="unitsOf(layers.volumeVar)"
-      :volume-low-alpha="volumeLowAlpha"
       :volume-notice="volumeDataHint ?? volumeThresholdWarning"
       @toggle-open="elementRailOpen = !elementRailOpen"
       @toggle-ground="onGroundToggle"
       @select-ground-var="onGroundVar"
       @toggle-volume="onVolumeToggle"
       @select-volume-var="onVolumeVar"
-      @update:volume-low-alpha="volumeLowAlpha = $event"
       @toggle-particles="onParticleToggle"
       @set-particle-height-range="setParticleHeightRange"
       @toggle-cesium="onCesiumToggle"

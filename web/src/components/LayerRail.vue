@@ -24,6 +24,7 @@ export interface LayerRailLayers {
   volume: boolean;
   volumeVar: string;
   volumeOpacity: number;
+  volumeHideZero: boolean;
   volumeFilterMin: number;
   volumeFilterMax: number;
 }
@@ -41,7 +42,6 @@ defineProps<{
   groundUnits: string;
   volumeBounds: readonly [number, number];
   volumeUnits: string;
-  volumeLowAlpha: boolean;
   volumeNotice: string | null;
 }>();
 
@@ -51,7 +51,6 @@ const emit = defineEmits<{
   "select-ground-var": [name: string];
   "toggle-volume": [];
   "select-volume-var": [name: string];
-  "update:volumeLowAlpha": [on: boolean];
   "toggle-particles": [];
   "set-particle-height-range": [minM: number, maxM: number];
   "toggle-cesium": [on: boolean];
@@ -179,12 +178,7 @@ const layerExpanded = reactive({
             </div>
 
             <div class="check-row">
-              <el-checkbox
-                :model-value="volumeLowAlpha"
-                @update:model-value="emit('update:volumeLowAlpha', Boolean($event))"
-              >
-                低值透明
-              </el-checkbox>
+              <el-checkbox v-model="layers.volumeHideZero">隐藏零值</el-checkbox>
             </div>
 
             <div v-if="volumeNotice" class="panel-warn">{{ volumeNotice }}</div>

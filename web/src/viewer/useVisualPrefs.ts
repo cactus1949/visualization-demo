@@ -26,6 +26,7 @@ export interface VisualPrefsDeps {
     buildingTintStrength: number;
     volumeOpacity: number;
     volumeThreshold: number;
+    volumeHideZero: boolean;
     cutLowAlpha: boolean;
     cutLowThreshold: number;
     filterSlices: boolean;
@@ -39,6 +40,7 @@ export interface VisualPrefsDeps {
     opacity: number;
     lowAlpha: boolean;
     lowThreshold: number;
+    hideZero: boolean;
     contours: number;
     offsetKm: number;
     box: { heightMinM: number; heightMaxM: number; stepLevels: number };
@@ -81,7 +83,7 @@ export function useVisualPrefs(deps: VisualPrefsDeps) {
       buildingTintEnabled: layers.buildingTintEnabled,
       buildingTintStrength: layers.buildingTintStrength,
       volumeOpacity: layers.volumeOpacity,
-      volumeThreshold: layers.volumeThreshold,
+      volumeHideZero: layers.volumeHideZero,
       cutLowAlpha: layers.cutLowAlpha,
       cutLowThreshold: layers.cutLowThreshold,
       filterSlices: layers.filterSlices,
@@ -97,8 +99,7 @@ export function useVisualPrefs(deps: VisualPrefsDeps) {
         min: section.min,
         max: section.max,
         opacity: section.opacity,
-        lowAlpha: section.lowAlpha,
-        lowThreshold: section.lowThreshold,
+        hideZero: section.hideZero,
         contours: section.contours,
         heightM: slice.heightM,
         offsetKm: section.offsetKm,
@@ -121,7 +122,7 @@ export function useVisualPrefs(deps: VisualPrefsDeps) {
     if (prefs.buildingTintEnabled !== undefined) layers.buildingTintEnabled = prefs.buildingTintEnabled;
     if (prefs.buildingTintStrength !== undefined) layers.buildingTintStrength = prefs.buildingTintStrength;
     if (prefs.volumeOpacity !== undefined) layers.volumeOpacity = prefs.volumeOpacity;
-    if (prefs.volumeThreshold !== undefined) layers.volumeThreshold = prefs.volumeThreshold;
+    if (prefs.volumeHideZero !== undefined) layers.volumeHideZero = prefs.volumeHideZero;
     if (prefs.cutLowAlpha !== undefined) layers.cutLowAlpha = prefs.cutLowAlpha;
     if (prefs.cutLowThreshold !== undefined) layers.cutLowThreshold = prefs.cutLowThreshold;
     if (prefs.filterSlices !== undefined) layers.filterSlices = prefs.filterSlices;
@@ -138,8 +139,7 @@ export function useVisualPrefs(deps: VisualPrefsDeps) {
       if (style.min !== undefined) section.min = style.min;
       if (style.max !== undefined) section.max = style.max;
       if (style.opacity !== undefined) section.opacity = style.opacity;
-      if (style.lowAlpha !== undefined) section.lowAlpha = style.lowAlpha;
-      if (style.lowThreshold !== undefined) section.lowThreshold = style.lowThreshold;
+      if (style.hideZero !== undefined) section.hideZero = style.hideZero;
       if (style.contours !== undefined) section.contours = style.contours;
       if (style.heightM !== undefined) slice.heightM = style.heightM;
       if (style.offsetKm !== undefined) section.offsetKm = style.offsetKm;
@@ -173,7 +173,8 @@ export function useVisualPrefs(deps: VisualPrefsDeps) {
     layers.buildingTintEnabled = false;
     layers.buildingTintStrength = 0.6;
     layers.volumeOpacity = 0.6;
-    layers.volumeThreshold = 0.2;
+    layers.volumeThreshold = 0;
+    layers.volumeHideZero = false;
     layers.cutLowAlpha = false;
     layers.cutLowThreshold = 0.15;
     layers.filterSlices = true;
@@ -189,6 +190,7 @@ export function useVisualPrefs(deps: VisualPrefsDeps) {
     section.contours = 12;
     section.lowAlpha = false;
     section.lowThreshold = 0.15;
+    section.hideZero = false;
     slice.heightM = 150;
     section.offsetKm = 0;
     section.box.heightMinM = 0;

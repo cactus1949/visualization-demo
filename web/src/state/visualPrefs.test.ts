@@ -74,4 +74,24 @@ describe("visual preference storage", () => {
     assert.equal(loaded.prefs?.theme, "dark");
     assert.equal(loaded.prefs?.volumeOpacity, 0.6);
   });
+
+  it("ignores legacy volumeThreshold and section lowAlpha while preserving hideZero", () => {
+    const read = parseVisualPrefs(
+      JSON.stringify({
+        v: 1,
+        volumeOpacity: 1.5,
+        volumeThreshold: 0.2,
+        volumeHideZero: true,
+        sectionStyle: { lowAlpha: true, lowThreshold: 0.15, hideZero: true },
+      }),
+      maps,
+    );
+    assert.equal(read.message, null);
+    assert.equal(read.prefs?.volumeOpacity, 1.5);
+    assert.equal(read.prefs?.volumeHideZero, true);
+    assert.equal(read.prefs?.sectionStyle?.hideZero, true);
+    assert.equal("volumeThreshold" in (read.prefs ?? {}), false);
+    assert.equal("lowAlpha" in (read.prefs?.sectionStyle ?? {}), false);
+    assert.equal("lowThreshold" in (read.prefs?.sectionStyle ?? {}), false);
+  });
 });
